@@ -50,14 +50,17 @@ if (app.Environment.IsEnvironment("Testing"))
         "The requested test presentation does not exist."));
 }
 
+// Captured before Run(): the host (and its IHostEnvironment) is disposed by the time the filter runs.
+var isTesting = app.Environment.IsEnvironment("Testing");
 try
 {
     app.Run();
 }
-catch (OptionsValidationException ex)
+catch (OptionsValidationException ex) when (!isTesting)
 {
-    // Startup validation (ValidateOnStart) — exit 1 naming the missing setting. The host logger is
-    // already disposed by the time the exception reaches here, so write to stderr directly.
+    // Startup validation (ValidateOnStart) — exit 1 naming the missing setting instead of an unhandled
+    // exception crash. The host logger is already disposed here, so write to stderr directly. Under
+    // WebApplicationFactory ("Testing") the exception must propagate so StartupTests can observe it.
     Console.Error.WriteLine($"Configuration invalid: {string.Join("; ", ex.Failures)}");
     return 1;
 }
