@@ -1,10 +1,12 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.Extensions.Options;
 using PresenterAi.Api.Endpoints;
 using PresenterAi.Api.Errors;
 using PresenterAi.Contracts;
 using PresenterAi.Domain.Errors;
+using PresenterAi.Infrastructure;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,6 +19,8 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Configuration(context.Configuration)
     .ReadFrom.Services(services)
     .WriteTo.Console());
+
+builder.Services.AddUpstreamOptions(builder.Configuration);
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -46,6 +50,18 @@ if (app.Environment.IsEnvironment("Testing"))
         "The requested test presentation does not exist."));
 }
 
-app.Run();
+try
+{
+    app.Run();
+}
+catch (OptionsValidationException ex)
+{
+    // Startup validation (ValidateOnStart) — exit 1 naming the missing setting. The host logger is
+    // already disposed by the time the exception reaches here, so write to stderr directly.
+    Console.Error.WriteLine($"Configuration invalid: {string.Join("; ", ex.Failures)}");
+    return 1;
+}
+
+return 0;
 
 public partial class Program;

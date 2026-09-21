@@ -12,4 +12,21 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
 
         createClient.Should().NotThrow();
     }
+
+    [Fact]
+    public void Missing_upstream_key_fails_startup()
+    {
+        using var missingKey = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Upstream:Key"] = ""
+            }
+        };
+
+        var createClient = () => missingKey.CreateClient();
+
+        createClient.Should().Throw<Exception>()
+            .Which.ToString().Should().Contain("Missing required setting: Upstream:Key");
+    }
 }
