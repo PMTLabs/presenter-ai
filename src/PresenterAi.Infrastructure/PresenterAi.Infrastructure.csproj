@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../PresenterAi.Application/PresenterAi.Application.csproj" />
+  </ItemGroup>
+</Project>

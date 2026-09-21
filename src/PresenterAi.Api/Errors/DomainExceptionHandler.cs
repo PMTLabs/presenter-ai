@@ -1,0 +1,56 @@
+using System.Diagnostics;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using PresenterAi.Contracts;
+using PresenterAi.Domain.Errors;
+
+namespace PresenterAi.Api.Errors;
+
+public sealed class DomainExceptionHandler(ILogger<DomainExceptionHandler> logger) : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext httpContext,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        var (code, status, detail, extensions) = exception is DomainException domainException
+            ? (domainException.Code, domainException.Status, domainException.Detail, domainException.Extensions)
+            : (ErrorCodes.InternalError, StatusCodes.Status500InternalServerError,
+                "An unexpected error occurred. Please contact support with the traceId.",
+                (IReadOnlyDictionary<string, object?>?)null);
+        var traceId = Activity.Current?.Id ?? httpContext.TraceIdentifier;
+        var title = ErrorCodes.Catalogue.TryGetValue(code, out var entry)
+            ? entry.Title
+            : ErrorCodes.Catalogue[ErrorCodes.InternalError].Title;
+
+        if (exception is not DomainException)
+            logger.LogError(exception, "Unhandled exception for traceId {TraceId}", traceId);
+
+        if (Activity.Current?.Id is { } activityId)
+            httpContext.Response.Headers["traceparent"] = activityId;
+
+        var problem = new ProblemDetails
+        {
+            Type = $"https://presenter-ai.dev/errors/{code}",
+            Title = title,
+            Status = status,
+            Detail = detail,
+            Instance = httpContext.Request.Path
+        };
+        problem.Extensions["code"] = code;
+        problem.Extensions["traceId"] = traceId;
+        if (extensions is not null)
+        {
+            foreach (var extension in extensions)
+                problem.Extensions[extension.Key] = extension.Value;
+        }
+
+        httpContext.Response.StatusCode = status;
+        httpContext.Response.ContentType = "application/problem+json";
+        await System.Text.Json.JsonSerializer.SerializeAsync(
+            httpContext.Response.Body,
+            problem,
+            cancellationToken: cancellationToken);
+        return true;
+    }
+}
