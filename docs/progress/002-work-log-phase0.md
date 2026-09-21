@@ -176,3 +176,33 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   `dotnet publish -o <scratch>` copy with `--contentRoot src/PresenterAi.Api` while agents build.
 - Chrome run (AC4 proper: page on 47913, `→`/Space/Esc, `__presenterDebug`, usage pill) not yet done — the
   Claude-in-Chrome extension was not connected in this session.
+
+### T12 — `presenter-cli smoke` / `run` (pi gpt-5.6-luna:high, restarted once after a termflow crash) — done
+
+- `src/PresenterAi.Cli/{Program,SmokeCommand,RunCommand}.cs`: in-process `Program.RunAsync(args, IConfiguration,
+  out, err, ct)`; configuration from environment, user-secrets (`presenter-ai-cli`) and `--Upstream:*`/`--Presenter:*`/
+  `--Content:*` command-line settings; exit codes 0 / 1 (upstream or run failure) / 2 (usage, configuration).
+- The `Presenter` factory moved out of `AddPresenterBridge` into `DependencyInjection.AddPresenter()` (Infrastructure);
+  the API registers it in `Program.cs` and the CLI composes `AddUpstreamOptions → AddFileContent → AddLiveSessions →
+  AddPresenter` — one construction path for both hosts.
+- `tests/PresenterAi.Cli.Tests/CliTests.cs` (4): provider selection proven by distinct `Upstream:Model` /
+  `Upstream:Fallback:Model` values observed in the fake's `session.start`; `run sample --stop-after-slide 2` against
+  `FakeLiveServer`; missing key → one stderr line, exit 2; unknown provider → exit 2. Cli ×3 green, solution
+  47 / 30 / 44 / 4. Commit `93f098a`.
+
+### AC3 — live smoke through the .NET CLI (Claude) — done
+
+- CLI user-secrets set from `.env` by a non-echoing script (`Upstream:Endpoint`, `Upstream:Key`,
+  `Upstream:Fallback:Key`); the CLI ran from a `dotnet publish` copy so the concurrent T13 agent builds could not
+  kill it.
+- `smoke --provider azure`: `session.started` +698 ms, 87 audio deltas, 3.1 s voiced (first at +3,954 ms),
+  transcript `Presenter AI smoke test successful, one two three four five.`, `closed reason=client_request`,
+  **`usage.seconds=9`**, exit 0.
+- `smoke --provider openai`: `session.started` +1,525 ms, 85 deltas, 3.4 s voiced (first at +4,082 ms), same
+  transcript, `closed reason=close_requested`, **`usage.seconds=8`**, exit 0.
+- `run ricoh-delivery-overview --stop-after-slide 2` (content root = repo root, the CLI default): slide 1 → 2 at
+  +37.9 s, slide 3 announced at +100.0 s → `stop-after-slide reached; ending`, `MODEL:` transcripts and the `#`/`.`
+  audio bars per slide, `usage seconds=59.2` at +60.5 s, `closed reason=client_request seconds=99`, exit 0.
+- Note: `--content-root` is the *repository* root for the file store (`Content:RootDir` defaults to `.` in the CLI,
+  unlike the API's `../../` relative to its content root) — passing `src/PresenterAi.Api` fails to find
+  `presentations/`.
