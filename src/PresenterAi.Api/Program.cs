@@ -1,8 +1,14 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
+using PresenterAi.Api.Auth;
 using PresenterAi.Api.Endpoints;
+using PresenterAi.Api.Realtime;
+using PresenterAi.Infrastructure.Content;
 using PresenterAi.Api.Errors;
 using PresenterAi.Contracts;
 using PresenterAi.Domain.Errors;
@@ -21,6 +27,15 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
     .WriteTo.Console());
 
 builder.Services.AddUpstreamOptions(builder.Configuration);
+builder.Services.AddFileContent(builder.Configuration, builder.Environment.ContentRootPath);
+builder.Services.AddLiveSessions();
+builder.Services.AddPresenterBridge();
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = DevAuthHandler.SchemeName;
+    options.DefaultChallengeScheme = DevAuthHandler.SchemeName;
+}).AddScheme<AuthenticationSchemeOptions, DevAuthHandler>(DevAuthHandler.SchemeName, _ => { });
+builder.Services.AddAuthorization();
 
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -38,8 +53,59 @@ builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document,
 
 var app = builder.Build();
 app.UseExceptionHandler();
+app.UseWebSockets();
+app.UseAuthentication();
+app.UseAuthorization();
+
+var contentOptions = app.Services.GetRequiredService<IOptions<ContentOptions>>().Value;
+var rootDir = Path.GetFullPath(contentOptions.RootDir, app.Environment.ContentRootPath);
+var webRoot = Path.GetFullPath(contentOptions.WebRoot, app.Environment.ContentRootPath);
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(Path.Combine(rootDir, "decks")),
+    RequestPath = "/decks",
+    ServeUnknownFileTypes = true
+});
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(webRoot),
+    OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache"
+});
+
 app.MapHealthEndpoints();
+app.MapPresentationEndpoints();
+app.MapConfigEndpoints();
+app.MapPresenterBridge();
 app.MapOpenApi("/openapi/v1.json");
+app.MapGet("/decks/{**path}", async (HttpContext context) =>
+{
+    var path = context.Request.Path.Value ?? "/decks";
+    context.Response.StatusCode = StatusCodes.Status404NotFound;
+    await context.Response.WriteAsync($"Deck not found: {path["/decks".Length..]}. Put your deck under decks/<name>/.");
+}).ExcludeFromDescription();
+app.MapFallback(async context =>
+{
+    var path = context.Request.Path.Value ?? string.Empty;
+    if (path.StartsWith("/decks", StringComparison.Ordinal))
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        await context.Response.WriteAsync($"Deck not found: {path["/decks".Length..]}. Put your deck under decks/<name>/.");
+        return;
+    }
+
+    if (path.StartsWith("/api/", StringComparison.Ordinal)
+        || path == "/ws"
+        || path.StartsWith("/openapi/", StringComparison.Ordinal)
+        || path == "/health")
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+
+    context.Response.Headers.CacheControl = "no-cache";
+    context.Response.ContentType = "text/html; charset=utf-8";
+    await context.Response.SendFileAsync(Path.Combine(webRoot, "index.html"));
+}).ExcludeFromDescription();
 
 if (app.Environment.IsEnvironment("Testing"))
 {

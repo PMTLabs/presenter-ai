@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PresenterAi.Application.Content;
+using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
 
 namespace PresenterAi.Infrastructure;
@@ -28,6 +30,25 @@ public static class DependencyInjection
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
             UpstreamRoutes.From(serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamOptions>>().Value));
 
+        return services;
+    }
+
+    public static IServiceCollection AddFileContent(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        string contentRootPath)
+    {
+        services.AddOptions<ContentOptions>()
+            .Bind(configuration.GetSection("Content"));
+        services.AddSingleton(serviceProvider =>
+        {
+            var options = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ContentOptions>>().Value;
+            return Path.GetFullPath(options.RootDir, contentRootPath);
+        });
+        services.AddSingleton<IPresentationRepository>(serviceProvider =>
+            new FilePresentationRepository(serviceProvider.GetRequiredService<string>()));
+        services.AddSingleton<IDeckStore>(serviceProvider =>
+            new FileDeckStore(serviceProvider.GetRequiredService<string>()));
         return services;
     }
 

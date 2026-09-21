@@ -12,6 +12,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         builder.UseEnvironment("Testing");
         builder.UseSetting("Upstream:Endpoint", "https://api.openai.com");
         builder.UseSetting("Upstream:Key", "test");
+        builder.UseSetting("Auth:Dev:Enabled", "true");
+        builder.UseSetting("Auth:Dev:UserId", "test-user");
+        builder.UseSetting("Auth:Dev:Email", "test@presenter-ai.local");
+        builder.UseSetting("Content:RootDir", FindRepositoryRoot());
 
         if (Overrides is not null)
         {
@@ -20,5 +24,21 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 builder.UseSetting(setting.Key, setting.Value);
             }
         }
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "PresenterAi.slnx")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("PresenterAi.slnx was not found above the test assembly.");
     }
 }

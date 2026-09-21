@@ -22,8 +22,11 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
             .OfType<RouteEndpoint>()
             .Select(endpoint => endpoint.RoutePattern.RawText)
             .Where(template => !string.IsNullOrWhiteSpace(template))
+            .Select(template => template!.TrimEnd('/'))
             .Where(template => !template!.StartsWith("/openapi/", StringComparison.Ordinal))
             .Where(template => !template!.StartsWith("/__test/", StringComparison.Ordinal))
+            .Where(template => template is not "/ws" and not "{*path:nonfile}")
+            .Where(template => !template!.StartsWith("/decks/", StringComparison.Ordinal))
             .ToArray();
 
         routeTemplates.Should().NotBeEmpty();

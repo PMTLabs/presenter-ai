@@ -28,6 +28,8 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
     public int DeltaGapMs { get; set; } = 20;
 
+    public int StartDelayMs { get; set; }
+
     public bool IgnoreClose { get; set; }
 
     public int Port { get; private set; }
@@ -52,6 +54,9 @@ public sealed class FakeLiveServer : IAsyncDisposable
     public static async Task<FakeLiveServer> StartAsync(int audioDeltasPerAppend = 3, int deltaGapMs = 20)
     {
         var builder = WebApplication.CreateSlimBuilder();
+        // Referencing this fixture from API tests makes the API appsettings visible to the slim host;
+        // remove those ambient endpoints so the explicit ephemeral listener remains the only address.
+        builder.Configuration.Sources.Clear();
         builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
         var app = builder.Build();
         var server = new FakeLiveServer(app, 0)
@@ -159,6 +164,11 @@ public sealed class FakeLiveServer : IAsyncDisposable
         switch (type)
         {
             case "session.start":
+                if (StartDelayMs > 0)
+                {
+                    await Task.Delay(StartDelayMs, cancellationToken);
+                }
+
                 var session = message["session"] as JsonObject;
                 if (session?["model"]?.GetValue<string>() == "bad-model")
                 {
@@ -207,6 +217,12 @@ public sealed class FakeLiveServer : IAsyncDisposable
             case "session.close":
                 if (!IgnoreClose)
                 {
+                    await SendAsync(socket, new JsonObject
+                    {
+                        ["type"] = "session.usage.updated",
+                        ["usage"] = new JsonObject { ["seconds"] = 7 },
+                        ["context_window"] = new JsonObject { ["usage_ratio"] = 0.1 }
+                    }, cancellationToken);
                     await SendAsync(socket, new JsonObject
                     {
                         ["type"] = "session.closed",
