@@ -1,0 +1,39 @@
+# 001 — External plan review: plan 002 (phase 0a .NET core port)
+
+**Reviewer:** `pi --model openai-codex/gpt-5.6-sol:medium`, review-only (no edits, no tests, no server, no `.env`), 2026-09-21.
+**Subject:** `docs/plan/002-phase0-dotnet-core-port-api-web.md` (draft before fold-in) against its brief, `docs/research/002-phase-0-platform-architecture.md`, the Node code and InkSpoke conventions.
+**Outcome:** all 9 findings verified against the code by the orchestrator (finding 4's test count: `node --test` reports 52 = 51 top-level + 1 subtest) and folded into the plan; see the plan's approval log.
+
+---
+
+# Summary
+
+Not ready. The plan is directionally strong and covers all six acceptance criteria, but its frozen-wire claim is internally wrong, several required hops have no discriminating test, and the .NET concurrency/timing design is not implementation-safe yet. I inspected all cited Node server/web/test/script files, `package.json`, the work log/design source, and the requested InkSpoke files; I did not open `.env`, modify the project, or run tests/server.
+
+# Findings
+
+1. **C — The proposed “byte-identical” start command is not the Node protocol.** Plan `docs/plan/002-phase0-dotnet-core-port-api-web.md:167-177` says identical and sends `{type:'start', id}`. Node sends `{type:'start', presentation: ...}` in `src/web/app.js:305`, `scripts/headless-run.mjs:50`, and `test/integration.test.js:97`; the bridge reads `msg.presentation` at `src/server/index.js:171-172`. A .NET implementation following the diagram will silently start `sample` (`?? 'sample'`) and can still pass a sample-only test. **Fix:** freeze canonical JSON examples for every command/message, use `presentation`, and make an old-client contract test send a non-sample id and assert that exact deck starts.
+
+2. **C — “HTTP (unchanged shapes)” is false.** Plan `:162-165` adds `upstreamHost` to config and omits fields from the documented detail/list shapes. Node returns config `{model,voice,advanceSilenceMs}` (`src/server/index.js:73-75`), list rows include `deck,driver` (`:26-35`), and detail includes `id,hasContext` (`:64-66`). **Fix:** either reproduce exact Node DTOs and golden-test their JSON, or explicitly version/document the intentional HTTP changes; do not call them unchanged.
+
+3. **C — The “only three parallel paths / one send path” conclusion is unsupported.** Plan `:190-192` greps only the transport spelling in `live-client.js`. Behavioral append/advance paths also include initial/next-part (`src/server/presenter.js:220-253`), auto-advance (`:306-318`), nudge (`:321-329`), wrap-up (`:332-349`), manual next/prev/goto (`:362-391`), and pause/resume (`:394-418`); browser buttons/keys and deck navigation send next/goto (`src/web/app.js:60,322,339`). **Fix:** diagram and test each producer-to-serialized-upstream hop, including timer/manual races, rather than counting the single low-level sender.
+
+4. **C — Two as-built/convention claims are factually wrong.** There are 51 top-level Node cases (1+11+5+18+7+9), not 52 as claimed at plan `:47,59` and work log `docs/progress/001-work-log.md:9,33`. Also plan `:258-259` calls NSubstitute a copy of InkSpoke’s pattern, but InkSpoke uses Moq 4.20.72 in all three test projects (for example `tests/InkSpoke.Api.Tests/InkSpoke.Api.Tests.csproj:34`). The web key citation is also wrong: plan `:91` points to `src/web/app.js:243`, where `focusKeys` begins; key handling is `:330-359`. **Fix:** say “all 51 existing cases plus new tests (≥52)” and choose/document either true Moq convention or deliberate NSubstitute divergence; correct citations.
+
+5. **A — Named failure oracles were added inconsistently.** T2/T4–T10/T12–T14 name automated tests, but T1 says n/a (`:251`), T3/T16 merely say CI (`:270,395`), and T11/T15 are manual (`:347,386`). T12’s only named test covers `run`, not `smoke`, provider selection, speech detection, or `usage.seconds` (`:349-355`). T6’s named `Silence_is_not_voiced` lets an `IsVoiced => false` implementation pass despite breaking advancement (`:290-294`). **Fix:** add named repository-secret, compose/CI-definition, old-UI protocol, Chrome harness, wiring, CLI-smoke, and voiced-threshold tests; name both positive and negative AudioLevel cases. Keep live checks as additional evidence, not the sole oracle.
+
+6. **B — T7’s pump oracle identifies its subject by too few fields.** `Pump_fills_gaps_with_silence` (`:306-309`) can pass an implementation that sends silence every tick regardless of real microphone audio; the Node algorithm’s contract is elapsed time minus `sentMs` (`src/server/live-client.js:70-85,243-252`). **Fix:** assert exact 960-byte PCM silence, no fill within 120 ms slack after real audio, bounded catch-up after delayed ticks, and monotonic `SilenceMs`; a continuously-silent wrong pump must fail.
+
+7. **D — Real-time .NET hazards remain unspecified/untested.** R1–R3 (`:228-233`) do not define monotonic `TimeProvider.GetTimestamp` accounting, `PeriodicTimer(TimeProvider)` disposal/cancellation under fake time, atomic updates to `sentMs`, or how timer/upstream/bridge callbacks enter the one Presenter channel. Nor do they cover `ClientWebSocket` fragmented receive assembly, exactly-one concurrent send/receive rule, close-vs-receive races, or atomic ownership when two Kestrel sockets connect. Drop-oldest output audio can create audible discontinuities and is not Node parity. **Fix:** specify channel topology/ownership, a single upstream send loop, cancellation lifecycle, monotonic clock, Interlocked/lock rules, fragment assembly, and race/backpressure tests (simultaneous clients, close during send, timer+goto, mic flood, delayed pump).
+
+8. **D — Required wiring is missing or contradictory.** T13 generates from `/openapi/v1.json` (`:361-367`), but T2/T10 never add/map OpenAPI. T1 ignores `appsettings.Development.json` (`:243-247`) while T11 proposes storing `Content:WebRoot` in that file (`:341-343`). React deep-route SPA fallback is not specified. **Fix:** add OpenAPI registration/mapping and a generation drift test; put non-secret web-root config in tracked config/run settings (local secrets separately); add and test fallback-to-index for `/present/:id`.
+
+9. **D — Scope/traceability needs an explicit matrix.** All ACs have plausible work (AC1 T1; AC2 T2/T4–T10; AC3 T7/T9/T12; AC4 T10/T11; AC5 T13–T15; AC13 T3/T16), but T3/T13 are not labelled and T16’s branch protection exceeds the brief. Conversely, claiming all design steps 0.1–0.4 (`:24`) silently omits design-source 0.3 SSE plumbing and 0.4 Sessions (`docs/research/002-phase-0-platform-architecture.md:226-227`). Mic-denial continuation has no explicit test despite brief `:39-40`. **Fix:** add an AC↔task/test table; assign T3→AC13 and T13→AC5, add mic-denied/reconnect tests, move branch protection to an optional improvement, and either add SSE/Sessions or explicitly defer them and stop claiming complete 0.1–0.4 coverage.
+
+# Verified facts
+
+- Core source citations for Presenter (`src/server/presenter.js:23-32,100,130,204`), LiveSession (`live-client.js:23-25,65,73`), parser (`script-parser.js:5,9,16,113`), prompt builders, config resolution, API/bridge ranges, WebSocket reconnect (`src/web/app.js:109-157`), and deck adapters (`deck-driver.js:4,35`) are accurate.
+- Actual suites are config 11, parser 9, prompt 7, audio 1, presenter 18, integration 5; package test command is exactly `node --test "test/*.test.js"` (`package.json:13`).
+- InkSpoke really uses `shared/site/admin`, endpoint-group wiring, pinned bun 1.3.14 CI, React 18.3/Vite 6/Tailwind 3.4, and the three cited admin components; Presenter’s chosen `shared/app/admin` and React 19 are brief-driven deviations.
+
+IS THIS PLAN READY TO APPROVE? **Blockers:** findings 1, 3, 5–9. **Improvements:** correct factual/convention drift in 2 and 4.

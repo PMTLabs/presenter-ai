@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Presenter AI</title>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">Presenter<span>AI</span></div>
+  <label class="field">
+    <span>Presentation</span>
+    <select id="presentation"></select>
+  </label>
+  <div class="controls">
+    <button id="btn-start" class="primary" title="Start the live session (S)">Start</button>
+    <button id="btn-pause" disabled title="Pause / resume (Space)">Pause</button>
+    <button id="btn-prev" disabled title="Previous slide (←)">◀ Prev</button>
+    <button id="btn-next" disabled title="Next slide (→)">Next ▶</button>
+    <button id="btn-mute" disabled title="Mute / unmute microphone (M)">Mute</button>
+    <button id="btn-end" class="danger" disabled title="End the session (Esc)">End</button>
+  </div>
+  <div class="status">
+    <span class="pill" id="pill-state" data-state="idle">idle</span>
+    <span class="pill" id="pill-slide">slide –/–</span>
+    <span class="pill" id="pill-usage" title="Cumulative session seconds (billed)">0 s</span>
+    <span class="pill" id="pill-conn" data-ok="0">server: connecting…</span>
+    <span class="meter" title="Microphone level"><i id="mic-level"></i></span>
+    <span class="pill subtle" id="pill-buffer" title="Audio queued for playback">buf 0 ms</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="frame">
+      <iframe id="deck" title="Slide deck" tabindex="-1"></iframe>
+    </div>
+    <div class="stage-foot">
+      <span id="deck-info">No deck loaded.</span>
+      <span class="keys">Space pause · ← → slides · M mute · Esc end</span>
+    </div>
+  </section>
+  <aside class="side">
+    <div class="panel">
+      <h2>Transcript</h2>
+      <div id="transcript" class="scroll"></div>
+    </div>
+    <div class="panel small">
+      <h2>Log</h2>
+      <div id="log" class="scroll mono"></div>
+    </div>
+  </aside>
+</main>
+<div id="keys" tabindex="0" class="keys-anchor" aria-hidden="true"></div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

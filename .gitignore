@@ -1,0 +1,54 @@
+## Secrets — never commit real env or local settings files.
+## Only .env.example (placeholder template) is tracked.
+.env
+.env.*
+!.env.example
+**/appsettings.Local.json
+**/appsettings.local.json
+*.key
+*.pem
+
+## Local runtime data (uploads, file store) — plan 003 IFileStore default root
+data/
+
+## .NET / C#
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+TestResults/
+publish/
+artifacts/
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+## Node / Web
+node_modules/
+dist/
+web/**/.vite/
+*.tsbuildinfo
+# Keep the committed bun lockfile (CI runs `bun install --frozen-lockfile`).
+!web/bun.lock
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Logs / temp
+*.log
+hooks.log
+*.pid
+*.tmp
+*.bak
+
+## Agent / local state
+.claude/
+.ragsearch/
+**/claude.local.md
