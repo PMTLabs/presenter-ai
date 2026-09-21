@@ -330,7 +330,9 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
   `data/`, `bin/ obj/ node_modules/ dist/ TestResults/ .vs/`, `*.pid`. `appsettings.Development.json` is
   **tracked** and must hold only non-secret settings (`Content:WebRoot`, ports, log levels); secrets go to
   `dotnet user-secrets`. `scripts/secrets-guard.sh` fails when `git ls-files` matches `^\.env$`,
-  `appsettings\.Local\.json`, or any tracked file contains `UPSTREAM_KEY=` / `"Key": "` with a non-empty value.
+  `appsettings\.Local\.json`, or any tracked file assigns a real-looking value to a setting whose name ends in
+  `key`/`secret`/`token`/`password` (any case, any whitespace around `=`/`:`, JSON/YAML/env/CLI spellings — the
+  class is stated in the script header and pinned by `scripts/secrets-guard.selftest.sh`; review round 1 F1).
   First commit; `git remote add origin https://github.com/PMTLabs/presenter-ai.git`; push `master`; create and
   push `develop`; branch `feature/002-dotnet-core-port`.
 - **Verify:** `scripts/secrets-guard.sh` exits 0; `gh repo view PMTLabs/presenter-ai --json defaultBranchRef`

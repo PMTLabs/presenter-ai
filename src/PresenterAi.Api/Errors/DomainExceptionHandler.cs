@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using PresenterAi.Contracts;
@@ -18,16 +17,13 @@ public sealed class DomainExceptionHandler(ILogger<DomainExceptionHandler> logge
             : (ErrorCodes.InternalError, StatusCodes.Status500InternalServerError,
                 "An unexpected error occurred. Please contact support with the traceId.",
                 (IReadOnlyDictionary<string, object?>?)null);
-        var traceId = Activity.Current?.Id ?? httpContext.TraceIdentifier;
+        var traceId = ProblemTrace.Apply(httpContext);
         var title = ErrorCodes.Catalogue.TryGetValue(code, out var entry)
             ? entry.Title
             : ErrorCodes.Catalogue[ErrorCodes.InternalError].Title;
 
         if (exception is not DomainException)
             logger.LogError(exception, "Unhandled exception for traceId {TraceId}", traceId);
-
-        if (Activity.Current?.Id is { } activityId)
-            httpContext.Response.Headers["traceparent"] = activityId;
 
         var problem = new ProblemDetails
         {

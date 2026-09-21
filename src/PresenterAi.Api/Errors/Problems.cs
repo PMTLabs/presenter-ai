@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using PresenterAi.Contracts;
 
 namespace PresenterAi.Api.Errors;
@@ -13,7 +12,7 @@ public static class Problems
         var title = ErrorCodes.Catalogue.TryGetValue(code, out var entry)
             ? entry.Title
             : ErrorCodes.Catalogue[ErrorCodes.InternalError].Title;
-        var traceId = Activity.Current?.Id ?? context.TraceIdentifier;
+        var traceId = ProblemTrace.Apply(context);
         return Results.Problem(
             type: $"https://presenter-ai.dev/errors/{code}",
             title: title,

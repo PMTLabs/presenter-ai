@@ -13,7 +13,9 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   build/IDE/node output, `*.pid`, `*.log`, `.claude/`; `!web/bun.lock` re-included for the future workspace),
   `.gitattributes` (LF in repo, `*.sh` LF, `*.ps1|cmd|bat` CRLF, binaries), `.editorconfig`,
   `scripts/secrets-guard.sh` (fails on tracked `.env`/`.env.*`/`appsettings.Local.json`/`*.key`/`*.pem` and on
-  real-looking `UPSTREAM_KEY=` / `FALLBACK_OPENAI_KEY=` / `"Key": "…"` values; placeholders allowed).
+  real-looking values assigned to any `*key`/`*secret`/`*token`/`*password` setting in JSON/YAML/env/CLI
+  spelling, whitespace- and case-tolerant; placeholders allowed — widened in review round 1 F1 and pinned by
+  `scripts/secrets-guard.selftest.sh`).
 - Verified: guard exits 0 on the staged tree; on a scratch copy with `.env` force-added it exits 1 reporting
   both the forbidden path and two real-looking values (values not printed). `git ls-files | grep '^\.env'` →
   only `.env.example`.

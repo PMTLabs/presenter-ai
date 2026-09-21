@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
-# secrets-guard.sh — fail when a secret-bearing file or a real key value is tracked by git.
+# secrets-guard.sh — fail when a secret-bearing file or a real credential value is tracked by git.
 #
 # Checks (plan 002 T1 / AC1):
 #   1. No tracked path matches `.env`, `.env.*` (except `.env.example`), `appsettings.Local.json`,
 #      `*.key`, `*.pem`.
-#   2. No tracked text file assigns a real-looking value to UPSTREAM_KEY / FALLBACK_OPENAI_KEY /
-#      "Key": "...". Placeholders (`your-api-key`, `<key>`, `${VAR}`, `changeme`, short test
-#      tokens) are allowed; anything that looks like a credential (>= 16 chars and not a
-#      placeholder, or starting with `sk-`) fails.
+#   2. No tracked text file assigns a real-looking value to a credential setting.
+#
+# Class boundary of check 2 (review round 1, F1 — widened from the literal spellings
+# `UPSTREAM_KEY=` / `"Key": "`):
+#   - the setting NAME is any token ending in `key`, `secret`, `token` or `password`, case-insensitive,
+#     optionally quoted (JSON), e.g. `UPSTREAM_KEY`, `"Key"`, `"key"`, `Upstream__Key`, `--Upstream:Key`,
+#     `X-Api-Key`, `"ClientSecret"`;
+#   - the SEPARATOR is `=` or `:` with any whitespace on either side (`"Key" : "…"` counts);
+#   - the VALUE is a quoted literal (`"…"` or `'…'`) anywhere, or an unquoted token when the name is
+#     env-style (UPPER_SNAKE, or containing `__`, `:` or `-`); an unquoted value after a code identifier
+#     (`const key = env.UPSTREAM_KEY.trim()`) is a reference, not a literal, and is not scanned; a value
+#     that is a markdown code span (starts with a backtick) is prose about the setting and is skipped;
+#   - a value looks real when it is not a placeholder and is >= 16 characters, or starts with `sk-`
+#     and is >= 12 characters. Placeholders start with `your-`, `<`, `${`, `$(`, `{{`, `dev-`/`dev_`,
+#     `example`, `dummy`, `xxx`, `***`, `test`/`test-`, `fake`, `sample`, or contain `changeme`/`change_me`,
+#     `placeholder`, `redacted`, `not-a-real`.
+#   Not covered (outside this guard's class): values split across lines, encoded blobs, secrets stored
+#   under names that end in another word. `scripts/secrets-guard.selftest.sh` pins every bullet above.
 #
 # Usage: scripts/secrets-guard.sh   (run from anywhere inside the repository; exit 0 = clean)
 set -euo pipefail
@@ -24,25 +38,40 @@ while IFS= read -r path; do
   status=1
 done < <(git ls-files | grep -E "$forbidden" || true)
 
-# --- 2. real-looking key values in tracked text -----------------------------------------------
-placeholder='^(your[-_]|<|\$\{|\$\(|\{\{|changeme|change-me|placeholder|redacted|example|dummy|xxx|\*+$|test$|fake|sample)'
-while IFS=: read -r file line match; do
-  # match is the whole line; pull the value after `=` or after `"Key": "`.
-  value=""
-  if [[ "$match" =~ (UPSTREAM_KEY|FALLBACK_OPENAI_KEY)=[[:space:]]*\"?([^\"[:space:]#]*) ]]; then
-    value="${BASH_REMATCH[2]}"
-  elif [[ "$match" =~ \"Key\":[[:space:]]*\"([^\"]*)\" ]]; then
-    value="${BASH_REMATCH[1]}"
+# --- 2. real-looking credential values in tracked text ----------------------------------------
+# `git grep -o` prints only the matching fragment (name, separator, value), so large lines such as
+# base64 image data in decks never reach the bash regexes below.
+name='"?[A-Za-z0-9_.:-]*(key|secret|token|password)"?'
+sep='[[:space:]]*[=:][[:space:]]*'
+value="(\"[^\"]*\"|'[^']*'|[^\"'[:space:]#,;)]*)"
+pattern="(^|[^A-Za-z0-9_])${name}${sep}${value}"
+placeholder='^(your[-_]|<|\$\{|\$\(|\{\{|dev[-_]|example|dummy|xxx|\*+$|test$|test[-_]|fake|sample)|changeme|change[-_]me|placeholder|redacted|not-a-real'
+
+while IFS=: read -r file line fragment; do
+  # `read` hands the remainder of the line (which may itself contain `:`) to `fragment`.
+  [[ -z "${fragment:-}" ]] && continue
+  if ! [[ "$fragment" =~ ^[^A-Za-z0-9_]?\"?([A-Za-z0-9_.:-]*)\"?[[:space:]]*[=:][[:space:]]*(.*)$ ]]; then
+    continue
   fi
-  [[ -z "$value" ]] && continue
+  setting="${BASH_REMATCH[1]}"
+  raw="${BASH_REMATCH[2]}"
+  if [[ "$raw" == \"*\" || "$raw" == \'*\' ]]; then
+    val="${raw:1:${#raw}-2}"
+  elif [[ "$setting" =~ ^[A-Z0-9_]+$ || "$setting" == *__* || "$setting" == *:* || "$setting" == *-* ]]; then
+    val="$raw"
+  else
+    continue
+  fi
+  [[ -z "$val" ]] && continue
+  [[ "$val" == \`* ]] && continue
   shopt -s nocasematch
-  if [[ "$value" =~ $placeholder ]]; then shopt -u nocasematch; continue; fi
+  if [[ "$val" =~ $placeholder ]]; then shopt -u nocasematch; continue; fi
   shopt -u nocasematch
-  if [[ "$value" == sk-* || ${#value} -ge 16 ]]; then
-    echo "secrets-guard: real-looking key value in $file:$line (value not shown)" >&2
+  if [[ ( "$val" == sk-* && ${#val} -ge 12 ) || ${#val} -ge 16 ]]; then
+    echo "secrets-guard: real-looking credential value for '$setting' in $file:$line (value not shown)" >&2
     status=1
   fi
-done < <(git grep -n -E '(UPSTREAM_KEY|FALLBACK_OPENAI_KEY)=|"Key": *"' -- ':!*.lock' ':!package-lock.json' || true)
+done < <(git grep -n -o -i -E "$pattern" -- ':!*.lock' ':!package-lock.json' || true)
 
 if [[ $status -eq 0 ]]; then
   echo "secrets-guard: clean"
