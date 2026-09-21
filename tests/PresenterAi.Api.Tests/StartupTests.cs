@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FluentAssertions;
 using PresenterAi.Api.Tests.Infrastructure;
 
@@ -28,5 +29,67 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
 
         createClient.Should().Throw<Exception>()
             .Which.ToString().Should().Contain("Missing required setting: Upstream:Key");
+    }
+
+    [Fact]
+    public async Task Missing_upstream_key_exits_cleanly_in_production()
+    {
+        var root = FindRepositoryRoot();
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "dotnet",
+            WorkingDirectory = AppContext.BaseDirectory,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("PresenterAi.Api.dll");
+        startInfo.ArgumentList.Add("--environment");
+        startInfo.ArgumentList.Add("Production");
+        startInfo.ArgumentList.Add("--urls");
+        startInfo.ArgumentList.Add("http://127.0.0.1:0");
+        startInfo.ArgumentList.Add("--Upstream:Endpoint=https://api.openai.com");
+        startInfo.ArgumentList.Add("--Upstream:Key=");
+        startInfo.ArgumentList.Add($"--Content:RootDir={root}");
+        startInfo.ArgumentList.Add($"--Content:WebRoot={Path.Combine(root, "src", "web")}");
+
+        using var process = Process.Start(startInfo);
+        process.Should().NotBeNull();
+
+        var stdoutTask = process!.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var waitTask = process.WaitForExitAsync();
+        var completed = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(60)));
+        if (completed != waitTask)
+        {
+            process.Kill(entireProcessTree: true);
+            await waitTask;
+            throw new Xunit.Sdk.XunitException("API startup did not exit within 60 seconds.");
+        }
+
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+        var output = $"{stdout}\n{stderr}";
+
+        process.ExitCode.Should().Be(1);
+        stderr.Should().Contain("Missing required setting: Upstream:Key");
+        output.Should().NotContain("   at ");
+        output.Should().NotContain("Unhandled exception");
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "PresenterAi.slnx")))
+            {
+                return directory.FullName;
+            }
+        }
+
+        throw new DirectoryNotFoundException("Could not find PresenterAi.slnx from the test output directory.");
     }
 }

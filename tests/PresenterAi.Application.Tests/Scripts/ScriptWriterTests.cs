@@ -17,6 +17,35 @@ public sealed class ScriptWriterTests
         RoundTrip("sample.md", "sample");
     }
 
+    [Fact]
+    public void Round_trips_yaml_sensitive_record_values()
+    {
+        var original = new PresentationScript(
+            new PresentationMeta(
+                "record-id",
+                "Title: \"quoted\" — презентация",
+                "deck-name",
+                "manual",
+                null,
+                "context before\n---\ncontext after",
+                null,
+                1400),
+            [
+                new Slide(
+                    0,
+                    1,
+                    "Slide: \"quoted\" 日本語",
+                    "Narration stays here.",
+                    "first line\n- leading item\nthird line"),
+            ]);
+
+        var formatted = ScriptWriter.Format(original);
+        var roundTrip = ScriptParser.Parse(formatted, original.Meta.Id);
+
+        Assert.Equal(original.Meta, roundTrip.Meta);
+        Assert.Equal(original.Slides, roundTrip.Slides);
+    }
+
     private static void RoundTrip(string fixture, string id)
     {
         var original = ScriptParser.Parse(ReadFixture(fixture), id);

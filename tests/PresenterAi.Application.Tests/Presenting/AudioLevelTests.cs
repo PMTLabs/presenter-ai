@@ -45,6 +45,26 @@ public sealed class AudioLevelTests
     }
 
     [Fact]
+    public void Fractional_rms_values_use_the_exact_120_threshold()
+    {
+        var below = MixedFrame(119, 120);
+        var above = MixedFrame(120, 120, 120, 121);
+        // Below is sqrt((119^2 + 120^2) / 2) = 119.50104..., strictly below 120.
+        var belowExpected = Math.Sqrt((119d * 119 + 120d * 120) / 2);
+        // The four-sample frame is sqrt((3 * 120^2 + 121^2) / 4) = 120.25078..., just above 120.
+        var aboveExpected = Math.Sqrt((3d * 120 * 120 + 121d * 121) / 4);
+
+        Assert.InRange(belowExpected, 119, 120);
+        Assert.True(belowExpected > 119 && belowExpected < 120);
+        Assert.Equal(belowExpected, AudioLevel.Rms(below), 10);
+        Assert.False(AudioLevel.IsVoiced(below));
+
+        Assert.True(aboveExpected > 120);
+        Assert.Equal(aboveExpected, AudioLevel.Rms(above), 10);
+        Assert.True(AudioLevel.IsVoiced(above));
+    }
+
+    [Fact]
     public void Odd_length_buffer_ignores_trailing_byte()
     {
         var even = VoicedFrame();
@@ -68,6 +88,19 @@ public sealed class AudioLevelTests
         for (var offset = 0; offset < buffer.Length; offset += 2)
         {
             BinaryPrimitives.WriteInt16LittleEndian(buffer.AsSpan(offset, 2), value);
+        }
+
+        return buffer;
+    }
+
+    private static byte[] MixedFrame(params short[] pattern)
+    {
+        var buffer = new byte[pattern.Length * 4];
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            // Duplicate each value because IsVoiced subsamples every second PCM sample.
+            BinaryPrimitives.WriteInt16LittleEndian(buffer.AsSpan(i * 4, 2), pattern[i]);
+            BinaryPrimitives.WriteInt16LittleEndian(buffer.AsSpan(i * 4 + 2, 2), pattern[i]);
         }
 
         return buffer;

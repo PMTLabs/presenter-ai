@@ -81,6 +81,34 @@ public sealed class UpstreamRoutesTests
         Assert.Equal("dep", routes.Upstreams[0].Model);
         Assert.Equal("openai/gpt-live-1", routes.Upstreams[1].Model);
         Assert.Equal("wss://api.openai.com/v1/live/sessions", routes.Upstreams[1].LiveUrl.ToString());
+        Assert.Equal("Bearer k", routes.Upstreams[0].Headers["Authorization"]);
+        Assert.Equal("k", routes.Upstreams[0].Headers["api-key"]);
+        Assert.Equal("Bearer sk-fb", routes.Upstreams[1].Headers["Authorization"]);
+    }
+
+    [Fact]
+    public void Custom_fallback_endpoint_preserves_route_order_models_and_headers()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["Upstream:Endpoint"] = "https://api.openai.com",
+            ["Upstream:Key"] = "k",
+            ["Upstream:Model"] = "primary-model",
+            ["Upstream:Fallback:Key"] = " sk-fb ",
+            ["Upstream:Fallback:Endpoint"] = "https://gw.example.com",
+            ["Upstream:Fallback:Model"] = " openai/gpt-live-1 "
+        });
+
+        var routes = UpstreamRoutes.From(options);
+
+        Assert.Equal(2, routes.Upstreams.Count);
+        Assert.Equal("primary", routes.Upstreams[0].Name);
+        Assert.Equal("fallback", routes.Upstreams[1].Name);
+        Assert.Equal("wss://api.openai.com/v1/live/sessions", routes.Upstreams[0].LiveUrl.ToString());
+        Assert.Equal("wss://gw.example.com/v1/live/sessions", routes.Upstreams[1].LiveUrl.ToString());
+        Assert.Equal("primary-model", routes.Upstreams[0].Model);
+        Assert.Equal("openai/gpt-live-1", routes.Upstreams[1].Model);
+        Assert.Equal("Bearer k", routes.Upstreams[0].Headers["Authorization"]);
         Assert.Equal("Bearer sk-fb", routes.Upstreams[1].Headers["Authorization"]);
     }
 

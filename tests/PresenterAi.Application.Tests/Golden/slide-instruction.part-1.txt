@@ -1,0 +1,5 @@
+Present slide 1 of 2 now. Its narration comes in 3 parts; this is part 1. Say it in full and in order, then pause briefly; part 2 will follow:
+
+"""
+A
+"""

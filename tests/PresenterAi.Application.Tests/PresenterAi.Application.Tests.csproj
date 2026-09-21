@@ -13,7 +13,7 @@
     <Content Include="Fixtures\*.md">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="Golden\system-instructions.sample.txt">
+    <Content Include="Golden\*.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
