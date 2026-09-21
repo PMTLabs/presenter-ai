@@ -2,12 +2,10 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
-using Microsoft.Extensions.Options;
 using PresenterAi.Api.Errors;
 using PresenterAi.Application.Content;
 using PresenterAi.Contracts;
 using PresenterAi.Application.Presenting;
-using PresenterAi.Infrastructure.Live;
 
 namespace PresenterAi.Api.Realtime;
 
@@ -319,20 +317,6 @@ public static class PresenterRegistration
 {
     public static IServiceCollection AddPresenterBridge(this IServiceCollection services)
     {
-        services.AddSingleton<IPresenter>(serviceProvider =>
-        {
-            var repository = serviceProvider.GetRequiredService<IPresentationRepository>();
-            var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
-            var routes = serviceProvider.GetRequiredService<UpstreamRoutes>();
-            var settings = serviceProvider.GetRequiredService<IOptions<PresenterOptions>>().Value;
-            return new Presenter(
-                (request, attempt) => attempt < routes.Upstreams.Count
-                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice))
-                    : null,
-                repository.LoadAsync,
-                new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice),
-                TimeProvider.System);
-        });
         services.AddSingleton<PresenterBridge>();
         return services;
     }

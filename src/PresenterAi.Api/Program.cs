@@ -30,6 +30,7 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
 builder.Services.AddUpstreamOptions(builder.Configuration);
 builder.Services.AddFileContent(builder.Configuration, builder.Environment.ContentRootPath);
 builder.Services.AddLiveSessions();
+builder.Services.AddPresenter();
 builder.Services.AddPresenterBridge();
 builder.Services.AddAuthentication(options =>
 {

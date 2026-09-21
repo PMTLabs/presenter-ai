@@ -10,6 +10,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/PresenterAi.Api.Tests/PresenterAi.Api.Tests.csproj" />
     <Project Path="tests/PresenterAi.Application.Tests/PresenterAi.Application.Tests.csproj" />
+    <Project Path="tests/PresenterAi.Cli.Tests/PresenterAi.Cli.Tests.csproj" />
     <Project Path="tests/PresenterAi.Infrastructure.Tests/PresenterAi.Infrastructure.Tests.csproj" />
   </Folder>
 </Solution>

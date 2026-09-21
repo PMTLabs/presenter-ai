@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using PresenterAi.Application.Content;
+using PresenterAi.Application.Presenting;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
 
@@ -57,6 +58,27 @@ public static class DependencyInjection
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<LiveSessionOptions>();
         services.AddSingleton<ILiveSessionFactory, LiveSessionFactory>();
+        return services;
+    }
+
+    public static IServiceCollection AddPresenter(this IServiceCollection services)
+    {
+        services.AddSingleton<IPresenter>(serviceProvider =>
+        {
+            var repository = serviceProvider.GetRequiredService<IPresentationRepository>();
+            var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
+            var routes = serviceProvider.GetRequiredService<UpstreamRoutes>();
+            var settings = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PresenterOptions>>().Value;
+            var timeProvider = serviceProvider.GetRequiredService<TimeProvider>();
+
+            return new Presenter(
+                (request, attempt) => attempt < routes.Upstreams.Count
+                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice))
+                    : null,
+                repository.LoadAsync,
+                new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice),
+                timeProvider);
+        });
         return services;
     }
 }
