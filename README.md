@@ -25,6 +25,24 @@ microphone does not pick up the model's own voice.
 
 The deck's own navigation buttons also work: the presenter follows the deck.
 
+## Run with Docker
+
+Start the local Postgres and Redis services with:
+
+```bash
+docker compose up -d postgres redis
+```
+
+Start the API as well with the `full` profile. Export `UPSTREAM_ENDPOINT` and `UPSTREAM_KEY` in the shell first; they are passed through from the host and are not stored in compose:
+
+```bash
+export UPSTREAM_ENDPOINT=https://your-upstream.example
+export UPSTREAM_KEY=your-key
+docker compose --profile full up --build -d api
+```
+
+Postgres is available on host port `5433`, Redis on `6382`, and the API on `47913`. The Postgres password is a dev-only placeholder. The API container refuses to start unless both upstream variables are set in the shell (`Missing required setting: Upstream:Key`).
+
 ## Configuration (`.env`)
 
 | Variable | Required | Meaning |

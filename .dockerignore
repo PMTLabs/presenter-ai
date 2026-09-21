@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+bin
+**/bin
+obj
+**/obj
+.git
+.env*
+docs
+TestResults
+web/**/node_modules
+web/**/dist
