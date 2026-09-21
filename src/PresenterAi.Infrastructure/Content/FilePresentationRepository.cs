@@ -7,7 +7,9 @@ namespace PresenterAi.Infrastructure.Content;
 
 public sealed partial class FilePresentationRepository(string rootDir) : IPresentationRepository
 {
-    private readonly string _rootDir = Path.GetFullPath(rootDir);
+    // Trailing separators are trimmed so the IsWithinRoot prefix check works for "../../"-style roots
+    // (Path.GetFullPath keeps the trailing separator, which broke every context load in a real run).
+    private readonly string _rootDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDir));
 
     public async Task<IReadOnlyList<PresentationListRow>> ListAsync(CancellationToken cancellationToken = default)
     {

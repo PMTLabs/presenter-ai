@@ -43,7 +43,7 @@ public static class DependencyInjection
         services.AddSingleton(serviceProvider =>
         {
             var options = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ContentOptions>>().Value;
-            return Path.GetFullPath(options.RootDir, contentRootPath);
+            return Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.RootDir, contentRootPath));
         });
         services.AddSingleton<IPresentationRepository>(serviceProvider =>
             new FilePresentationRepository(serviceProvider.GetRequiredService<string>()));
