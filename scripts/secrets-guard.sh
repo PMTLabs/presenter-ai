@@ -19,9 +19,13 @@
 #   - a value looks real when it is not a placeholder and is >= 16 characters, or starts with `sk-`
 #     and is >= 12 characters. Placeholders start with `your-`, `<`, `${`, `$(`, `{{`, `dev-`/`dev_`,
 #     `example`, `dummy`, `xxx`, `***`, `test`/`test-`, `fake`, `sample`, or contain `changeme`/`change_me`,
-#     `placeholder`, `redacted`, `not-a-real`.
+#     `placeholder`, `redacted`, `not-a-real`;
+#   - a bare code identifier name (`ItemKey = "PresenterAi.ProblemTrace"`, `var apiKey = "…"`) is a
+#     program constant, not configuration: its quoted value is reported only with the `sk-` prefix.
 #   Not covered (outside this guard's class): values split across lines, encoded blobs, secrets stored
-#   under names that end in another word. `scripts/secrets-guard.selftest.sh` pins every bullet above.
+#   under names that end in another word, and the guard's own fixture file
+#   `scripts/secrets-guard.selftest.sh` (excluded from the scan; it holds the must-fail examples that
+#   pin every bullet above).
 #
 # Usage: scripts/secrets-guard.sh   (run from anywhere inside the repository; exit 0 = clean)
 set -euo pipefail
@@ -55,9 +59,15 @@ while IFS=: read -r file line fragment; do
   fi
   setting="${BASH_REMATCH[1]}"
   raw="${BASH_REMATCH[2]}"
+  quoted_name=0
+  [[ "$fragment" =~ ^[^A-Za-z0-9_]?\" ]] && quoted_name=1
+  env_style=0
+  [[ "$setting" =~ ^[A-Z0-9_]+$ || "$setting" == *__* || "$setting" == *:* || "$setting" == *-* ]] && env_style=1
   if [[ "$raw" == \"*\" || "$raw" == \'*\' ]]; then
     val="${raw:1:${#raw}-2}"
-  elif [[ "$setting" =~ ^[A-Z0-9_]+$ || "$setting" == *__* || "$setting" == *:* || "$setting" == *-* ]]; then
+    # A bare code identifier holding a string constant is only suspicious with a credential prefix.
+    if [[ $quoted_name -eq 0 && $env_style -eq 0 && "$val" != sk-* ]]; then continue; fi
+  elif [[ $env_style -eq 1 ]]; then
     val="$raw"
   else
     continue
@@ -71,7 +81,7 @@ while IFS=: read -r file line fragment; do
     echo "secrets-guard: real-looking credential value for '$setting' in $file:$line (value not shown)" >&2
     status=1
   fi
-done < <(git grep -n -o -i -E "$pattern" -- ':!*.lock' ':!package-lock.json' || true)
+done < <(git grep -n -o -i -E "$pattern" -- ':!*.lock' ':!package-lock.json' ':!scripts/secrets-guard.selftest.sh' || true)
 
 if [[ $status -eq 0 ]]; then
   echo "secrets-guard: clean"

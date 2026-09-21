@@ -29,7 +29,7 @@
 ## Findings
 ### F1 — Secrets guard misses valid JSON key assignments  [D]  severity: blocker
 - Where: `scripts/secrets-guard.sh:37-39`; `docs/plan/002-phase0-dotnet-core-port-api-web.md:500-502` (T1 requires a tracked non-empty `"Key": "…"` to fail); `.github/workflows/ci.yml:12-13` runs this guard as the CI security gate.
-- What: The `git grep` pattern only recognizes the literal spelling `"Key":` (no whitespace before `:`). Valid JSON such as `"Key" : "sk-a-real-key-value-which-is-long"` is neither selected by `git grep` nor inspected, so it exits clean. Configuration binding is case-insensitive too, so lower-case `"key": "…"` is another bypass.
+- What: The `git grep` pattern only recognizes the literal spelling `"Key":` (no whitespace before `:`). Valid JSON such as `"Key" : "<a real key>"` is neither selected by `git grep` nor inspected, so it exits clean. Configuration binding is case-insensitive too, so lower-case `"key": "…"` is another bypass.
 - Why it matters: A real upstream credential can be committed in `appsettings.json` while the required `secrets-guard` CI step reports success.
 - Suggested fix: Parse tracked JSON configuration (or use a whitespace/case-tolerant detector) and scan all configuration key spellings; retain placeholder exemptions only after extracting the complete value.
 
