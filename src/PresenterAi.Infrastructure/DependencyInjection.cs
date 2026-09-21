@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using PresenterAi.Infrastructure.Live;
 
 namespace PresenterAi.Infrastructure;
@@ -27,6 +28,14 @@ public static class DependencyInjection
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
             UpstreamRoutes.From(serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamOptions>>().Value));
 
+        return services;
+    }
+
+    public static IServiceCollection AddLiveSessions(this IServiceCollection services)
+    {
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<LiveSessionOptions>();
+        services.AddSingleton<ILiveSessionFactory, LiveSessionFactory>();
         return services;
     }
 }

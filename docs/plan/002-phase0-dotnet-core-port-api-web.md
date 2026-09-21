@@ -402,9 +402,10 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
   (Kestrel WebSocket in-process) ports `test/fake-live-server.js`: records events, `voicedDelta`, `silent`
   flag, `session.closed{reason:'client_request', usage}`, terminates clients on close.
 - **Verify:** tests against the fake — connect/start; startup error closes socket; the pump contract: with no
-  input for 500 ms the fake receives exactly 960-byte all-zero frames totalling 500 ms ±1 frame; after 200 ms of
-  real input frames **no** silence is sent within the 120 ms slack; a tick delayed by 300 ms (FakeTimeProvider)
-  is caught up in one burst; `SilenceMs` is monotonic and equals the silence bytes sent; mute stops input; close
+  input for 500 ms the fake receives exactly 960-byte all-zero frames totalling 500 ms minus the 120 ms slack
+  (19 frames — the Node pump keeps `sentMs` up to `PUMP_SLACK_MS` behind the clock, `live-client.js:76`); after
+  200 ms of real input frames **no** silence is sent within the 120 ms slack; a tick delayed by 300 ms
+  (FakeTimeProvider) is caught up in one burst of 9 frames; `SilenceMs` is monotonic and equals the silence bytes sent; mute stops input; close
   returns usage and reason; no ticks after `Finish`.
 - **Test that dies if this breaks:** `LiveSessionTests.Pump_sends_only_the_gap_not_every_tick` (an implementation
   that sends silence on every tick regardless of real audio fails it), `LiveSessionTests.Pump_catches_up_after_delayed_tick`,
@@ -585,4 +586,5 @@ None. Deferred by the brief: OAuth/Postgres/Redis usage (003), admin (004), Stri
 | 2026-09-21 | Requirement brief confirmed (G1) | 3 rounds of questions (12 questions); one brief for plans 002–004 |
 | 2026-09-21 | External plan review | `pi` gpt-5.6-sol:medium, review-only; 9 findings (A1 B1 C4 D3), all folded in: protocol contract frozen with canonical frames (`start.presentation`), exact HTTP shapes + golden tests, producer paths enumerated + §4.6 concurrency model, oracles added for T1/T3/T6/T7/T8/T10/T12/T13/T14/T16, OpenAPI wiring + SPA fallback, traceability matrix, SSE/Sessions explicitly deferred, Moq per InkSpoke, citations corrected; branch protection moved to optional. Report: `docs/review/001-plan-002-external-review.md` |
 | 2026-09-21 | Plan approved (G2) | approved by the user after the external review findings were folded in; implementation starts on an explicit `implement 002` |
+| 2026-09-21 | Oracle correction during T7 | T7 verify text said the 500 ms pump test totals "500 ms ±1 frame"; the Node pump keeps `sentMs` up to 120 ms behind the clock, so the correct totals are 19 frames (500 ms) and 9 frames (300 ms catch-up). Wording fixed; no behaviour change |
 | 2026-09-21 | Amendment after approval | `docs/reference/001-api-and-code-conventions.md` adopted (Problem Details + `code`, bare resources + `{items,page,pageSize,total}`, `area.reason` codes with generated TS union, `/api` trio frozen until 004); T2/T10/T13/T14 wording updated to reference it — no scope change |
