@@ -443,7 +443,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                     // Finish (with the startup failure) before ConnectAsync is woken: its catch block finishes
                     // with "connection_lost" when nothing has finished yet, and it may resume on another thread.
                     _socket.Abort();
-                    Finish("startup_error", null, new InvalidOperationException($"GPT-Live startup error: {upstreamMessage}"));
+                    Finish("startup_error", null, new LiveStartupException(GetString(error, "code") ?? "connect", error, $"GPT-Live startup error: {upstreamMessage}"));
                 }
 
                 break;
