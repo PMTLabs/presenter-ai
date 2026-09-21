@@ -9,14 +9,14 @@
 | Finding | Class | Fix applied |
 |---|---|---|
 | F1 secrets-guard bypass | D | Class widened: any `*key`/`*secret`/`*token`/`*password` setting, JSON/YAML/env/CLI spelling, any whitespace, any case; boundary stated in the script header; `scripts/secrets-guard.selftest.sh` pins 11 must-fail files (incl. the reviewer's `"Key" : "…"`) and a must-pass repo; the old guard fails the self-test (4/11); CI runs the self-test before the guard. |
-| F2 `traceparent` not guaranteed | D | `Api/Errors/ProblemTrace.cs` is the single trace source for both producers (`DomainExceptionHandler`, `Problems.Create`): W3C id from the request activity or a generated one, always written to the `traceparent` header. `ProblemDetailsTests` assert header = body `traceId` via the pipeline and via both producers with no activity (the reviewer's counterexample); mutation (header only when an activity exists) fails both no-activity tests. T10's hand-built `/ws` 400 was the third producer — routed through `Problems.Create` in the T10 continuation. |
-| F3 fallback custom endpoint | B | Node case `config.test.js:110-124` ported with URL, order, model and headers asserted (R1FIX). |
-| F4 catalogue oracle | B | Independent expected code→status map from conventions §6 asserted against `ErrorCodes.Catalogue` and the OpenAPI extension (R1FIX, after T10). |
-| F5 endpoint document oracle | B | Required paths + HTTP operations (`/health` → `get`, 200 schema) asserted independently (R1FIX, after T10). |
-| F6 prompt golden | B | Node-generated goldens for no-context, untitled slides and truncation-with-warning; exact strings for every builder (R1FIX). |
-| F7 RMS boundary | B | Mixed-amplitude frames with RMS strictly between 119 and 120 (and just above 120) (R1FIX). |
-| F8 startup exit path | B | Subprocess test: non-Testing environment, empty key → exit 1, `Missing required setting: Upstream:Key` on stderr, no stack trace (R1FIX). |
-| F9 script writer | B | Record-level round trips with quotes, colons, unicode, multi-line notes, null optionals, `---` in context (R1FIX). |
+| F2 `traceparent` not guaranteed | D | `Api/Errors/ProblemTrace.cs` is the single trace source for both producers (`DomainExceptionHandler`, `Problems.Create`): W3C id from the request activity or a generated one, always written to the `traceparent` header. `ProblemDetailsTests` assert header = body `traceId` via the pipeline and via both producers with no activity (the reviewer's counterexample); mutation (header only when an activity exists) fails both no-activity tests. T10's hand-built `/ws` 400 and the Dev auth challenge were the third and fourth producers — both routed through `Problems.Create`; the framework writer's own `traceId` overwrite is undone by `ProblemTrace.Configure` (`d0a6ce0`). |
+| F3 fallback custom endpoint | B | Node case `config.test.js:110-124` ported with URL, order, model and headers asserted (`1310738`). |
+| F4 catalogue oracle | B | Independent expected code→status map from conventions §6 asserted against `ErrorCodes.Catalogue` and the OpenAPI extension (`55552cd`). |
+| F5 endpoint document oracle | B | Required paths + HTTP operations (`/health` → `get`, 200 schema) asserted independently (`55552cd`). |
+| F6 prompt golden | B | Node-generated goldens for no-context, untitled slides and truncation-with-warning; exact strings for every builder (`1310738`). |
+| F7 RMS boundary | B | Mixed-amplitude frames with RMS strictly between 119 and 120 (and just above 120) (`1310738`). |
+| F8 startup exit path | B | Subprocess test: non-Testing environment, empty key → exit 1, `Missing required setting: Upstream:Key` on stderr, no stack trace (`1310738`). |
+| F9 script writer | B | Record-level round trips with quotes, colons, unicode, multi-line notes, null optionals, `---` in context (`1310738`). |
 
 ---
 

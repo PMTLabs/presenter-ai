@@ -126,4 +126,53 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
 - Tests: 18 Node scenarios + 4 race tests (`FakeSession`, `FakeTimeProvider`); Application.Tests 47/47;
   Claude re-ran the Presenter suite 8× — no flakes. Commit `afa893d`.
 
-### Review round 1 (pi gpt-5.6-terra:medium) and T10 (pi gpt-5.6-terra:high) — in progress
+### Review round 1 (pi gpt-5.6-terra:medium) — folded in
+
+- Scope `326cab7..2f22c58`; report `docs/review/002-plan-002-impl-review-round-1.md`; ledger row in
+  `docs/agentic/review-rounds-ledger.md` (A 0 · B 7 · C 0 · D 2).
+- F1 (D, blocker) secrets guard: class widened to any `*key/*secret/*token/*password` setting in JSON/YAML/env/CLI
+  spelling, whitespace/case tolerant, boundary stated in the script header, `scripts/secrets-guard.selftest.sh`
+  (12 must-fail files + a must-pass repo) runs in CI before the guard. Commits `dee698a`, `9e0705d` (the widened
+  guard first reported its own fixtures and the C# constant `ItemKey = "…"` once tracked — bare code identifiers
+  are now reported only with the `sk-` prefix; fixture file excluded).
+- F2 (D, major) `traceparent`: `Api/Errors/ProblemTrace.cs` is the single trace source (request activity id or a
+  generated W3C id, always written to the header) used by `DomainExceptionHandler`, `Problems.Create`, the Dev auth
+  challenge and the `/ws` 400. The framework's Problem Details writer overwrites `traceId` with
+  `Activity.Current?.Id ?? TraceIdentifier`, so `ProblemTrace.Configure` is registered with `AddProblemDetails` to
+  re-apply it after the defaults (found by an intermittent `AuthTests` failure in the full run). Commits `dee698a`,
+  `d0a6ce0`.
+- F3/F6/F7/F8/F9 and F4/F5 (B): oracles strengthened by pi gpt-5.6-luna:high with a mutation fail/pass
+  demonstration per finding (Node-generated prompt goldens for every builder, fractional-RMS frames, subprocess
+  startup test, record-level YAML round trips, custom fallback endpoint, independent §6 code→status map, required
+  OpenAPI operations). Commits `1310738`, `55552cd`.
+- Found while verifying F8: in Production a missing key printed the hosting logger's stack trace before the clean
+  line — `Program.cs` now resolves the validated options before `app.Run()` (exit 1 + one stderr line, empty stdout).
+
+### T10 — endpoints, static content, Dev auth, `/ws` bridge — done (pi gpt-5.6-terra:high, 2 rounds)
+
+- First report deferred the mandatory bridge tests; Claude's §4.6 spot-check found five defects (writer loop
+  released the slot so a superseded client's disconnect ended the *new* client's session; fire-and-forget
+  back-pressure instead of a deterministic 1011; receive loop blocked on `StartAsync`; hand-built 400 without
+  `traceparent`; unobserved fire-and-forget tasks) — all fixed in the continuation with tests
+  (`BridgeTests` 5 Node scenarios + simultaneous clients, close during send, 1011, ping during connect;
+  `BridgeSlotTests`; `BridgeContractTests` incl. exact canonical property sets). Bridge filter 17/17 × 6 runs.
+  Claude routed the Dev auth 401 through `Problems.Create` (fourth producer). Commit `25e7863`.
+- First real run (Claude, headless client against the .NET API) failed every context load: the content root
+  `../../` keeps its trailing separator through `Path.GetFullPath`, so `IsWithinRoot` never matched —
+  `FilePresentationRepository`/`AddFileContent` trim it; `FilePresentationRepositoryTests` fail on the old code.
+  Commit `ab041a7`.
+
+### T11 — real run through the .NET API (Claude) — server chain done, Chrome pending
+
+- Secrets for the API live in `dotnet user-secrets` (`Upstream:Endpoint`, `Upstream:Key`, `Upstream:Fallback:Key`,
+  copied from `.env` by a script, never printed); `dotnet run` uses the Development launch profile so they load.
+- Headless run (a `ws` client speaking the frozen browser protocol, script in the session scratchpad) against the
+  API on 47913 with the real Azure upstream: `ricoh-delivery-overview` slides 1 → 6 auto-advanced on silence
+  (`advance → slide N` at +38.8 s, +101.8 s, +131.8 s, +195.9 s, +265.6 s), transcripts and 2,644 audio frames
+  (210.3 s voiced / 54.1 s silent), `usage` every 60 s, `end` → `closed{reason: client_request, seconds: 265.2}`
+  → `state idle`. **`usage.seconds = 265.2`** for slides 1–5.
+- Operational gotcha: a concurrent `dotnet build`/`dotnet test` of the API project **kills** an API started with
+  `dotnet run` from `bin/` (exit −1 = `Process.Kill`) or fails to copy over the locked dll — run the API from a
+  `dotnet publish -o <scratch>` copy with `--contentRoot src/PresenterAi.Api` while agents build.
+- Chrome run (AC4 proper: page on 47913, `→`/Space/Esc, `__presenterDebug`, usage pill) not yet done — the
+  Claude-in-Chrome extension was not connected in this session.
