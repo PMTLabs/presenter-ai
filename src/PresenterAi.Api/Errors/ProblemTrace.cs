@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http;
 
 namespace PresenterAi.Api.Errors;
 
@@ -13,6 +14,16 @@ namespace PresenterAi.Api.Errors;
 internal static class ProblemTrace
 {
     private const string ItemKey = "PresenterAi.ProblemTrace";
+
+    /// <summary>
+    /// Registered with <c>AddProblemDetails</c>: the framework's Problem Details writer (used by
+    /// <c>Results.Problem</c> and every other <c>IProblemDetailsService</c> caller) overwrites <c>traceId</c>
+    /// with <c>Activity.Current?.Id ?? TraceIdentifier</c>, so the value is re-applied here, after the
+    /// defaults, to keep the body equal to the <c>traceparent</c> header.
+    /// </summary>
+    public static void Configure(ProblemDetailsOptions options) =>
+        options.CustomizeProblemDetails = context =>
+            context.ProblemDetails.Extensions["traceId"] = Apply(context.HttpContext);
 
     public static string Apply(HttpContext context)
     {

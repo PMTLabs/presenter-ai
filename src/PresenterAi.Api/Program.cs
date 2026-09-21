@@ -9,6 +9,7 @@ using PresenterAi.Api.Auth;
 using PresenterAi.Api.Endpoints;
 using PresenterAi.Api.Realtime;
 using PresenterAi.Infrastructure.Content;
+using PresenterAi.Infrastructure.Live;
 using PresenterAi.Api.Errors;
 using PresenterAi.Contracts;
 using PresenterAi.Domain.Errors;
@@ -42,7 +43,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
 });
-builder.Services.AddProblemDetails();
+builder.Services.AddProblemDetails(ProblemTrace.Configure);
 builder.Services.AddExceptionHandler<DomainExceptionHandler>();
 builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document, _, _) =>
 {
@@ -120,13 +121,16 @@ if (app.Environment.IsEnvironment("Testing"))
 var isTesting = app.Environment.IsEnvironment("Testing");
 try
 {
+    // Resolve the validated options before the host starts: a missing setting then fails here, with one
+    // clean line, instead of inside Host.StartAsync where the hosting logger prints a stack trace first.
+    _ = app.Services.GetRequiredService<IOptions<UpstreamOptions>>().Value;
     app.Run();
 }
 catch (OptionsValidationException ex) when (!isTesting)
 {
-    // Startup validation (ValidateOnStart) — exit 1 naming the missing setting instead of an unhandled
-    // exception crash. The host logger is already disposed here, so write to stderr directly. Under
-    // WebApplicationFactory ("Testing") the exception must propagate so StartupTests can observe it.
+    // Exit 1 naming the missing setting instead of an unhandled exception crash. The host logger may be
+    // disposed here, so write to stderr directly. Under WebApplicationFactory ("Testing") the exception
+    // must propagate so StartupTests can observe it.
     Console.Error.WriteLine($"Configuration invalid: {string.Join("; ", ex.Failures)}");
     return 1;
 }

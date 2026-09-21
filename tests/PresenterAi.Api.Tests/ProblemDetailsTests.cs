@@ -111,7 +111,11 @@ public sealed partial class ProblemDetailsTests(ApiFactory factory) : IClassFixt
     {
         var context = new DefaultHttpContext
         {
-            RequestServices = new ServiceCollection().AddLogging().BuildServiceProvider()
+            // The real writer path: IProblemDetailsService + the same hook Program.cs registers.
+            RequestServices = new ServiceCollection()
+                .AddLogging()
+                .AddProblemDetails(ProblemTrace.Configure)
+                .BuildServiceProvider()
         };
         context.Request.Path = "/api/presentations/missing";
         context.Response.Body = new MemoryStream();
