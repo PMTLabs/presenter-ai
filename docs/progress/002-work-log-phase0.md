@@ -324,3 +324,11 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   usage=25.8 s` → `idle`. Not verified in a browser: the stacked layout below `lg` (the window resize was ignored by
   the maximised Chrome window); the Claude-in-Chrome `left_click_drag` does not emit pointer events, so the drag was
   driven with synthetic `PointerEvent`s.
+
+### `connected via <label>` on every start (Claude, user request) — done
+
+- Node (and the port until now) logged `connected via …` only when a fallback took over, so a live run gave no
+  positive signal that the Azure primary answered (the user asked "azure or fallback?"). `Presenter` now logs
+  `[info] connected via primary` on the first attempt and keeps `[warn] connected via fallback` for later attempts.
+  Oracles: `Successful_primary_start_logs_which_upstream_answered` (fails with the old `attempt > 0` guard — verified
+  by mutation) and the fallback test asserts the `warn` line. Application tests 52.

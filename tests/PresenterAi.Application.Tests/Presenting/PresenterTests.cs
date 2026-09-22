@@ -307,6 +307,18 @@ public sealed class PresenterTests
         Assert.Equal(["thinking", "instructions"], harness.Sessions[1].Sent.Select(item => item.Type));
         Assert.Single(harness.Errors);
         Assert.Equal(1, harness.Sessions[0].DisposeCount);
+        Assert.Contains(new PresenterLog("warn", "connected via fallback"), harness.Logs);
+    }
+
+    [Fact]
+    public async Task Successful_primary_start_logs_which_upstream_answered()
+    {
+        await using var harness = Create(upstreams: 2);
+
+        Assert.True(await harness.Presenter.StartAsync("p"));
+
+        Assert.Contains(new PresenterLog("info", "connected via primary"), harness.Logs);
+        Assert.DoesNotContain(harness.Logs, log => log.Level == "warn" && log.Message.StartsWith("connected via"));
     }
 
     [Fact]

@@ -362,11 +362,9 @@ public sealed class Presenter : IPresenter
             {
                 sessionInfo = await candidate.ConnectAsync(_lifetime.Token).ConfigureAwait(false);
                 session = candidate;
-                if (attempt > 0)
-                {
-                    LogMessage("warn", $"connected via {label}");
-                }
-
+                // Node logged this only for a fallback; the .NET host always says which upstream answered
+                // (info for the primary, warn when a fallback took over) so a live run shows Azure vs OpenAI.
+                LogMessage(attempt > 0 ? "warn" : "info", $"connected via {label}");
                 break;
             }
             catch (Exception exception)
