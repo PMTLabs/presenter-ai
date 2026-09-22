@@ -53,6 +53,10 @@ public sealed class FilePresentationRepositoryTests : IDisposable
 
         loaded.Context.Should().Be("Background facts.");
         loaded.Slides.Should().HaveCount(1);
+
+        var source = await repository.ReadSourceAsync("with-context");
+        source.Markdown.Should().Contain("context: presentations/with-context-context.md");
+        source.Presentation.Context.Should().Be(loaded.Context);
     }
 
     [Fact]
@@ -61,8 +65,10 @@ public sealed class FilePresentationRepositoryTests : IDisposable
         var repository = new FilePresentationRepository(_root + Path.DirectorySeparatorChar);
 
         var load = () => repository.ReadAsync("escaping");
+        var sourceLoad = () => repository.ReadSourceAsync("escaping");
 
         await load.Should().ThrowAsync<ArgumentException>().WithMessage("*escapes the project*");
+        await sourceLoad.Should().ThrowAsync<ArgumentException>().WithMessage("*escapes the project*");
     }
 
     public void Dispose()

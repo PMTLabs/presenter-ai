@@ -104,6 +104,66 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Import_without_owner_exits_2()
+    {
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["import", "presentations/sample.md"],
+            new ConfigurationBuilder().Build(),
+            new StringWriter(),
+            error,
+            CancellationToken.None);
+
+        exit.Should().Be(2);
+        error.ToString().Should().Contain("import requires --owner");
+    }
+
+    [Fact]
+    public async Task Import_without_paths_exits_2()
+    {
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["import", "--owner", "owner@example.test"],
+            new ConfigurationBuilder().Build(),
+            new StringWriter(),
+            error,
+            CancellationToken.None);
+
+        exit.Should().Be(2);
+        error.ToString().Should().Contain("import requires at least one path");
+    }
+
+    [Fact]
+    public async Task Run_without_owner_value_exits_2()
+    {
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["run", "sample", "--owner"],
+            new ConfigurationBuilder().Build(),
+            new StringWriter(),
+            error,
+            CancellationToken.None);
+
+        exit.Should().Be(2);
+        error.ToString().Should().Contain("--owner requires a value");
+    }
+
+    [Fact]
+    public async Task Usage_lists_import_and_optional_run_owner()
+    {
+        var output = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["--help"],
+            new ConfigurationBuilder().Build(),
+            output,
+            new StringWriter(),
+            CancellationToken.None);
+
+        exit.Should().Be(0);
+        output.ToString().Should().Contain("presenter-cli import").And.Contain("--owner");
+    }
+
+    [Fact]
     public async Task Unknown_provider_exits_2()
     {
         var configuration = new ConfigurationBuilder().Build();

@@ -41,6 +41,22 @@ public sealed class PostgresPresentationRepository(PresenterAiDbContext db) : IP
         return new PresentationListResult(items, total);
     }
 
+    public async Task<string?> FindIdBySlugAsync(
+        string ownerId,
+        string slug,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+
+        return await db.Presentations
+            .AsNoTracking()
+            .Where(presentation => presentation.OwnerId == ownerId && presentation.Slug == slug)
+            .Select(presentation => presentation.Id)
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<LoadedPresentation> LoadAsync(
         string ownerId,
         string id,

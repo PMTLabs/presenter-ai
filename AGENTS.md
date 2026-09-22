@@ -13,7 +13,7 @@ deck advance, and can interrupt with spoken questions. Phase 0 (plan 002) ported
 
 | Path | What lives there |
 |---|---|
-| `src/PresenterAi.{Domain,Application,Infrastructure,Contracts,Api,Cli}` | Clean Architecture .NET 10 solution (`PresenterAi.slnx`). `Application/Presenting/Presenter.cs` is the single event loop; `Infrastructure/Live/LiveSession.cs` speaks to GPT-Live; `Api` is minimal APIs + the `/ws` bridge; `Cli` is `presenter-cli smoke|run`. |
+| `src/PresenterAi.{Domain,Application,Infrastructure,Contracts,Api,Cli}` | Clean Architecture .NET 10 solution (`PresenterAi.slnx`). `Application/Presenting/Presenter.cs` is the single event loop; `Infrastructure/Live/LiveSession.cs` speaks to GPT-Live; `Api` is minimal APIs + the `/ws` bridge; `Cli` is `presenter-cli smoke|run|import`. |
 | `tests/PresenterAi.*.Tests` | xUnit + FluentAssertions/Moq per project. Ported Node tests are the parity oracle — do not weaken them. |
 | `web/` | bun workspaces: `shared` (generated OpenAPI client, auth store, Tailwind preset), `app` (presenter, Vite 47914), `admin` (Vite 47915). |
 | `presentations/`, `decks/` | Content. `docs/guides/001-presenting-a-new-deck.md` explains how to add a deck. |
@@ -28,13 +28,24 @@ dotnet build PresenterAi.slnx -warnaserror          # warnings are errors in CI 
 dotnet test PresenterAi.slnx
 dotnet run --project src/PresenterAi.Api            # http://localhost:47913 (health: /health, OpenAPI: /openapi/v1.json)
 dotnet run --project src/PresenterAi.Cli -- smoke   # a few seconds of upstream time; run from the repo root
-dotnet run --project src/PresenterAi.Cli -- run <presentation-id> --stop-after-slide 2
+dotnet run --project src/PresenterAi.Cli -- run <slug> --stop-after-slide 2   # reads presentations/<slug>.md, records nothing
+
+# First run with a database (plan 004). Compose publishes Postgres on 5433 and Redis on 6382.
+docker compose up -d postgres redis
+dotnet user-secrets set ConnectionStrings:Postgres "<connection string>" --project src/PresenterAi.Api  # also ConnectionStrings:Redis
+dotnet tool install --global dotnet-ef              # once
+dotnet ef database update --project src/PresenterAi.Infrastructure  # uses ConnectionStrings__Postgres, else the compose default
+dotnet run --project src/PresenterAi.Api            # sign in once: dev sign-in creates your users row
+# The CLI reads ConnectionStrings:Postgres from its own secret store (--project src/PresenterAi.Cli) or ConnectionStrings__Postgres
+dotnet run --project src/PresenterAi.Cli -- import presentations/*.md --owner <your email>  # expands the pattern itself; skips *-context.md
+dotnet run --project src/PresenterAi.Cli -- run <slug> --owner <your email>                 # presents the imported copy and records a session
+
 # Integration tests need Docker; Testcontainers starts its own pgvector and Redis.
 # On Windows the daemon is in WSL, so DOCKER_HOST must be set or every integration test fails:
 DOCKER_HOST=tcp://localhost:2375 dotnet test tests/PresenterAi.Integration.Tests
 
 cd web && bun install --frozen-lockfile && bun run lint && bun run test && bun run build
-cd web && bun run dev:app                            # Vite on 47914, proxies /api,/ws,/decks,/health to 47913
+cd web && bun run dev:app                            # Vite on 47914, proxies /v1,/ws,/decks,/health to 47913
 cd web && bun run generate:api                       # regenerates the TS client from web/shared/openapi/v1.json
 ```
 

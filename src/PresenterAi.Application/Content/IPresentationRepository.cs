@@ -15,4 +15,6 @@ public interface IPresentationRepository
         CancellationToken cancellationToken = default);
 
     Task<LoadedPresentation> LoadAsync(string ownerId, string id, CancellationToken cancellationToken = default);
+
+    Task<string?> FindIdBySlugAsync(string ownerId, string slug, CancellationToken cancellationToken = default);
 }

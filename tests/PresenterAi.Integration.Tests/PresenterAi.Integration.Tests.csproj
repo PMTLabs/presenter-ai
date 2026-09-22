@@ -7,6 +7,8 @@
   <ItemGroup>
     <ProjectReference Include="../../src/PresenterAi.Infrastructure/PresenterAi.Infrastructure.csproj" />
     <ProjectReference Include="../../src/PresenterAi.Api/PresenterAi.Api.csproj" />
+    <ProjectReference Include="../../src/PresenterAi.Cli/PresenterAi.Cli.csproj" />
+    <ProjectReference Include="../PresenterAi.Infrastructure.Tests/PresenterAi.Infrastructure.Tests.csproj" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>

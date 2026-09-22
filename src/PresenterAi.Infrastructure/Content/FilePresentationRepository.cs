@@ -34,7 +34,10 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
         return rows.OrderBy(row => row.Id, StringComparer.Ordinal).ToArray();
     }
 
-    public async Task<LoadedPresentation> ReadAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<LoadedPresentation> ReadAsync(string id, CancellationToken cancellationToken = default) =>
+        (await ReadSourceAsync(id, cancellationToken).ConfigureAwait(false)).Presentation;
+
+    public async Task<PresentationSource> ReadSourceAsync(string id, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(id) || !IdRegex().IsMatch(id))
         {
@@ -42,7 +45,8 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
         }
 
         var file = Path.Combine(_rootDir, "presentations", $"{id}.md");
-        var script = ScriptParser.Parse(await File.ReadAllTextAsync(file, cancellationToken).ConfigureAwait(false), id);
+        var markdown = await File.ReadAllTextAsync(file, cancellationToken).ConfigureAwait(false);
+        var script = ScriptParser.Parse(markdown, id);
         string? context = null;
         if (!string.IsNullOrEmpty(script.Meta.Context))
         {
@@ -55,7 +59,9 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
             context = await File.ReadAllTextAsync(contextPath, cancellationToken).ConfigureAwait(false);
         }
 
-        return new LoadedPresentation(script.Meta.Id, script.Meta, script.Slides, context);
+        return new PresentationSource(
+            markdown,
+            new LoadedPresentation(script.Meta.Id, script.Meta, script.Slides, context));
     }
 
     private bool IsWithinRoot(string path) => path.StartsWith(_rootDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)

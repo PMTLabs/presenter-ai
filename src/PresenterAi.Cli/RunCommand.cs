@@ -3,7 +3,10 @@ using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using PresenterAi.Application.Content;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Sessions;
+using PresenterAi.Infrastructure.Persistence;
 
 namespace PresenterAi.Cli;
 
@@ -19,12 +22,42 @@ public static class RunCommand
         TextWriter error,
         CancellationToken cancellationToken)
     {
-        var contentRoot = arguments.ContentRoot is null
-            ? FindRepositoryRoot(Directory.GetCurrentDirectory())
-            : Path.GetFullPath(arguments.ContentRoot, Directory.GetCurrentDirectory());
+        if (arguments.Owner is null)
+        {
+            var contentRoot = arguments.ContentRoot is null
+                ? FindRepositoryRoot(Directory.GetCurrentDirectory())
+                : Path.GetFullPath(arguments.ContentRoot, Directory.GetCurrentDirectory());
 
-        await using var services = Program.BuildServices(configuration, contentRoot);
-        return await RunWithPresenterAsync(arguments, services.GetRequiredService<IPresenter>(), output, error, cancellationToken).ConfigureAwait(false);
+            await using var fileServices = Program.BuildServices(configuration, contentRoot);
+            return await RunWithPresenterAsync(arguments, fileServices.GetRequiredService<IPresenter>(), output, error, cancellationToken).ConfigureAwait(false);
+        }
+
+        await using var services = Program.BuildRunServices(configuration);
+        await using var scope = services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<PresenterAiDbContext>();
+        var ownerResult = await OwnerResolver.ResolveAsync(db, arguments.Owner, cancellationToken).ConfigureAwait(false);
+        if (ownerResult.User is null)
+        {
+            await error.WriteLineAsync(ownerResult.Error!).ConfigureAwait(false);
+            return 1;
+        }
+
+        var repository = scope.ServiceProvider.GetRequiredService<IPresentationRepository>();
+        var presentationId = await repository.FindIdBySlugAsync(ownerResult.User.Id, arguments.Id, cancellationToken).ConfigureAwait(false);
+        if (presentationId is null)
+        {
+            await error.WriteLineAsync($"presentation not found: {arguments.Id}").ConfigureAwait(false);
+            return 1;
+        }
+
+        return await RunWithPresenterAsync(
+            arguments with { Id = presentationId },
+            services.GetRequiredService<IPresenter>(),
+            output,
+            error,
+            cancellationToken,
+            ownerResult.User.Id,
+            services.GetRequiredService<ISessionRecorderFactory>()).ConfigureAwait(false);
     }
 
     public static async Task<int> RunWithPresenterAsync(
@@ -32,7 +65,9 @@ public static class RunCommand
         IPresenter presenter,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? ownerId = null,
+        ISessionRecorderFactory? recorderFactory = null)
     {
         var stopwatch = Stopwatch.StartNew();
         var closed = new TaskCompletionSource<PresenterClosed>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -147,9 +182,20 @@ public static class RunCommand
         presenter.UpstreamError += upstream =>
             output.WriteLine($"{At()} [ERROR] {upstream.Code ?? string.Empty} {upstream.Message}".TrimEnd());
 
+        var recorder = recorderFactory?.Create();
+        if (recorder is not null)
+        {
+            recorder.Attach(presenter);
+        }
+
         try
         {
-            var start = await presenter.StartAsync(arguments.Id, fromIndex: null, ownerId: LocalContentOwner, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var start = await presenter.StartAsync(arguments.Id, fromIndex: null, ownerId: ownerId ?? LocalContentOwner, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (start.Started && recorder is not null)
+            {
+                await recorder.BeginAsync(ownerId ?? LocalContentOwner, start, cancellationToken).ConfigureAwait(false);
+            }
+
             if (!start.Started)
             {
                 await error.WriteLineAsync($"Run failed: could not start presentation \"{arguments.Id}\".").ConfigureAwait(false);
@@ -188,6 +234,21 @@ public static class RunCommand
         {
             await error.WriteLineAsync($"Run failed: {exception.Message}").ConfigureAwait(false);
             return 1;
+        }
+        finally
+        {
+            if (recorder is not null)
+            {
+                try
+                {
+                    await recorder.EndAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    recorder.Detach();
+                    await recorder.DisposeAsync().ConfigureAwait(false);
+                }
+            }
         }
     }
 

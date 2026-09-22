@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Content;
 using Microsoft.IdentityModel.Tokens;
 
@@ -88,6 +89,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.AddScoped<IPresentationRepository, TestPresentationRepository>();
             services.AddSingleton<TestTicketStore>();
             services.AddSingleton<ITicketStore>(serviceProvider => serviceProvider.GetRequiredService<TestTicketStore>());
+            services.RemoveAll<ISessionRecorderFactory>();
+            services.AddSingleton<TestSessionRecorderFactory>();
+            services.AddSingleton<ISessionRecorderFactory>(serviceProvider =>
+                serviceProvider.GetRequiredService<TestSessionRecorderFactory>());
         });
     }
 
@@ -136,6 +141,12 @@ internal sealed class TestPresentationRepository : IPresentationRepository
         return _source.ReadAsync(id, cancellationToken);
     }
 
+    public Task<string?> FindIdBySlugAsync(string ownerId, string slug, CancellationToken cancellationToken = default)
+    {
+        EnsureOwner(ownerId);
+        return Task.FromResult<string?>(slug);
+    }
+
     private static void EnsureOwner(string ownerId)
     {
         if (!string.Equals(ownerId, "test-user", StringComparison.Ordinal))
@@ -143,6 +154,81 @@ internal sealed class TestPresentationRepository : IPresentationRepository
             throw new FileNotFoundException("The owner-scoped presentation was not found.");
         }
     }
+}
+
+internal sealed class TestSessionRecorderFactory : ISessionRecorderFactory
+{
+    public List<TestSessionRecorder> Recorders { get; } = [];
+    public TaskCompletionSource EndGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public bool GateEnd { get; set; }
+
+    public ISessionRecorder Create()
+    {
+        var recorder = new TestSessionRecorder(this);
+        Recorders.Add(recorder);
+        return recorder;
+    }
+}
+
+internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : ISessionRecorder
+{
+    private readonly TaskCompletionSource _end = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private IPresenter? _presenter;
+    private Action<int>? _slide;
+    private Action<PresenterTranscript>? _transcript;
+    private Action<PresenterUsage>? _usage;
+    private Action<PresenterClosed>? _closed;
+    private int _ended;
+
+    public int AttachCount { get; private set; }
+    public int DetachCount { get; private set; }
+    public int BeginCount { get; private set; }
+    public int EndCount { get; private set; }
+
+    public void Attach(IPresenter presenter)
+    {
+        _presenter = presenter;
+        _slide = _ => { };
+        _transcript = _ => { };
+        _usage = _ => { };
+        _closed = _ => { };
+        presenter.Slide += _slide;
+        presenter.Transcript += _transcript;
+        presenter.Usage += _usage;
+        presenter.Closed += _closed;
+        AttachCount++;
+    }
+
+    public void Detach()
+    {
+        if (_presenter is null) return;
+        _presenter.Slide -= _slide;
+        _presenter.Transcript -= _transcript;
+        _presenter.Usage -= _usage;
+        _presenter.Closed -= _closed;
+        _presenter = null;
+        DetachCount++;
+    }
+
+    public Task BeginAsync(string userId, PresenterStartResult result, CancellationToken cancellationToken = default)
+    {
+        BeginCount++;
+        return Task.CompletedTask;
+    }
+
+    public Task EndAsync(string closeReason = "disconnect", double? seconds = null)
+    {
+        if (Interlocked.CompareExchange(ref _ended, 1, 0) == 0)
+        {
+            EndCount++;
+            if (!factory.GateEnd) _end.TrySetResult();
+            else _ = factory.EndGate.Task.ContinueWith(_ => _end.TrySetResult(), TaskScheduler.Default);
+        }
+
+        return _end.Task;
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
 internal sealed class TestTicketStore : ITicketStore

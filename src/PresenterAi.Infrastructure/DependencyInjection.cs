@@ -6,10 +6,12 @@ using PresenterAi.Application.Content;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Redis;
+using PresenterAi.Infrastructure.Sessions;
 
 namespace PresenterAi.Infrastructure;
 
@@ -23,6 +25,7 @@ public static class DependencyInjection
         services.AddDbContext<PresenterAiDbContext>(options =>
             options.UseNpgsql(connectionString ?? string.Empty, npgsql => npgsql.EnableRetryOnFailure()));
         services.AddScoped<IPresentationRepository, PostgresPresentationRepository>();
+        services.TryAddSingleton<ISessionRecorderFactory, SessionRecorderFactory>();
         return services;
     }
 

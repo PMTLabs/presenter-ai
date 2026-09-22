@@ -8,6 +8,7 @@ using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
 using PresenterAi.Contracts;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Redis;
 
 namespace PresenterAi.Api.Realtime;
@@ -19,6 +20,7 @@ public sealed class PresenterBridge : IAsyncDisposable
     private readonly IPresenter _presenter;
     private readonly ILogger<PresenterBridge> _logger;
     private readonly ITicketStore _ticketStore;
+    private readonly ISessionRecorderFactory _recorderFactory;
     private readonly TimeSpan _authFrameTimeout;
     private readonly SemaphoreSlim _pendingAuth;
     private ClientConnection? _client;
@@ -29,11 +31,13 @@ public sealed class PresenterBridge : IAsyncDisposable
         IPresenter presenter,
         ILogger<PresenterBridge> logger,
         ITicketStore ticketStore,
+        ISessionRecorderFactory recorderFactory,
         IOptions<SessionRedisOptions> sessionOptions)
     {
         _presenter = presenter;
         _logger = logger;
         _ticketStore = ticketStore;
+        _recorderFactory = recorderFactory;
         _authFrameTimeout = TimeSpan.FromSeconds(sessionOptions.Value.AuthFrameTimeoutSeconds);
         _pendingAuth = new SemaphoreSlim(sessionOptions.Value.MaxPendingAuthConnections, sessionOptions.Value.MaxPendingAuthConnections);
         // One process-wide subscription: handlers never block the Presenter loop and only route to its owner.
@@ -85,12 +89,24 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
         finally
         {
-            // A writer fault must not relinquish ownership. Only the receive owner's successful CAS can end it.
-            var owned = Interlocked.CompareExchange(ref _client, null, connection) == connection;
-            await connection.DisposeAsync().ConfigureAwait(false);
-            if (owned && _presenter.Snapshot().State != "idle")
+            // A writer fault must not relinquish ownership. Only the receive owner can perform cleanup, and the
+            // slot stays held until presenter shutdown and the recorder barrier have both completed.
+            var owned = ReferenceEquals(Volatile.Read(ref _client), connection);
+            if (owned)
             {
-                await ObserveEndAsync().ConfigureAwait(false);
+                if (_presenter.Snapshot().State != "idle")
+                {
+                    await ObserveEndAsync().ConfigureAwait(false);
+                }
+
+                await connection.EndRecorderAsync().ConfigureAwait(false);
+                await connection.DetachAndDisposeRecorderAsync().ConfigureAwait(false);
+            }
+
+            await connection.DisposeAsync().ConfigureAwait(false);
+            if (owned)
+            {
+                Interlocked.CompareExchange(ref _client, null, connection);
             }
         }
     }
@@ -245,7 +261,11 @@ public sealed class PresenterBridge : IAsyncDisposable
 
                     int? fromIndex = document.RootElement.TryGetProperty("fromIndex", out var from) && from.TryGetInt32(out var value) ? value : null;
                     _logger.LogDebug("Starting presentation {PresentationId} for user {UserId}", presentation.GetString(), connection.UserId);
-                    ObserveCommand(_presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, cancellationToken), connection, "start", true);
+                    var recorder = connection.PrepareRecorder(_recorderFactory, _presenter);
+                    ObserveStart(
+                        _presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, cancellationToken),
+                        connection,
+                        recorder);
                     return;
                 case "next": ObserveCommand(_presenter.NextAsync(cancellationToken), connection, type, false); return;
                 case "prev": ObserveCommand(_presenter.PrevAsync(cancellationToken), connection, type, false); return;
@@ -285,6 +305,38 @@ public sealed class PresenterBridge : IAsyncDisposable
             }
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
+
+    private async Task ObserveStartAsync(Task<PresenterStartResult> task, ClientConnection connection, ISessionRecorder? recorder)
+    {
+        try
+        {
+            var result = await task.ConfigureAwait(false);
+            if (result.Started)
+            {
+                if (recorder is not null)
+                {
+                    await recorder.BeginAsync(connection.UserId, result).ConfigureAwait(false);
+                }
+            }
+            else if (recorder is not null)
+            {
+                await connection.RetireRecorderAsync(recorder).ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (recorder is not null)
+            {
+                await connection.RetireRecorderAsync(recorder).ConfigureAwait(false);
+            }
+
+            _logger.LogError(exception, "Presenter command start failed");
+            connection.EnqueueText(new { type = "error", message = exception.Message, code = "start" });
+        }
+    }
+
+    private void ObserveStart(Task<PresenterStartResult> task, ClientConnection connection, ISessionRecorder? recorder) =>
+        _ = ObserveStartAsync(task, connection, recorder);
 
     private async Task ObserveEndAsync()
     {
@@ -339,6 +391,11 @@ public sealed class PresenterBridge : IAsyncDisposable
         private readonly Func<Task>? _beforeSocketSendAsync;
         private readonly Task _writer;
         private int _failed;
+        private readonly object _recorderLock = new();
+        private IPresenter? _recorderPresenter;
+        private Action<PresenterClosed>? _runClosedHandler;
+        private ISessionRecorder? _recorder;
+        private bool _recorderActive;
 
         public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
         {
@@ -404,6 +461,127 @@ public sealed class PresenterBridge : IAsyncDisposable
         {
             _outbound.Writer.TryComplete();
             return _writer;
+        }
+
+        internal ISessionRecorder? PrepareRecorder(ISessionRecorderFactory factory, IPresenter presenter)
+        {
+            lock (_recorderLock)
+            {
+                // A second start while presenting must not replace or end the first run's recorder. The presenter
+                // itself will return Started=false for that command.
+                if (_recorderActive || !string.Equals(presenter.Snapshot().State, "idle", StringComparison.Ordinal))
+                {
+                    return null;
+                }
+
+                var prior = _recorder;
+                if (prior is not null)
+                {
+                    DetachRunHandler();
+                    prior.Detach();
+                    _ = FinishPriorRecorderAsync(prior);
+                }
+
+                _recorder = factory.Create();
+                _recorder.Attach(presenter);
+                _recorderPresenter = presenter;
+                _runClosedHandler = _ => MarkRunClosed();
+                presenter.Closed += _runClosedHandler;
+                _recorderActive = true;
+                return _recorder;
+            }
+        }
+
+        internal async Task RetireRecorderAsync(ISessionRecorder recorder)
+        {
+            var owns = false;
+            lock (_recorderLock)
+            {
+                owns = ReferenceEquals(_recorder, recorder);
+            }
+
+            if (!owns)
+            {
+                return;
+            }
+
+            await recorder.EndAsync().ConfigureAwait(false);
+            lock (_recorderLock)
+            {
+                if (ReferenceEquals(_recorder, recorder))
+                {
+                    DetachRunHandler();
+                    recorder.Detach();
+                    _recorder = null;
+                    _recorderActive = false;
+                }
+            }
+
+            await recorder.DisposeAsync().ConfigureAwait(false);
+        }
+
+        internal async Task EndRecorderAsync()
+        {
+            ISessionRecorder? recorder;
+            lock (_recorderLock)
+            {
+                recorder = _recorder;
+            }
+
+            if (recorder is not null)
+            {
+                await recorder.EndAsync().ConfigureAwait(false);
+            }
+        }
+
+        internal async Task DetachAndDisposeRecorderAsync()
+        {
+            ISessionRecorder? recorder;
+            lock (_recorderLock)
+            {
+                recorder = _recorder;
+                _recorder = null;
+                _recorderActive = false;
+                DetachRunHandler();
+                recorder?.Detach();
+            }
+
+            if (recorder is not null)
+            {
+                await recorder.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+
+        private void MarkRunClosed()
+        {
+            lock (_recorderLock)
+            {
+                _recorderActive = false;
+            }
+        }
+
+        private void DetachRunHandler()
+        {
+            if (_recorderPresenter is not null && _runClosedHandler is not null)
+            {
+                _recorderPresenter.Closed -= _runClosedHandler;
+            }
+
+            _recorderPresenter = null;
+            _runClosedHandler = null;
+        }
+
+        private static async Task FinishPriorRecorderAsync(ISessionRecorder recorder)
+        {
+            try
+            {
+                await recorder.EndAsync().ConfigureAwait(false);
+                await recorder.DisposeAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // A prior run is already detached; its recorder must never affect a new presenter run.
+            }
         }
 
         internal void FailForBackpressure()

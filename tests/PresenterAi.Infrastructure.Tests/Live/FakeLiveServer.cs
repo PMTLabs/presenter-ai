@@ -32,6 +32,8 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
     public bool IgnoreClose { get; set; }
 
+    public string SessionId { get; set; } = "sess_fake";
+
     public int Port { get; private set; }
 
     public string Url => $"ws://127.0.0.1:{Port}/v1/live/sessions";
@@ -51,7 +53,7 @@ public sealed class FakeLiveServer : IAsyncDisposable
         }
     }
 
-    public static async Task<FakeLiveServer> StartAsync(int audioDeltasPerAppend = 3, int deltaGapMs = 20)
+    public static async Task<FakeLiveServer> StartAsync(int audioDeltasPerAppend = 3, int deltaGapMs = 20, string sessionId = "sess_fake")
     {
         var builder = WebApplication.CreateSlimBuilder();
         // Referencing this fixture from API tests makes the API appsettings visible to the slim host;
@@ -62,7 +64,8 @@ public sealed class FakeLiveServer : IAsyncDisposable
         var server = new FakeLiveServer(app, 0)
         {
             AudioDeltasPerAppend = audioDeltasPerAppend,
-            DeltaGapMs = deltaGapMs
+            DeltaGapMs = deltaGapMs,
+            SessionId = sessionId
         };
         app.UseWebSockets();
         app.Map("/v1/live/sessions", server.HandleConnectionAsync);
@@ -187,7 +190,7 @@ public sealed class FakeLiveServer : IAsyncDisposable
                 }
 
                 var started = (JsonObject)(session?.DeepClone() ?? new JsonObject());
-                started["id"] = "sess_fake";
+                started["id"] = SessionId;
                 started["expires_at"] = 4102444800L;
                 await SendAsync(socket, new JsonObject { ["type"] = "session.started", ["session"] = started }, cancellationToken);
                 return;
