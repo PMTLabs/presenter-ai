@@ -19,7 +19,7 @@ deck advance, and can interrupt with spoken questions. Phase 0 (plan 002) ported
 | `presentations/`, `decks/` | Content. `docs/guides/001-presenting-a-new-deck.md` explains how to add a deck. |
 | `docs/` | `plan` (numbered plans, approval log inside each), `progress` (work logs, handoffs), `review`, `research`, `reference/001-api-and-code-conventions.md` (the API contract), `agentic/review-rounds-ledger.md`. |
 | `scripts/secrets-guard.sh` | Fails if anything secret-shaped is tracked; `scripts/secrets-guard.selftest.sh` proves it still catches the known shapes. |
-| `src/server`, `src/web`, `test/`, `scripts/*.mjs`, root `package.json` | **Legacy Node MVP — being retired** (decided in plan 002, executed by the next plan). Do not extend it. |
+| Node MVP history | Retired; see `docs/reference/002-node-mvp-retired.md`. |
 
 ## Build, test, run
 

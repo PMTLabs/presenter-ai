@@ -1,10 +1,12 @@
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.AspNetCore.Hosting;
 using PresenterAi.Api.Tests.Infrastructure;
 
 namespace PresenterAi.Api.Tests;
 
-public sealed class PresentationEndpointTests(ApiFactory factory) : IClassFixture<ApiFactory>
+public sealed class PresentationEndpointTests(ApiFactory factory, WebRootFixture webRoot) :
+    IClassFixture<ApiFactory>, IClassFixture<WebRootFixture>
 {
     [Theory]
     [InlineData("/api/presentations", "presentations.json")]
@@ -61,7 +63,9 @@ public sealed class PresentationEndpointTests(ApiFactory factory) : IClassFixtur
     [Fact]
     public async Task Static_ui_has_no_cache_header()
     {
-        using var client = factory.CreateClient();
+        using var client = factory
+            .WithWebHostBuilder(builder => builder.UseSetting("Content:WebRoot", webRoot.Root))
+            .CreateClient();
         var response = await client.GetAsync("/");
         response.EnsureSuccessStatusCode();
         response.Headers.GetValues("Cache-Control").Should().ContainSingle().Which.Should().Be("no-cache");

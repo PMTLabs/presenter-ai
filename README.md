@@ -4,8 +4,8 @@ Presenter AI presents an HTML slide deck by voice through **GPT-Live-1** (OpenAI
 Markdown script says what to narrate on each slide, the app shows the slide, the model speaks it,
 you can interrupt with a question at any time, and the deck advances when the narration ends.
 
-The primary stack is the .NET 10 API with the React workspaces. The original Node MVP is still kept until
-plan 004; its commands are marked **legacy** below.
+The primary stack is the .NET 10 API with the React workspaces. The Node MVP was retired in plan 003; its last
+commit is `2a0b6a1`.
 
 ## Quick start — .NET + React
 
@@ -13,7 +13,6 @@ Prerequisites:
 
 - .NET 10 SDK
 - Bun 1.3.x (the workspace is pinned to Bun 1.3.14)
-- Node 22 only when using the legacy Node page or scripts
 
 Store development secrets with `dotnet user-secrets`, separately for the API and CLI. Do not put secrets in
 `appsettings.json`; the supported keys are `Upstream:Endpoint`, `Upstream:Key`, and the optional
@@ -37,8 +36,8 @@ Start the .NET API from the repository root:
 dotnet run --project src/PresenterAi.Api
 ```
 
-The API listens at <http://localhost:47913> and serves the classic page from `src/web`. The React development
-workspaces run through Bun:
+The API listens at <http://localhost:47913> and serves the built React app from `web/app/dist` when it exists.
+The React development workspaces run through Bun:
 
 ```bash
 cd web
@@ -100,7 +99,7 @@ Without `--url`, generation reads the checked-in snapshot. CI regenerates the cl
 
 ## Use the presenter
 
-Open the classic page at <http://localhost:47913> or the React app at <http://localhost:47914>, pick a
+Open the React app at <http://localhost:47914> (or the API's built app at <http://localhost:47913>), pick a
 presentation, and press **Start**. Allow the microphone when prompted. Use headphones so the microphone does
 not pick up the model's own voice.
 
@@ -116,8 +115,8 @@ The deck's own navigation buttons also work: the presenter follows the deck.
 
 ## Configuration (`.env`)
 
-This table is retained for the original Node MVP. The names used by Compose are mapped above. The .NET local
-path uses the `Upstream:*` user-secrets above; the .NET container receives the mapped `Upstream__*` settings.
+The names used by Compose are mapped above. The .NET local path uses the `Upstream:*` user-secrets above; the
+.NET container receives the mapped `Upstream__*` settings.
 
 | Variable | Required | Meaning |
 |---|---|---|
@@ -126,9 +125,8 @@ path uses the `Upstream:*` user-secrets above; the .NET container receives the m
 | `UPSTREAM_MODEL` | no | `gpt-live-1` (OpenAI) or the Azure deployment name. Default `gpt-live-1`. |
 | `UPSTREAM_VOICE` | no | Output voice, default `marin`. |
 | `FALLBACK_OPENAI_KEY` | no | If set, `api.openai.com` is tried when the primary cannot start a session (rate limit, outage). `FALLBACK_OPENAI_ENDPOINT` / `FALLBACK_OPENAI_MODEL` override the route/model. |
-| `PORT` | no | Legacy Node default `47913` (deliberately unusual). |
 | `ADVANCE_SILENCE_MS` | no | Silence after the model stops speaking before the next slide. Default `3000`. |
-| `LOG_EVENTS` | no | `1` dumps every upstream JSON event in Node; the .NET host binds `true`/`false`. |
+| `LOG_EVENTS` | no | Log every upstream JSON event (audio deltas excluded); the .NET host binds `true`/`false`. |
 
 Sessions cost about $0.05 per minute of session time, silence included. The app closes the session after the
 last slide, when you press End/Esc, and when the browser tab goes away.
@@ -192,28 +190,11 @@ Things learned from the live service that the code relies on:
   `advanceSilenceMs` ≥ 2500.
 - Client delegation events carry no task text, so voice commands like "go to slide 3" are not implemented.
 
-## Legacy Node MVP — kept until plan 004
-
-The original Node page and scripts remain available. These commands are legacy and are not the primary path:
-
-```bash
-npm install
-npm start                 # legacy page → http://localhost:47913
-npm test
-node scripts/live-smoke.mjs [--fallback]
-node scripts/headless-run.mjs [id] [--max-seconds N] [--stop-after-slide N]
-node scripts/browser-e2e.mjs
-```
-
-The legacy Node page uses the `.env` table above. Do not run the legacy server and the .NET API on the same
-port at the same time.
-
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | `Configuration invalid: Missing required setting: …` on .NET start | Set the corresponding `Upstream:*` key with `dotnet user-secrets` for the API project. |
-| `Missing required env: …` on the legacy Node start | Fill that variable in `.env`. |
 | Startup `error` mentioning the model | Azure: set `UPSTREAM_MODEL` to your deployment name. |
 | Start does nothing, log stops at "requesting microphone…" | Chrome is showing the mic permission prompt; the narration still plays, the mic joins when you allow it. |
 | `audio output did not start within 4000 ms` | The default output device could not be opened; pick another output device in Windows and reload. |

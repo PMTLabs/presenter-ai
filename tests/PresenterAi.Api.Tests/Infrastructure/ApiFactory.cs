@@ -16,6 +16,9 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Auth:Dev:UserId", "test-user");
         builder.UseSetting("Auth:Dev:Email", "test@presenter-ai.local");
         builder.UseSetting("Content:RootDir", FindRepositoryRoot());
+        // No web root by default: a test that wants the SPA served must opt in with WebRootFixture, so nothing
+        // passes only because web/app/dist happens to be built on the developer's machine (CI never builds it).
+        builder.UseSetting("Content:WebRoot", Path.Combine(Path.GetTempPath(), "presenter-ai-no-web-root"));
 
         if (Overrides is not null)
         {

@@ -52,7 +52,6 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
         startInfo.ArgumentList.Add("--Upstream:Endpoint=https://api.openai.com");
         startInfo.ArgumentList.Add("--Upstream:Key=");
         startInfo.ArgumentList.Add($"--Content:RootDir={root}");
-        startInfo.ArgumentList.Add($"--Content:WebRoot={Path.Combine(root, "src", "web")}");
 
         using var process = Process.Start(startInfo);
         process.Should().NotBeNull();

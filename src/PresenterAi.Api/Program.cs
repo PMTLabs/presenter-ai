@@ -59,6 +59,7 @@ app.UseExceptionHandler();
 
 var contentOptions = app.Services.GetRequiredService<IOptions<ContentOptions>>().Value;
 var webRoot = Path.GetFullPath(contentOptions.WebRoot, app.Environment.ContentRootPath);
+var hasWebRoot = File.Exists(Path.Combine(webRoot, "index.html"));
 app.UseStaticFiles(new StaticFileOptions
 {
     // The deck root comes from the same IDeckStore the content layer registers (T16 wiring audit: no other consumer).
@@ -66,11 +67,18 @@ app.UseStaticFiles(new StaticFileOptions
     RequestPath = "/decks",
     ServeUnknownFileTypes = true
 });
-app.UseStaticFiles(new StaticFileOptions
+if (hasWebRoot)
 {
-    FileProvider = new PhysicalFileProvider(webRoot),
-    OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache"
-});
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = new PhysicalFileProvider(webRoot),
+        OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache"
+    });
+}
+else
+{
+    app.Logger.LogInformation("web root {WebRoot} not found — API only; run \"bun run dev:app\" for the UI", webRoot);
+}
 // Routing must come AFTER the static file middleware: with the implicit UseRouting at the top of the
 // pipeline the "/decks/{**path}" 404 endpoint is selected first and StaticFileMiddleware then skips
 // every deck file (found by the T11 Chrome run: "Deck not found: /ricoh/index.html").
@@ -104,6 +112,12 @@ app.MapFallback(async context =>
         || path == "/ws"
         || path.StartsWith("/openapi/", StringComparison.Ordinal)
         || path == "/health")
+    {
+        context.Response.StatusCode = StatusCodes.Status404NotFound;
+        return;
+    }
+
+    if (!hasWebRoot)
     {
         context.Response.StatusCode = StatusCodes.Status404NotFound;
         return;
