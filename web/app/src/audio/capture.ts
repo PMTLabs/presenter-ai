@@ -17,6 +17,7 @@ export async function startAudio(
     onLevel?: (level: number) => void;
     onBuffered?: (ms: number) => void;
     onMicReady?: (ready: boolean) => void;
+    signal?: AbortSignal;
   } = {},
 ): Promise<StartedAudio> {
   const context = createAudioContext();
@@ -38,12 +39,15 @@ export async function startAudio(
   });
   const audio: StartedAudio = { context, playback, capture, micReady: false };
   void capture
-    .start()
+    .start(options.signal)
     .then(() => {
+      if (options.signal?.aborted) return;
       audio.micReady = true;
       options.onMicReady?.(true);
     })
-    .catch(() => options.onMicReady?.(false));
+    .catch(() => {
+      if (!options.signal?.aborted) options.onMicReady?.(false);
+    });
   return audio;
 }
 
@@ -52,6 +56,7 @@ export class AudioCapture {
   private source: MediaStreamAudioSourceNode | null = null;
   private node: AudioWorkletNode | null = null;
   private muted = false;
+  private stopped = false;
   constructor(
     private options: {
       context: AudioContext;
@@ -59,9 +64,15 @@ export class AudioCapture {
       onLevel?: (value: number) => void;
     },
   ) {}
-  async start() {
+  async start(signal?: AbortSignal) {
     const { context } = this.options;
-    this.stream = await navigator.mediaDevices.getUserMedia({
+    const abort = () => this.stop();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) {
+      this.stop();
+      return;
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
@@ -70,9 +81,18 @@ export class AudioCapture {
       },
       video: false,
     });
+    if (this.stopped || signal?.aborted) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    this.stream = stream;
     await context.audioWorklet.addModule(
       new URL("./worklets/capture-processor.ts", import.meta.url),
     );
+    if (this.stopped || signal?.aborted) {
+      this.stop();
+      return;
+    }
     this.source = context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(context, "capture-processor", {
       numberOfInputs: 1,
@@ -92,6 +112,7 @@ export class AudioCapture {
     this.node?.port.postMessage({ type: "mute", value });
   }
   stop() {
+    this.stopped = true;
     try {
       this.source?.disconnect();
       this.node?.disconnect();

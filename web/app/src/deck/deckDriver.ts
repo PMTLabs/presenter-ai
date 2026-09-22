@@ -57,6 +57,8 @@ export class DeckDriver {
   private adapter: (typeof adapters)[AdapterName] | null = null;
   currentIndex = 0;
   private hashHandler: (() => void) | null = null;
+  private loadHandler: (() => void) | null = null;
+  private disposed = false;
   constructor(
     private iframe: HTMLIFrameElement,
     private options: {
@@ -78,13 +80,16 @@ export class DeckDriver {
     }: { driver?: string; detectTimeoutMs?: number } = {},
   ) {
     this.detach();
+    this.disposed = false;
     this.adapter = null;
     this.adapterName = null;
     return new Promise<{ adapter: AdapterName | null; count: number }>(
       (resolve) => {
         const loaded = async () => {
           this.iframe.removeEventListener("load", loaded);
+          this.loadHandler = null;
           const name = await this.detect(driver, detectTimeoutMs);
+          if (this.disposed) return;
           if (!name) {
             this.log(
               "warn",
@@ -100,6 +105,7 @@ export class DeckDriver {
           this.attach();
           resolve({ adapter: name, count });
         };
+        this.loadHandler = loaded;
         this.iframe.addEventListener("load", loaded);
         this.iframe.src = url;
       },
@@ -144,6 +150,15 @@ export class DeckDriver {
       /* cross-origin */
     }
     this.hashHandler = null;
+  }
+  dispose() {
+    this.disposed = true;
+    if (this.loadHandler)
+      this.iframe.removeEventListener("load", this.loadHandler);
+    this.loadHandler = null;
+    this.detach();
+    this.adapter = null;
+    this.adapterName = null;
   }
   goto(index: number) {
     if (!this.adapter) return false;

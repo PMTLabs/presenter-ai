@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import apiClient, { type components } from "@presenter/shared/api";
-import { isProblem } from "@presenter/shared";
+import { errorMessages, isProblem } from "@presenter/shared";
 
 type PresentationRow = components["schemas"]["PresentationSummary"];
 
@@ -19,7 +19,7 @@ export function Library() {
           const problem: unknown = requestError;
           setError(
             isProblem(problem)
-              ? (problem.detail ?? problem.title ?? problem.code)
+              ? (errorMessages[problem.code] ?? problem.detail ?? problem.title)
               : "Unable to load presentations.",
           );
           return;

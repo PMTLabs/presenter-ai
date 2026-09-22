@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import apiClient, { type components } from "@presenter/shared/api";
+import { errorMessages, isProblem } from "@presenter/shared";
 import { BridgeClient } from "../ws/bridgeClient";
 import { DeckDriver } from "../deck/deckDriver";
 import { startAudio, type StartedAudio } from "../audio/capture";
@@ -16,7 +17,9 @@ export function Present() {
   const client = useRef<BridgeClient | null>(null);
   const driver = useRef<DeckDriver | null>(null);
   const audio = useRef<StartedAudio | null>(null);
+  const audioAbort = useRef<AbortController | null>(null);
   const [presentation, setPresentation] = useState<Detail | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const snapshot = usePresenterStore((state) => state.snapshot);
   const bufferedMs = usePresenterStore((state) => state.bufferedMs);
   const transcript = usePresenterStore((state) => state.transcript);
@@ -26,6 +29,15 @@ export function Present() {
   const log = usePresenterStore((state) => state.log);
   const setMicReady = usePresenterStore((state) => state.setMicReady);
   const setBuffered = usePresenterStore((state) => state.setBuffered);
+  const stopAudio = useCallback(() => {
+    audioAbort.current?.abort();
+    audioAbort.current = null;
+    audio.current?.capture.stop();
+    audio.current?.playback.stop();
+    void audio.current?.context.close();
+    audio.current = null;
+    setMicReady(false);
+  }, [setMicReady]);
   useEffect(() => {
     const bridge = new BridgeClient();
     client.current = bridge;
@@ -49,16 +61,34 @@ export function Present() {
     bridge.on("open", () => log("info", "connected to server"));
     bridge.on("close", () => log("warn", "server connection closed"));
     bridge.connect();
-    return () => bridge.disconnect();
-  }, []);
+    return () => {
+      bridge.disconnect();
+      stopAudio();
+      driver.current?.dispose();
+      driver.current = null;
+    };
+  }, [applySnapshot, log, message, stopAudio]);
   useEffect(() => {
     if (!id) return;
+    let active = true;
+    setError(null);
     void apiClient
       .GET("/api/presentations/{id}", { params: { path: { id } } })
-      .then(({ data }) => {
+      .then(({ data, error: requestError }) => {
+        if (!active) return;
+        if (requestError) {
+          const problem: unknown = requestError;
+          setError(
+            isProblem(problem)
+              ? (errorMessages[problem.code] ?? problem.detail ?? problem.title)
+              : "Unable to load presentation.",
+          );
+          return;
+        }
         const detail: Detail | undefined = data;
         if (!detail || !frame.current) return;
         setPresentation(detail);
+        driver.current?.dispose();
         const deck = new DeckDriver(frame.current, {
           log,
           onExternalNavigate: (index) => {
@@ -71,25 +101,41 @@ export function Present() {
           },
         });
         driver.current = deck;
-        void deck.load(`/${detail.meta.deck.replace(/^\/+/, "")}`, {
-          driver: detail.meta.driver ?? "auto",
-        });
+        void deck
+          .load(`/${detail.meta.deck.replace(/^\/+/, "")}`, {
+            driver: detail.meta.driver ?? "auto",
+          })
+          .then(() => {
+            if (!active) deck.dispose();
+          });
+      })
+      .catch(() => {
+        if (active) setError("Unable to load presentation.");
       });
-  }, [id]);
-  const stopAudio = () => {
-    audio.current?.capture.stop();
-    audio.current?.playback.stop();
-    void audio.current?.context.close();
-    audio.current = null;
-    setMicReady(false);
-  };
+    return () => {
+      active = false;
+      driver.current?.dispose();
+      driver.current = null;
+    };
+  }, [id, log]);
   const begin = async () => {
     if (!presentation) return;
-    audio.current = await startAudio({
+    stopAudio();
+    const controller = new AbortController();
+    audioAbort.current = controller;
+    const started = await startAudio({
       onFrame: (buffer) => client.current?.sendAudio(buffer),
       onBuffered: setBuffered,
       onMicReady: setMicReady,
+      signal: controller.signal,
     });
+    if (controller.signal.aborted) {
+      started.capture.stop();
+      started.playback.stop();
+      void started.context.close();
+      return;
+    }
+    audio.current = started;
     client.current?.start(presentation.id, 0);
   };
   useEffect(() => {
@@ -152,6 +198,11 @@ export function Present() {
       <Link className="text-sm text-blue-600" to="/">
         ← Library
       </Link>
+      {error && (
+        <p className="mt-4 rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
+          {error}
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap gap-2">
         <span className="rounded-full bg-blue-100 px-3 py-1 text-xs">
           {snapshot.state}
@@ -171,12 +222,14 @@ export function Present() {
           />
           <div className="mt-3 flex flex-wrap gap-2">
             <button
+              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => void begin()}
               disabled={snapshot.state !== "idle"}
             >
               Start
             </button>
             <button
+              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
               onClick={() =>
                 snapshot.state === "paused"
                   ? client.current?.resume()
@@ -184,16 +237,16 @@ export function Present() {
               }
               disabled={!live}
             >
-              {" "}
-              {snapshot.state === "paused" ? "Resume" : "Pause"}{" "}
+              {snapshot.state === "paused" ? "Resume" : "Pause"}
             </button>
-            <button onClick={() => client.current?.prev()} disabled={!live}>
+            <button className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700" onClick={() => client.current?.prev()} disabled={!live}>
               Prev
             </button>
-            <button onClick={() => client.current?.next()} disabled={!live}>
+            <button className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700" onClick={() => client.current?.next()} disabled={!live}>
               Next
             </button>
             <button
+              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
               onClick={() => {
                 if (snapshot.muted) client.current?.unmute();
                 else client.current?.mute();
@@ -203,6 +256,7 @@ export function Present() {
               {snapshot.muted ? "Unmute" : "Mute"}
             </button>
             <button
+              className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
               onClick={() => client.current?.end()}
               disabled={snapshot.state === "idle"}
             >

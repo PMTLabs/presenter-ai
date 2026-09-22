@@ -67,11 +67,15 @@ export class BridgeClient {
     this.ws = ws;
     ws.binaryType = "arraybuffer";
     ws.addEventListener("open", () => {
+      if (this.ws !== ws) return;
       this.retry = 0;
       ws.send(JSON.stringify({ type: "auth", ticket: DEV_TICKET }));
       this.emit("open");
     });
-    ws.addEventListener("message", (event) => this.receive(event.data));
+    ws.addEventListener("message", (event) => {
+      if (this.ws !== ws) return;
+      this.receive(event.data);
+    });
     ws.addEventListener("close", () => {
       if (this.ws !== ws) return;
       this.ws = null;
