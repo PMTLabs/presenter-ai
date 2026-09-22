@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { apiBaseUrl, apiUrl } from "../api/baseUrl";
 
 export interface AuthUser {
   id: string;
@@ -38,10 +39,11 @@ export function clearAuthSession() {
   useAuthStore.setState({ user: null });
 }
 
-export function refreshAuth(): Promise<boolean> {
+// All callers, including startup and the API interceptor, share this flight so a rotating cookie is redeemed once.
+export function refreshAuth(baseUrl = apiBaseUrl()): Promise<boolean> {
   if (refreshPromise) return refreshPromise;
   refreshPromise = (async () => {
-    const response = await fetch("/v1/auth/refresh", {
+    const response = await fetch(apiUrl("/v1/auth/refresh", baseUrl), {
       method: "POST",
       credentials: "include",
       headers: { Accept: "application/json" },
@@ -67,7 +69,7 @@ export const useAuthStore = create<AuthState>(() => ({
   signInDev: async () => {
     // This endpoint is intentionally absent from the checked-in OpenAPI document:
     // it is mapped only for a development host, so use a plain typed fetch here.
-    const response = await fetch("/v1/auth/dev/sign-in", {
+    const response = await fetch(apiUrl("/v1/auth/dev/sign-in"), {
       method: "POST",
       headers: { Accept: "application/json" },
     });
@@ -76,7 +78,7 @@ export const useAuthStore = create<AuthState>(() => ({
   },
   signOut: async () => {
     try {
-      await fetch("/v1/auth/logout", {
+      await fetch(apiUrl("/v1/auth/logout"), {
         method: "POST",
         credentials: "include",
         headers: { Accept: "application/json" },

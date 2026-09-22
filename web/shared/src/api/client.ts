@@ -1,10 +1,10 @@
 import createClient from "openapi-fetch";
 import type { paths } from "./generated";
+import { apiBaseUrl } from "./baseUrl";
 import {
   clearAuthSession,
   getAccessToken,
-  setAuthSession,
-  type AuthTokenResponse,
+  refreshAuth,
 } from "../auth/authStore";
 
 export type { components, paths } from "./generated";
@@ -14,9 +14,8 @@ export type ApiClient = ReturnType<typeof createApiClient>;
 type FetchInput = RequestInfo | URL;
 type FetchInit = RequestInit | undefined;
 
-function withAuthorization(input: FetchInput, init: FetchInit): [FetchInput, RequestInit] {
+function withAuthorization(input: FetchInput, init: FetchInit, token: string | null): [FetchInput, RequestInit] {
   const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
-  const token = getAccessToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
   const requestInit = { ...init, headers };
   return input instanceof Request
@@ -24,45 +23,51 @@ function withAuthorization(input: FetchInput, init: FetchInit): [FetchInput, Req
     : [input, requestInit];
 }
 
-function refreshUrl(input: FetchInput) {
+function isRefreshRequest(input: FetchInput): boolean {
   const raw = input instanceof Request ? input.url : String(input);
   try {
-    return new URL("/v1/auth/refresh", raw).toString();
+    return new URL(raw, "http://presenter-ai.invalid").pathname === "/v1/auth/refresh";
   } catch {
-    return "/v1/auth/refresh";
+    return false;
   }
 }
 
 async function authenticatedFetch(
+  baseUrl: string,
   input: FetchInput,
   init?: FetchInit,
 ): Promise<Response> {
-  const [authorizedInput, authorizedInit] = withAuthorization(input, init);
+  const tokenUsed = getAccessToken();
+  const retrySource = input instanceof Request ? input.clone() : input;
+  const [authorizedInput, authorizedInit] = withAuthorization(input, init, tokenUsed);
   const response = await fetch(authorizedInput, authorizedInit);
-  const requestUrl = input instanceof Request ? input.url : String(input);
-  if (response.status !== 401 || requestUrl.endsWith("/v1/auth/refresh"))
+  if (response.status !== 401 || isRefreshRequest(input))
     return response;
 
-  const refreshed = await fetch(refreshUrl(input), {
-    method: "POST",
-    credentials: "include",
-    headers: { Accept: "application/json" },
-  });
-  if (!refreshed.ok) {
-    clearAuthSession();
+  // A concurrent refresh may have replaced the token while this request was in flight. Retrying it is enough;
+  // redeeming the cookie again would race rotation.
+  if (getAccessToken() !== tokenUsed) {
+    const [retryInput, retryInit] = withAuthorization(retrySource, init, getAccessToken());
+    return fetch(retryInput, retryInit);
+  }
+
+  const refreshed = await refreshAuth(baseUrl);
+  if (!refreshed) {
+    // Do not let a loser of a concurrent refresh clear the winner's replacement session.
+    if (getAccessToken() === tokenUsed)
+      clearAuthSession();
     return response;
   }
 
-  setAuthSession((await refreshed.json()) as AuthTokenResponse);
-  const [retryInput, retryInit] = withAuthorization(input, init);
+  const [retryInput, retryInit] = withAuthorization(retrySource, init, getAccessToken());
   return fetch(retryInput, retryInit);
 }
 
 export function createApiClient(baseUrl?: string) {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  const resolvedBaseUrl = baseUrl ?? apiBaseUrl();
   return createClient<paths>({
-    baseUrl: baseUrl ?? env?.VITE_API_URL ?? "",
-    fetch: authenticatedFetch,
+    baseUrl: resolvedBaseUrl,
+    fetch: (input: Request) => authenticatedFetch(resolvedBaseUrl, input),
   });
 }
 
