@@ -330,7 +330,9 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
   `data/`, `bin/ obj/ node_modules/ dist/ TestResults/ .vs/`, `*.pid`. `appsettings.Development.json` is
   **tracked** and must hold only non-secret settings (`Content:WebRoot`, ports, log levels); secrets go to
   `dotnet user-secrets`. `scripts/secrets-guard.sh` fails when `git ls-files` matches `^\.env$`,
-  `appsettings\.Local\.json`, or any tracked file contains `UPSTREAM_KEY=` / `"Key": "` with a non-empty value.
+  `appsettings\.Local\.json`, or any tracked file assigns a real-looking value to a setting whose name ends in
+  `key`/`secret`/`token`/`password` (any case, any whitespace around `=`/`:`, JSON/YAML/env/CLI spellings — the
+  class is stated in the script header and pinned by `scripts/secrets-guard.selftest.sh`; review round 1 F1).
   First commit; `git remote add origin https://github.com/PMTLabs/presenter-ai.git`; push `master`; create and
   push `develop`; branch `feature/002-dotnet-core-port`.
 - **Verify:** `scripts/secrets-guard.sh` exits 0; `gh repo view PMTLabs/presenter-ai --json defaultBranchRef`
@@ -402,9 +404,10 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
   (Kestrel WebSocket in-process) ports `test/fake-live-server.js`: records events, `voicedDelta`, `silent`
   flag, `session.closed{reason:'client_request', usage}`, terminates clients on close.
 - **Verify:** tests against the fake — connect/start; startup error closes socket; the pump contract: with no
-  input for 500 ms the fake receives exactly 960-byte all-zero frames totalling 500 ms ±1 frame; after 200 ms of
-  real input frames **no** silence is sent within the 120 ms slack; a tick delayed by 300 ms (FakeTimeProvider)
-  is caught up in one burst; `SilenceMs` is monotonic and equals the silence bytes sent; mute stops input; close
+  input for 500 ms the fake receives exactly 960-byte all-zero frames totalling 500 ms minus the 120 ms slack
+  (19 frames — the Node pump keeps `sentMs` up to `PUMP_SLACK_MS` behind the clock, `live-client.js:76`); after
+  200 ms of real input frames **no** silence is sent within the 120 ms slack; a tick delayed by 300 ms
+  (FakeTimeProvider) is caught up in one burst of 9 frames; `SilenceMs` is monotonic and equals the silence bytes sent; mute stops input; close
   returns usage and reason; no ticks after `Finish`.
 - **Test that dies if this breaks:** `LiveSessionTests.Pump_sends_only_the_gap_not_every_tick` (an implementation
   that sends silence on every tick regardless of real audio fails it), `LiveSessionTests.Pump_catches_up_after_delayed_tick`,
@@ -468,7 +471,8 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
   speech/silence bar), sharing `Application` + `Infrastructure` via the same DI registrations as the API.
 - **Verify:** against the fake: `smoke --provider azure` and `--provider openai` each pick the right upstream
   (asserted by the fake's received `session.start` host/headers), receive voiced audio, print `usage.seconds`, exit 0;
-  `run sample --stop-after-slide 2` shows two slides, parts, transcript and the speech/silence bar. Live: both real
+  `run sample --stop-after-slide 2` narrates slides 1–2 and sends `end` when slide 3 is announced (Node
+  `headless-run.mjs` semantics: the stop fires on the *next* slide event), printing parts, transcript and the speech/silence bar. Live: both real
   providers speak and close (AC3 evidence).
 - **Test that dies if this breaks:** `CliTests.Smoke_selects_provider_and_reports_usage_seconds`,
   `CliTests.Run_sample_against_fake_server_stops_after_slide_2`.
@@ -548,7 +552,7 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
 | 7 | while it narrates, ask a question aloud | model answers, then bridges back to the script; slide does not advance during the exchange |
 | 8 | open a second tab and press Start | second tab shows "Another presenter page is already connected" |
 | 9 | kill the API mid-session; restart | browser shows disconnected → reconnects → idle; no orphan upstream session (usage stops) |
-| 10 | `presenter-cli run ricoh-delivery-overview --stop-after-slide 3` | three slides, speech/silence bars, `session.closed` |
+| 10 | `presenter-cli run ricoh-delivery-overview --stop-after-slide 3` | three slides narrated, `end` sent when slide 4 is announced, speech/silence bars, `closed reason=client_request` |
 
 ## 8. Rollout / phasing
 
@@ -585,4 +589,7 @@ None. Deferred by the brief: OAuth/Postgres/Redis usage (003), admin (004), Stri
 | 2026-09-21 | Requirement brief confirmed (G1) | 3 rounds of questions (12 questions); one brief for plans 002–004 |
 | 2026-09-21 | External plan review | `pi` gpt-5.6-sol:medium, review-only; 9 findings (A1 B1 C4 D3), all folded in: protocol contract frozen with canonical frames (`start.presentation`), exact HTTP shapes + golden tests, producer paths enumerated + §4.6 concurrency model, oracles added for T1/T3/T6/T7/T8/T10/T12/T13/T14/T16, OpenAPI wiring + SPA fallback, traceability matrix, SSE/Sessions explicitly deferred, Moq per InkSpoke, citations corrected; branch protection moved to optional. Report: `docs/review/001-plan-002-external-review.md` |
 | 2026-09-21 | Plan approved (G2) | approved by the user after the external review findings were folded in; implementation starts on an explicit `implement 002` |
+| 2026-09-21 | Oracle correction during T7 | T7 verify text said the 500 ms pump test totals "500 ms ±1 frame"; the Node pump keeps `sentMs` up to 120 ms behind the clock, so the correct totals are 19 frames (500 ms) and 9 frames (300 ms catch-up). Wording fixed; no behaviour change |
 | 2026-09-21 | Amendment after approval | `docs/reference/001-api-and-code-conventions.md` adopted (Problem Details + `code`, bare resources + `{items,page,pageSize,total}`, `area.reason` codes with generated TS union, `/api` trio frozen until 004); T2/T10/T13/T14 wording updated to reference it — no scope change |
+| 2026-09-21 | Implementation complete (T1–T16) | Parity via ported tests: Application 51, Infrastructure 30, Api 46, Cli 5, web shared 3/3 and app 11; three review rounds (`docs/review/002`–`004`); live smoke passed on Azure and OpenAI; Chrome runs passed for T11 (usage 98.6 s) and T15 (usage 98.4 s); wiring audit: `docs/research/004-plan-002-wiring-audit.md`. Deviations from the plan text: stop-after-slide semantics corrected to Node parity, `[FromRoute]` added for the OpenAPI `{id}` parameter, and deck routing order fixed. |
+| 2026-09-21 | T17 added by the user after T16 | Fluid full-width presenter layout with a resizable deck | transcript/log split (`react-resizable-panels` v4, remembered per browser), decided by survey; landed in `2d4af67` with `Present.layout.spec.tsx` (app vitest 21) and a Chrome check (drag/keyboard resize, reload keeps the split, Start/End round-trip usage 25.8 s). Follow-ups from the user reports fixed on the way: control bar styled (`f434b47`), dark-theme text colour (`9a7b0ee`). |

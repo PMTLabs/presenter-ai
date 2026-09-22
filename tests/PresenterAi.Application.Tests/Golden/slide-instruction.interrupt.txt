@@ -1,0 +1,5 @@
+Stop whatever you are saying now. Present slide 1 of 1 now. Say the following narration in full, in order, with only minimal natural rephrasing, then stop and wait:
+
+"""
+x
+"""

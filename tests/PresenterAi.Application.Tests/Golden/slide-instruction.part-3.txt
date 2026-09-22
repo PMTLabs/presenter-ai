@@ -1,0 +1,5 @@
+Part 3 of 3 of slide 1 of 2, the last part. If you have not finished the previous part, finish it first. Then say this text in full and in order, then stop and wait:
+
+"""
+C
+"""

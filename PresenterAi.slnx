@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PresenterAi.Api/PresenterAi.Api.csproj" />
+    <Project Path="src/PresenterAi.Application/PresenterAi.Application.csproj" />
+    <Project Path="src/PresenterAi.Cli/PresenterAi.Cli.csproj" />
+    <Project Path="src/PresenterAi.Contracts/PresenterAi.Contracts.csproj" />
+    <Project Path="src/PresenterAi.Domain/PresenterAi.Domain.csproj" />
+    <Project Path="src/PresenterAi.Infrastructure/PresenterAi.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PresenterAi.Api.Tests/PresenterAi.Api.Tests.csproj" />
+    <Project Path="tests/PresenterAi.Application.Tests/PresenterAi.Application.Tests.csproj" />
+    <Project Path="tests/PresenterAi.Cli.Tests/PresenterAi.Cli.Tests.csproj" />
+    <Project Path="tests/PresenterAi.Infrastructure.Tests/PresenterAi.Infrastructure.Tests.csproj" />
+  </Folder>
+</Solution>

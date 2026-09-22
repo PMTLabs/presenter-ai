@@ -1,0 +1,5 @@
+Present slide 2 of 3 ("Two") now. Say the following narration in full, in order, with only minimal natural rephrasing, then stop and wait:
+
+"""
+Say this. And that.
+"""

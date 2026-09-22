@@ -1,0 +1,65 @@
+# Local development stack. POSTGRES_PASSWORD is a dev-only placeholder; do not use it outside local development.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: presenter_ai
+      POSTGRES_USER: presenter
+      POSTGRES_PASSWORD: dev_password_change_me
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U presenter -d presenter_ai"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6382:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: src/PresenterAi.Api/Dockerfile
+    ports:
+      - "47913:47913"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://0.0.0.0:47913
+      # T2 configures a named Kestrel endpoint; override its localhost bind in the container.
+      Kestrel__Endpoints__Http__Url: http://0.0.0.0:47913
+      Upstream__Endpoint: "${UPSTREAM_ENDPOINT:-}"
+      Upstream__Key: "${UPSTREAM_KEY:-}"
+      Upstream__Model: "${UPSTREAM_MODEL:-gpt-live-1}"
+      Upstream__Voice: "${UPSTREAM_VOICE:-marin}"
+      Upstream__Fallback__Key: "${FALLBACK_OPENAI_KEY:-}"
+      Presenter__AdvanceSilenceMs: "${ADVANCE_SILENCE_MS:-3000}"
+      Presenter__LogEvents: "${LOG_EVENTS:-false}"
+      Content__RootDir: /app/content
+    volumes:
+      - ./presentations:/app/content/presentations:ro
+      - ./decks:/app/content/decks:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:47913/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  pgdata:
