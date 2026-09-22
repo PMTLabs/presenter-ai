@@ -33,6 +33,7 @@ dotnet run --project src/PresenterAi.Cli -- run <slug> --stop-after-slide 2   # 
 # First run with a database (plan 004). Compose publishes Postgres on 5433 and Redis on 6382.
 docker compose up -d postgres redis
 dotnet user-secrets set ConnectionStrings:Postgres "<connection string>" --project src/PresenterAi.Api  # also ConnectionStrings:Redis
+dotnet user-secrets set Jwt:SecretKey "$(openssl rand -base64 48)" --project src/PresenterAi.Api  # generates 48 random bytes without printing them
 dotnet tool install --global dotnet-ef              # once
 dotnet ef database update --project src/PresenterAi.Infrastructure  # uses ConnectionStrings__Postgres, else the compose default
 dotnet run --project src/PresenterAi.Api            # sign in once: dev sign-in creates your users row
@@ -51,9 +52,10 @@ cd web && bun run generate:api                       # regenerates the TS client
 
 Secrets are never in files: `dotnet user-secrets set Upstream:Endpoint … --project src/PresenterAi.Api` (and
 `Upstream:Key`, optional `Upstream:Fallback:Key`; the CLI has its own `presenter-cli` secret store). Docker:
-`docker compose --profile full up` maps every key of `.env.example`. Integration tests start their own
-`pgvector/pgvector:pg17` and `redis:7-alpine` containers. On Windows the Docker daemon lives in WSL and is **not**
-discovered automatically, so `dotnet test PresenterAi.slnx` fails until you export
+`docker compose --profile full up` maps the upstream, presenter and JWT keys of `.env.example`; its host-URL
+keys apply only to a local `dotnet run`. Integration tests start their own `pgvector/pgvector:pg17` and
+`redis:7-alpine` containers. On Windows the Docker daemon lives in WSL and is **not** discovered automatically, so
+`dotnet test PresenterAi.slnx` fails until you export
 `DOCKER_HOST=tcp://localhost:2375` (PowerShell: `$env:DOCKER_HOST='tcp://localhost:2375'`). CI runs on Linux, where
 the default socket is found without it.
 
