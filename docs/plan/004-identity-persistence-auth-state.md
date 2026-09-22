@@ -1,7 +1,7 @@
 # 004 — Identity, persistence and auth-state Redis
 
 **Date:** 2026-09-22
-**Status:** Approved (2026-09-22) — revision 2, after external review `pr004-rev-1`
+**Status:** Implemented (2026-09-22), not yet pushed — revision 2, after external review `pr004-rev-1`. The manual runbook (§7) and the T13 Serilog live cycle are still to be run by the user.
 **Size:** L
 **Area:** `src/PresenterAi.Api` (Auth, Endpoints, Realtime, Program), `src/PresenterAi.Application`, `src/PresenterAi.Infrastructure`, `src/PresenterAi.Contracts`, `src/PresenterAi.Cli`, `web/shared`, `web/app`, `web/admin`, `tests/*`, compose/CI/docs
 **Requirement brief confirmed:** 2026-09-22 (G1)
@@ -282,7 +282,7 @@ runs `CREATE EXTENSION IF NOT EXISTS vector`.
 `Jwt:AccessTokenMinutes` (60, research §2.4), `Jwt:RefreshTokenDays` (30) · `OAuth:ApiBaseUrl`,
 `OAuth:StateEncryptionKey` (base64, 16/24/32 bytes), `OAuth:AllowedRedirectUris`,
 `OAuth:{Google,Microsoft}:{Enabled,ClientId,ClientSecret,AuthorizationEndpoint,TokenEndpoint,UserInfoEndpoint}`,
-`OAuth:Microsoft:TenantId` (default `common`) · `Auth:Dev:{Enabled,UserId,Email,DisplayName}` ·
+~~`OAuth:Microsoft:TenantId`~~ (dropped in T13, see D7) · `Auth:Dev:{Enabled,UserId,Email,DisplayName}` ·
 `Auth:SignIn:{AllowedEmailDomains,AllowedEmails}` · `Admin:BootstrapEmails` · `Cors:AllowedOrigins` ·
 `RateLimiting:Enabled` · `Session:TicketTtlSeconds` (30), `Session:AuthFrameTimeoutSeconds` (5),
 `Session:MaxPendingAuthConnections` (8).
@@ -682,6 +682,7 @@ None blocking. Deferred, with reason:
 | 2026-09-22 | Requirement brief confirmed (G1) | 2 rounds, 8 questions; discovery by two scout agents (inkspoke inventory, presenter as-built) |
 | 2026-09-22 | External plan review `pr004-rev-1` (codex, gpt-5.6-sol medium) | 9 blockers + 2 improvements; all folded into revision 2 — see below |
 | 2026-09-22 | Plan approved (G2) | revision 2; implementation not started — awaits an explicit instruction |
+| 2026-09-22 | Implementation complete (T1–T13) | branch `feature/004-identity-persistence`, not pushed. Build 0/0; 207 tests pass. Manual runbook §7 and the T13 Serilog live cycle are left to the user. Deviations D1–D7 are below. |
 
 **Review findings and disposition (revision 2):**
 
@@ -709,3 +710,4 @@ None blocking. Deferred, with reason:
 | D4 | Eight `NuGetAuditSuppress` entries in `PresenterAi.Infrastructure.csproj`. | EF design-time tooling pulls `System.Security.Cryptography.Xml`, whose every stable version carries those advisories (only 11.0.0 previews exist). Suppressed by advisory id so any *other* transitive advisory still fails the build. Revisit when 11.0.0 ships stable. |
 | D5 | `presenter-cli run` **without** `--owner` stays file-backed and records no session. With `--owner` it loads the imported presentation from Postgres and records exactly as `/ws` does (T9/T10 as written). | `sessions.user_id` and `sessions.presentation_id` are required foreign keys, and a local-file run has neither row. Keeping the no-owner path file-backed also keeps `Cli.Tests` container-free (PR-C1 seam 2). User decision, 2026-09-22. |
 | D6 | A failed start writes **no** `sessions` row; the recorder's `EndAsync` barrier still completes. | `sessions.upstream` is NOT NULL and a failed start has no upstream. §7's "failed start" recorder test asserts exactly this. |
+| D7 | `OAuth:Microsoft:TenantId` is **dropped** from §4.3, the option classes and `appsettings.Example.json`. | The T13 audit found that nothing read it. The tenant is part of the configured Microsoft endpoint URLs (`/common/`, `/organizations/` or a tenant id), so a separate key would only have looked meaningful. |

@@ -494,3 +494,69 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
 - Green at `4ac958d` (tree clean after commit): build 0/0; **206 passed** (Application 52, Infrastructure 31,
   Api 78, Integration 36, Cli 9). Api and Cli pass with no container. Web lint/build/test (shared 5, app 22).
   `secrets-guard: clean`.
+
+### T13 wiring audit (orchestrator, direct)
+
+Traced every plan-004 registration, config key and endpoint to a reader or caller, across the API graph
+(`src/PresenterAi.Api/Program.cs`) and the three CLI graphs (`src/PresenterAi.Cli/Program.cs`). All three CLI graphs
+build under `ValidateScopes` + `ValidateOnBuild`, except the file-backed `BuildServices`, which predates plan 004.
+
+**Registrations → resolvers**
+
+| Registration | Graphs | Resolved by |
+|---|---|---|
+| `PresenterAiDbContext` (`AddPersistence`) | API, run, import | `TokenService`, `SsoService`, `/health`, `SessionRecorder` (scope per write), `ImportCommand:30`, `RunCommand:37`, `OwnerResolver` |
+| `IPresentationRepository` → `PostgresPresentationRepository` | API, run, import | `PresentationEndpoints`, the presenter's scoped loader (`DependencyInjection.cs:135`), `RunCommand:45` (`FindIdBySlugAsync`) |
+| `ISessionRecorderFactory` (`TryAddSingleton`) | API, run, import (unused there) | `PresenterBridge` ctor → `PrepareRecorder` (`:264`), `RunCommand:60` |
+| `IConnectionMultiplexer` (lazy) | API | `TicketStore`, `SsoCodeStore`, `SsoStateStore`, `/health` |
+| `ITicketStore` | API | issued in `SessionEndpoints:31`, claimed in `PresenterBridge:156` |
+| `ISsoCodeStore`, `ISsoStateStore` (+ `Lazy<>`) | API | `SsoService` |
+| `SignInPolicy`, `TokenService`, `SsoService`, `HttpClient "sso"` | API | `AuthEndpoints`, `SessionEndpoints`; `SsoService:175` (policy), `:198` (client) |
+| `IPresentationImportSource` | CLI file-backed, import | file loader in `AddPresenter(fileBacked: true)`, `ImportCommand:27`; `AuthTests:32` asserts the API cannot resolve it |
+
+**`ISessionRecorder` in both `StartAsync` callers:** the bridge attaches in `PrepareRecorder` before
+`StartAsync` (`PresenterBridge.cs:264-266`), begins on success (`:318`), and awaits `EndRecorderAsync` in `finally`
+(`:102`). `RunCommand` attaches (`:188`), begins (`:196`), then `EndAsync` → `Detach` (`:244-248`). The no-owner `run`
+has no recorder (D5).
+
+**Config keys (§4.3) → readers:** `ConnectionStrings:{Postgres,Redis}` → `AddPersistence`/`AddRedis` and the
+fail-fast checks (API `Program.cs:209-212`, CLI `Build{Run,Import}Services`). `Jwt:*` → `JwtSettings`
+(`TokenService`, JwtBearer, `AuthEndpoints`). `OAuth:*` → `OAuthOptions` (`SsoService`), validated through
+`OAuthSettings`. `Auth:Dev:*` → `AuthEndpoints:187`, `TokenService.UpsertDevelopmentUserAsync`.
+`Auth:SignIn:*`, `Admin:BootstrapEmails` → `SignInPolicy` (and `TokenService` for the dev user).
+`Cors:AllowedOrigins` → the CORS policy and `OriginGuard`. `RateLimiting:Enabled` → `AuthRateLimiting:63`.
+`Session:*` → `SessionRedisOptions` (`TicketStore`, `SessionEndpoints`, `PresenterBridge:41-42`).
+
+**Endpoints → callers:** every `/v1` route has a caller in `web/` and/or a test. Sign-in, SSO, refresh and logout
+are called from `SignIn.tsx`, `AuthCallback.tsx` and `authStore.ts`. Presentations are called from `Library.tsx`
+and `Present.tsx`, and `/ws` from `bridgeClient.ts`. `/v1/config` is covered by tests only; the old
+`/api/config` had no web caller either (plan §4.4).
+
+**Flagged and fixed:**
+1. `GET /v1/auth/me` had no caller anywhere. The web client never needs it, because sign-in and refresh return the
+   user.
+2. `POST /v1/sessions/ticket` had a web caller but no test over HTTP. That left F8's ticket-issuance refusal of a
+   disabled account unguarded.
+   - One new integration test covers both routes:
+     `AuthEndpointIntegrationTests.Current_user_and_session_ticket_routes_serve_the_signed_in_user_and_refuse_disabled_accounts`.
+     It does a real dev sign-in, then checks `/me`, then issues a ticket and claims it through real Redis exactly
+     once, then disables the user and gets 403 `auth.account_disabled` from both routes. An anonymous ticket request
+     gets 401.
+   - Mutations: the ticket route skipping the user reload, a ticket issued for the wrong user, and `GetUserAsync`
+     not enforcing `is_disabled`. Each one fails the test, and both files were restored byte for byte (md5).
+3. `OAuth:Microsoft:TenantId` was bound by both OAuth classes but read by nothing. The tenant already lives in the
+   Microsoft endpoint URLs (`/common/`). The key is removed from both classes and `appsettings.Example.json`; this is
+   plan deviation **D7**.
+
+**Noted, not changed (no caller missing, low risk):**
+- `Admin:BootstrapEmails` is normalised in two places: `SignInPolicy` for SSO and `TokenService` for the dev user.
+- The dev sign-in reads `Jwt:RefreshTokenDays` raw (default 30), while the other routes use `IOptions<JwtSettings>`.
+- `OAuthSettings` (the validator) and `OAuthOptions` (the reader) bind the same section with identical shapes, so a
+  field added to only one of them would drift.
+- The import graph registers the unused `ISessionRecorderFactory` through `AddPersistence`.
+
+**Not run (needs a live upstream and a browser, so it is for the user):** plan T13's Serilog-at-debug cycle, sign-in
+→ import → present → close with one log line per entry point, together with runbook §7 steps 8–16.
+
+Green after T13: build 0/0; **207 passed** (Application 52, Infrastructure 31, Api 78, Integration 37, Cli 9). Api
+and Cli pass with no container. `secrets-guard: clean`.
