@@ -384,3 +384,25 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   build exists; the test opts into `WebRootFixture`. Mutation: default client on `/` fails with 404 locally as in CI.
 - PR https://github.com/PMTLabs/presenter-ai/pull/2 → `develop`: CI green at `524c6cc` (`dotnet` and `web` on both
   workflow runs). Merge awaits the user.
+
+## 2026-09-22 — plan 004 (identity, persistence, auth-state Redis)
+
+- Discovery: two scout agents (inkspoke auth/identity/Redis inventory at commit `b83e691f`; presenter-ai as-built
+  auth/content/sessions sweep). Reports kept in the session scratchpad, not the repo — they are inventories of an
+  external codebase.
+- G1 2026-09-22 after 2 interview rounds (8 questions): scope is research step 0.5 + the auth slice of 0.6;
+  presentations + sessions to Postgres with decks left on disk; Dev sign-in becomes a Development-only token
+  endpoint and `DevAuthHandler` dies; config allowlist + `Admin:BootstrapEmails`; mandatory `/ws` ticket frame with
+  an anonymous upgrade; API keys deferred (the CLI stays in-process); singleton presenter kept; Testcontainers in CI.
+- External plan review `pr004-rev-1` (codex, gpt-5.6-sol medium): NO — 9 blockers + 2 improvements, all folded into
+  revision 2. Three were factual errors in the draft, each re-verified against the code before fold-in:
+  `StartAsync`/`LoadAsync` touch nine test files (not the two production sites cited) and `FilePresentationRepository`
+  implements the interface T8 changes; `LoadedPresentation` carries the *content* of the context file
+  (`FilePresentationRepository.cs:44-58`) which the schema had no column for; nothing exposes the chosen upstream, so
+  `sessions.upstream` was unfillable. See `docs/review/005-plan-004-external-review.md` and the plan's §10 table.
+- Design consequences worth remembering: the `/ws` ticket is claimed **before** the single-client CAS slot (an
+  unauthenticated socket could otherwise park on the only slot and hand real users `busy`); refresh rotation is a
+  conditional revoke with an affected-row check, not just a transaction; `IPresentationRepository` splits into an
+  owner-scoped contract plus an ownerless `IPresentationImportSource` for the importer.
+- G2 2026-09-22: plan approved at `docs/plan/004-identity-persistence-auth-state.md`, 14 tasks in three PRs.
+  Implementation not started — it awaits an explicit instruction.
