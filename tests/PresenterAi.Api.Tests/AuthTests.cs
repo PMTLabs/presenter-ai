@@ -17,17 +17,17 @@ public sealed class AuthTests
         body["code"]!.GetValue<string>().Should().Be("auth.required");
         body["type"]!.GetValue<string>().Should().Be("https://presenter-ai.dev/errors/auth.required");
         response.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
-        response.Headers.WwwAuthenticate.ToString().Should().Be("Dev");
+        response.Headers.WwwAuthenticate.ToString().Should().Be("Bearer");
         // The challenge is a Problem Details producer like any other: header and body carry the same W3C id.
         response.Headers.TryGetValues("traceparent", out var traceparent).Should().BeTrue();
         body["traceId"]!.GetValue<string>().Should().Be(traceparent!.Single());
     }
 
     [Fact]
-    public async Task Dev_scheme_authenticates_anonymous_requests()
+    public async Task Jwt_bearer_authenticates_requests_with_a_valid_token()
     {
         using var factory = new ApiFactory();
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         (await client.GetAsync("/api/config")).StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
     }
 }

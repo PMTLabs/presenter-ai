@@ -71,7 +71,7 @@ public sealed class BridgeContractTests
     public async Task Plain_get_on_ws_is_400_problem_with_traceparent()
     {
         using var factory = new ApiFactory();
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         var response = await client.GetAsync("/ws");
         response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         var body = JsonNode.Parse(await response.Content.ReadAsStringAsync())!.AsObject();

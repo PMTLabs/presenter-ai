@@ -45,7 +45,7 @@ public sealed class BridgeTests
         await using var fake = await FakeLiveServer.StartAsync();
         using var factory = BridgeTestSupport.Factory(fake);
         using var first = await BridgeTestSupport.ConnectAsync(factory);
-        using var second = await factory.Server.CreateWebSocketClient().ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        using var second = await BridgeTestSupport.AuthenticatedWebSocketClient(factory).ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
         var error = (await BridgeTestSupport.ReceiveAsync(second)).Text!;
         JsonNode.Parse(error)!["code"]!.GetValue<string>().Should().Be("busy");
         var close = await second.ReceiveAsync(new byte[32], CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
@@ -82,7 +82,7 @@ public sealed class BridgeTests
     {
         await using var fake = await FakeLiveServer.StartAsync();
         using var factory = BridgeTestSupport.Factory(fake);
-        var client = factory.Server.CreateWebSocketClient();
+        var client = BridgeTestSupport.AuthenticatedWebSocketClient(factory);
         var pair = await Task.WhenAll(client.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None), client.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None));
         using var a = pair[0]; using var b = pair[1];
         var first = await BridgeTestSupport.ReceiveAsync(a); var second = await BridgeTestSupport.ReceiveAsync(b);

@@ -20,13 +20,8 @@ public static class DependencyInjection
         IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("Postgres");
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            throw new InvalidOperationException("Missing required setting: ConnectionStrings:Postgres");
-        }
-
         services.AddDbContext<PresenterAiDbContext>(options =>
-            options.UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure()));
+            options.UseNpgsql(connectionString ?? string.Empty, npgsql => npgsql.EnableRetryOnFailure()));
         return services;
     }
 
@@ -35,18 +30,18 @@ public static class DependencyInjection
         IConfiguration configuration)
     {
         var connectionString = configuration.GetConnectionString("Redis");
-        if (string.IsNullOrWhiteSpace(connectionString))
-        {
-            throw new InvalidOperationException("Missing required setting: ConnectionStrings:Redis");
-        }
-
-        var connection = RedisConnection.Connect(connectionString);
-        services.AddSingleton<IConnectionMultiplexer>(connection);
+        // Validate the setting at API startup, but defer the network connection until the first auth-state
+        // store is resolved. This keeps presentation-only test hosts bootable without Docker.
+        services.AddSingleton<IConnectionMultiplexer>(_ => RedisConnection.Connect(connectionString ?? string.Empty));
         services.AddOptions<SessionRedisOptions>()
             .Bind(configuration.GetSection("Session"));
         services.AddSingleton<ITicketStore, TicketStore>();
         services.AddSingleton<ISsoCodeStore, SsoCodeStore>();
         services.AddSingleton<ISsoStateStore, SsoStateStore>();
+        services.AddSingleton(serviceProvider => new Lazy<ISsoCodeStore>(
+            () => serviceProvider.GetRequiredService<ISsoCodeStore>()));
+        services.AddSingleton(serviceProvider => new Lazy<ISsoStateStore>(
+            () => serviceProvider.GetRequiredService<ISsoStateStore>()));
         return services;
     }
 

@@ -19,9 +19,17 @@ internal static class BridgeTestSupport
         }
     };
 
+    public static Microsoft.AspNetCore.TestHost.WebSocketClient AuthenticatedWebSocketClient(ApiFactory factory)
+    {
+        var client = factory.Server.CreateWebSocketClient();
+        client.ConfigureRequest = request => request.Headers.Authorization =
+            $"Bearer {ApiFactory.CreateTestToken("test-user", "test@presenter-ai.local")}";
+        return client;
+    }
+
     public static async Task<WebSocket> ConnectAsync(ApiFactory factory)
     {
-        var socket = await factory.Server.CreateWebSocketClient().ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        var socket = await AuthenticatedWebSocketClient(factory).ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
         _ = await ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "state");
         return socket;
     }

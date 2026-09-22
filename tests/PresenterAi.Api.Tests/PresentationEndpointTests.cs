@@ -15,7 +15,7 @@ public sealed class PresentationEndpointTests(ApiFactory factory, WebRootFixture
     [InlineData("/api/config", "config.json")]
     public async Task Json_matches_node_golden(string endpoint, string golden)
     {
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         var response = await client.GetAsync(endpoint);
         response.EnsureSuccessStatusCode();
         var expected = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Golden", golden)));
@@ -26,7 +26,7 @@ public sealed class PresentationEndpointTests(ApiFactory factory, WebRootFixture
     [Fact]
     public async Task Missing_id_is_404_with_error_body()
     {
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         var response = await client.GetAsync("/api/presentations/nope");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
         (await response.Content.ReadAsStringAsync()).Should().Be("{\"error\":\"presentation \\\"nope\\\" not found\"}");
@@ -35,7 +35,7 @@ public sealed class PresentationEndpointTests(ApiFactory factory, WebRootFixture
     [Fact]
     public async Task Invalid_id_is_400_with_error_body()
     {
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         var response = await client.GetAsync("/api/presentations/nope%40bad");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
         (await response.Content.ReadAsStringAsync()).Should().Contain("invalid presentation id");

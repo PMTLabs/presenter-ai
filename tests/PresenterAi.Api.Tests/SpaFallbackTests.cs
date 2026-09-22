@@ -29,6 +29,8 @@ public sealed class SpaFallbackTests(ApiFactory factory, WebRootFixture webRoot)
     public async Task Ws_without_upgrade_is_400()
     {
         using var client = factory.WithWebHostBuilder(builder => builder.UseSetting("Content:WebRoot", webRoot.Root)).CreateClient();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+            "Bearer", ApiFactory.CreateTestToken("test-user", "test@presenter-ai.local"));
         var response = await client.GetAsync("/ws");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
         response.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
