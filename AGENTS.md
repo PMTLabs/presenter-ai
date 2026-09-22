@@ -29,6 +29,9 @@ dotnet test PresenterAi.slnx
 dotnet run --project src/PresenterAi.Api            # http://localhost:47913 (health: /health, OpenAPI: /openapi/v1.json)
 dotnet run --project src/PresenterAi.Cli -- smoke   # a few seconds of upstream time; run from the repo root
 dotnet run --project src/PresenterAi.Cli -- run <presentation-id> --stop-after-slide 2
+# Integration tests need Docker; Testcontainers starts its own pgvector and Redis.
+# On Windows the daemon is in WSL, so DOCKER_HOST must be set or every integration test fails:
+DOCKER_HOST=tcp://localhost:2375 dotnet test tests/PresenterAi.Integration.Tests
 
 cd web && bun install --frozen-lockfile && bun run lint && bun run test && bun run build
 cd web && bun run dev:app                            # Vite on 47914, proxies /api,/ws,/decks,/health to 47913
@@ -37,7 +40,11 @@ cd web && bun run generate:api                       # regenerates the TS client
 
 Secrets are never in files: `dotnet user-secrets set Upstream:Endpoint … --project src/PresenterAi.Api` (and
 `Upstream:Key`, optional `Upstream:Fallback:Key`; the CLI has its own `presenter-cli` secret store). Docker:
-`docker compose --profile full up` maps every key of `.env.example`.
+`docker compose --profile full up` maps every key of `.env.example`. Integration tests start their own
+`pgvector/pgvector:pg17` and `redis:7-alpine` containers. On Windows the Docker daemon lives in WSL and is **not**
+discovered automatically, so `dotnet test PresenterAi.slnx` fails until you export
+`DOCKER_HOST=tcp://localhost:2375` (PowerShell: `$env:DOCKER_HOST='tcp://localhost:2375'`). CI runs on Linux, where
+the default socket is found without it.
 
 ## Rules that are not negotiable
 

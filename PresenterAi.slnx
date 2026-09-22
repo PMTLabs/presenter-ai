@@ -12,5 +12,6 @@
     <Project Path="tests/PresenterAi.Application.Tests/PresenterAi.Application.Tests.csproj" />
     <Project Path="tests/PresenterAi.Cli.Tests/PresenterAi.Cli.Tests.csproj" />
     <Project Path="tests/PresenterAi.Infrastructure.Tests/PresenterAi.Infrastructure.Tests.csproj" />
+    <Project Path="tests/PresenterAi.Integration.Tests/PresenterAi.Integration.Tests.csproj" />
   </Folder>
 </Solution>

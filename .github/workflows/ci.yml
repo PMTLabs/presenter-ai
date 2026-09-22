@@ -38,7 +38,8 @@ jobs:
       - run: dotnet restore
       - run: dotnet build -c Release -warnaserror --no-restore
 
-      - name: dotnet test
+      # The solution test run includes PresenterAi.Integration.Tests; Testcontainers starts pgvector and Redis.
+      - name: dotnet test (unit and integration)
         run: dotnet test -c Release --no-build --logger "trx" --results-directory TestResults
 
       - name: Upload TestResults
