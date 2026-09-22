@@ -92,7 +92,7 @@ public static class RunCommand
             FlushLine();
             FlushBar();
             output.WriteLine($"{At()} ===== SLIDE {index + 1} =====");
-            // Same semantics as scripts/headless-run.mjs: the stop fires when slide N+1 is announced, so N slides are narrated.
+            // Same semantics as the Node MVP's headless run (retired — see docs/reference/002-node-mvp-retired.md): the stop fires when slide N+1 is announced, so N slides are narrated.
             if (arguments.StopAfterSlide > 0 && index + 1 > arguments.StopAfterSlide && Interlocked.Exchange(ref endRequested, 1) == 0)
             {
                 output.WriteLine($"{At()} stop-after-slide reached; ending");

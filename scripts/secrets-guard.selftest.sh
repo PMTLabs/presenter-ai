@@ -68,7 +68,7 @@ printf 'private const string ItemKey = "PresenterAi.ProblemTrace";
 const cacheKey = "presentations:list:v1:all";
 ' > "$good/src/constants.cs"
 printf -- '- uses: actions/cache@v4\n  with:\n    key: ${{ runner.os }}-nuget-abcdefghijklmnop\n' > "$good/cfg/ci.yml"
-printf 'Send `X-Api-Key: <key>`; the tracked file is non-secret: `Content:WebRoot=../../src/web`.\n' > "$good/docs/prose.md"
+printf 'Send `X-Api-Key: <key>`; the tracked file is non-secret: `Content:WebRoot=../../web/app/dist`.\n' > "$good/docs/prose.md"
 printf 'export UPSTREAM_KEY=your-key\ndotnet user-secrets set Upstream:Key "<paste-your-key>"\n' > "$good/docs/readme.md"
 git -C "$good" add -A
 if ! output=$(cd "$good" && bash "$guard" 2>&1); then

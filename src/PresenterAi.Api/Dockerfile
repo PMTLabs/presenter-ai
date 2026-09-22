@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1
 
+FROM oven/bun:1.3.14 AS web
+WORKDIR /web
+COPY web/package.json web/bun.lock ./
+COPY web/shared/package.json shared/
+COPY web/app/package.json app/
+COPY web/admin/package.json admin/
+RUN bun install --frozen-lockfile
+COPY web/ ./
+RUN cd app && bun run build
+
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
@@ -32,6 +42,8 @@ RUN apt-get update \
 USER $APP_UID
 
 COPY --from=build /app/publish .
+COPY --from=web /web/app/dist ./web
+ENV Content__WebRoot=/app/web
 
 EXPOSE 47913
 ENTRYPOINT ["dotnet", "PresenterAi.Api.dll"]
