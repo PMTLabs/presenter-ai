@@ -382,3 +382,5 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   on the factory default, which resolves to `web/app/dist` — built locally, never in CI (A-class miss of the T3 move).
   Class fix: `ApiFactory` now defaults `Content:WebRoot` to a non-existent path, so no test can pass because a local
   build exists; the test opts into `WebRootFixture`. Mutation: default client on `/` fails with 404 locally as in CI.
+- PR https://github.com/PMTLabs/presenter-ai/pull/2 → `develop`: CI green at `524c6cc` (`dotnet` and `web` on both
+  workflow runs). Merge awaits the user.
