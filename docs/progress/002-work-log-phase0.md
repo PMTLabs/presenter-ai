@@ -560,3 +560,35 @@ and `Present.tsx`, and `/ws` from `bridgeClient.ts`. `/v1/config` is covered by 
 
 Green after T13: build 0/0; **207 passed** (Application 52, Infrastructure 31, Api 78, Integration 37, Cli 9). Api
 and Cli pass with no container. `secrets-guard: clean`.
+
+### PR #3 opened (user: "One PR into develop"); first CI run found a bridge race
+
+- `feature/004-identity-persistence` was pushed and https://github.com/PMTLabs/presenter-ai/pull/3 opened against
+  `develop`, as AGENTS.md says. Handoff 010 had said `master`, which was wrong.
+- **What CI showed:** `dotnet` was red on the `pull_request` run and green on the `push` run of the same commit.
+  `BridgeSessionRecorderTests.Two_sequential_runs_do_not_leak_handlers` timed out waiting for the second recorder.
+- **Root cause (a production defect, not only test timing):**
+  1. The bridge's `finally` awaited `IPresenter.EndAsync`, which returns while the presenter is still `ending`.
+  2. `idle` comes one loop hop later, when the upstream close queued behind the End command is handled.
+  3. The slot was released inside that hop. A browser reconnecting in that window found `PrepareRecorder` refusing
+     (the state was not idle), yet its `start` queued behind the close and presented anyway, **unrecorded**.
+  4. The recorder barrier could also finish before the upstream's `Closed` (billed seconds, close reason) reached
+     it.
+- **Fix:** `ObserveEndAsync` now waits (up to 5 s) for the presenter's `idle` state before the recorder barrier and
+  the slot release. That makes the F6 comment true.
+- **Regression test:** `Disconnect_holds_the_slot_until_the_presenter_is_idle_so_the_next_run_is_recorded`.
+  - It holds the real presenter between `ending` and `idle` through a `Closed` handler. The hold also lets go early
+    if the bridge reaches the recorder barrier first.
+  - It then asserts: a connect during the hold is told `busy`; the recorder saw `Closed` before its barrier; and the
+    next run gets its own recorder.
+  - Mutations, both failing it every time and restored by md5: dropping the idle wait (5/5 runs), and ending the
+    recorder before the idle wait (3/3).
+- **Same pattern fixed in two more tests:** reconnecting straight after a disconnect can legitimately be told
+  `busy`, because the slot is released after cleanup. The two recorder tests that reconnect now use
+  `BridgeTestSupport.ConnectWhenFreeAsync`; the integration tests already retried.
+- **Stability:** the Api suite passed 10/10 consecutive runs (79 tests); the session integration tests passed 3/3.
+- **Pre-existing flake, not fixed here (predates plan 004):**
+  - `PresenterTests.Last_slide_silence_sends_wrap_up_then_closes` (and once `Wrap_up_without_audio_ends_after_fallback`)
+    asserts `idle` after one `Flush()`.
+  - The harness's "two barriers and a yield" (`Presenter.WaitUntilIdleAsync`) can run before the close hop.
+  - It failed 3/15 runs on this branch and 1/15 on `origin/develop`, checked in a throwaway worktree.
