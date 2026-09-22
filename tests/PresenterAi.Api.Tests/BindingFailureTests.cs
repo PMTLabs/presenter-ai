@@ -2,6 +2,9 @@ using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging.Abstractions;
+using PresenterAi.Api.Errors;
 using PresenterAi.Api.Tests.Infrastructure;
 using PresenterAi.Contracts;
 
@@ -43,6 +46,27 @@ public sealed class BindingFailureTests
         };
         using var response = await client.SendAsync(request);
         await AssertValidationProblem(response);
+    }
+
+    // Neither status is reachable end to end in TestServer: it does not enforce Kestrel's body-size limit, and the
+    // routing fallback answers a non-JSON body with 404 before binding runs. So the handler is driven directly.
+    [Theory]
+    [InlineData(StatusCodes.Status413PayloadTooLarge, ErrorCodes.ValidationPayloadTooLarge)]
+    [InlineData(StatusCodes.Status415UnsupportedMediaType, ErrorCodes.ValidationUnsupportedMediaType)]
+    public async Task Binding_status_maps_to_its_catalogue_code_without_echoing_input(int status, string code)
+    {
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+        var handled = await new DomainExceptionHandler(NullLogger<DomainExceptionHandler>.Instance).TryHandleAsync(
+            context, new BadHttpRequestException("raw-client-input", status), CancellationToken.None);
+
+        handled.Should().BeTrue();
+        context.Response.StatusCode.Should().Be(status);
+        context.Response.ContentType.Should().Be("application/problem+json");
+        context.Response.Body.Position = 0;
+        var responseText = await new StreamReader(context.Response.Body).ReadToEndAsync();
+        JsonNode.Parse(responseText)!["code"]!.GetValue<string>().Should().Be(code);
+        responseText.Should().NotContain("raw-client-input");
     }
 
     [Fact]

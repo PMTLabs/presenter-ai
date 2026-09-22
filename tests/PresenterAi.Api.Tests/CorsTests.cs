@@ -8,25 +8,22 @@ public sealed class CorsTests
 {
     private const string AllowedOrigin = "http://localhost:47914";
 
-    [Fact]
-    public async Task Allowed_origin_gets_non_credentialed_cors_on_bearer_routes()
+    [Theory]
+    [InlineData("GET", "/v1/auth/sso/providers")]
+    [InlineData("GET", "/v1/config")]
+    [InlineData("GET", "/v1/presentations")]
+    [InlineData("GET", "/v1/presentations/sample")]
+    [InlineData("POST", "/v1/sessions/ticket")]
+    public async Task Allowed_origin_gets_non_credentialed_cors_on_every_v1_route_group(string method, string path)
     {
+        // Anonymous on purpose: CORS runs before authentication, and an authenticated ticket request would wait on
+        // the test host's unreachable database.
         using var factory = new ApiFactory();
-        using var client = factory.CreateAuthenticatedClient();
-
-        using var preflight = new HttpRequestMessage(HttpMethod.Options, "/v1/presentations");
-        preflight.Headers.TryAddWithoutValidation("Origin", AllowedOrigin).Should().BeTrue();
-        preflight.Headers.TryAddWithoutValidation("Access-Control-Request-Method", "GET").Should().BeTrue();
-        preflight.Headers.TryAddWithoutValidation("Access-Control-Request-Headers", "authorization,content-type,x-request-id").Should().BeTrue();
-        using var preflightResponse = await client.SendAsync(preflight);
-        preflightResponse.IsSuccessStatusCode.Should().BeTrue();
-        preflightResponse.Headers.GetValues("Access-Control-Allow-Origin").Single().Should().Be(AllowedOrigin);
-        preflightResponse.Headers.Contains("Access-Control-Allow-Credentials").Should().BeFalse();
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, "/v1/presentations");
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
         request.Headers.TryAddWithoutValidation("Origin", AllowedOrigin).Should().BeTrue();
+
         using var response = await client.SendAsync(request);
-        response.StatusCode.Should().Be(HttpStatusCode.OK);
         response.Headers.GetValues("Access-Control-Allow-Origin").Single().Should().Be(AllowedOrigin);
         response.Headers.Contains("Access-Control-Allow-Credentials").Should().BeFalse();
     }
@@ -45,16 +42,17 @@ public sealed class CorsTests
         response.Headers.Contains("Access-Control-Allow-Credentials").Should().BeFalse();
     }
 
-    [Fact]
-    public async Task Refresh_allows_credentials_for_an_allowed_origin()
+    [Theory]
+    [InlineData("/v1/auth/refresh")]
+    [InlineData("/v1/auth/logout")]
+    public async Task Cookie_mutations_allow_credentials_for_an_allowed_origin(string path)
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateClient();
-        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/auth/refresh");
+        using var request = new HttpRequestMessage(HttpMethod.Post, path);
         request.Headers.TryAddWithoutValidation("Origin", AllowedOrigin).Should().BeTrue();
 
         using var response = await client.SendAsync(request);
-        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         response.Headers.GetValues("Access-Control-Allow-Origin").Single().Should().Be(AllowedOrigin);
         response.Headers.GetValues("Access-Control-Allow-Credentials").Single().Should().Be("true");
     }

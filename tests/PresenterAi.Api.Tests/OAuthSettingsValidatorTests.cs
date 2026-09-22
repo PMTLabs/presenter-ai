@@ -89,6 +89,20 @@ public sealed class OAuthSettingsValidatorTests
     }
 
     [Theory]
+    [InlineData("Google", "AuthorizationEndpoint", "http://localhost.evil.test/authorize")]
+    [InlineData("Google", "TokenEndpoint", "http://127.0.0.1.nip.io/token")]
+    [InlineData("Google", "UserInfoEndpoint", "http://localhost.evil.test/userinfo")]
+    [InlineData("Microsoft", "AuthorizationEndpoint", "http://localhost.evil.test/authorize")]
+    [InlineData("Microsoft", "TokenEndpoint", "http://127.0.0.1.nip.io/token")]
+    [InlineData("Microsoft", "UserInfoEndpoint", "http://localhost.evil.test/userinfo")]
+    public void Enabled_provider_rejects_deceptive_loopback_hosts(string providerName, string property, string endpoint)
+    {
+        var settings = Provider(providerName, Key(32));
+        Set(settings, providerName, property, endpoint);
+        OAuthSettingsValidator.Validate(settings).Should().Contain($"{providerName}.{property}");
+    }
+
+    [Theory]
     [InlineData("Google")]
     [InlineData("Microsoft")]
     public void Enabled_provider_allows_http_loopback_endpoints(string providerName)
