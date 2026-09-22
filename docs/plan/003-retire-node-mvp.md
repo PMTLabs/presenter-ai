@@ -246,3 +246,4 @@ None.
 |---|---|---|
 | 2026-09-21 | Requirement brief confirmed (G1) | one survey round (scope / API root / record), brief confirmed as written |
 | 2026-09-21 | Plan approved (G2) | approved with "implement" in the same answer; implementation by `pi` gpt-5.6-luna:high on `feature/003-retire-node-mvp` |
+| 2026-09-21 | Implementation complete (T1–T5) | `a9ef1d6` + `73ded1b`; runbook steps 1–7 observed (compose from WSL; Chrome Start→End against the container, usage 53 s). Step 6 exposed a production-build defect outside the plan's scope — worklets inlined as `data:video/mp2t` — fixed with `?worker&url` and a build-time check. Oracle tightened: `Cache-Control` value asserted, `/index.html` covers the static middleware. |

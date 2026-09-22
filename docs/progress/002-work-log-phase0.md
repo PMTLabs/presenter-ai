@@ -341,3 +341,40 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   file-name character, so the root became a missing directory. The theory now takes its suffixes from
   `Path.DirectorySeparatorChar` / `Path.AltDirectorySeparatorChar` (still `\` + `/` on Windows); it was the only
   hard-coded backslash separator in the test projects. `51e18d4`: `dotnet` and `web` green on both workflow runs.
+
+## Plan 003 — retire the Node MVP (branch `feature/003-retire-node-mvp`)
+
+### T1–T5 (pi gpt-5.6-luna:high) + orchestrator fixes — done
+
+- Deleted `src/server`, `src/web`, `test/`, `scripts/{headless-run,live-smoke,browser-e2e}.mjs`, root `package*.json`
+  (last at `2a0b6a1`). `Content:WebRoot` → `../../web/app/dist`, optional: static middleware + SPA fallback only when
+  `index.html` exists, else `[info] web root … not found — API only; run "bun run dev:app" for the UI` and `/` → 404.
+  Dockerfile: `oven/bun:1.3.14` stage builds `web/app`, runtime serves it from `/app/web` (`Content__WebRoot`).
+  Docs: README, guide 001, `AGENTS.md`, `.env.example`, `docs/reference/002-node-mvp-retired.md`. Commit `a9ef1d6`.
+- Tests: `WebRootTests` on a temp web root (present → `/`, `/present/sample`, `/index.html` 200 + `no-cache`; absent →
+  `/` and `/present/x` 404, `/health` 200, `/decks/sample/index.html` 200, `/api/nope` non-HTML 404); `SpaFallbackTests`
+  moved onto the same fixture. Agent mutations: inverted guard → 500 on `/`; wrong fallback file → 500. Orchestrator
+  tightened the oracle: FluentAssertions' `ContainSingle("no-cache")` treated the string as the *reason*, so the header
+  value was never checked, and `/` and `/present/sample` both hit the fallback — `/index.html` now covers the static
+  middleware; mutating either `no-cache` site to `max-age=0` fails the test. Api tests 48.
+- Runbook (agent): dev with `dist` → `/` serves `<div id="root">`, `/present/sample` 200 `Cache-Control: no-cache`;
+  without → the info line, `/` 404, `/health` 200, deck 200. Docker image built (`check-dist: ok`). The agent's compose
+  run from Git Bash mounted empty `presentations/` (Windows paths against the WSL daemon); rerun by the orchestrator from
+  WSL (`/mnt/d/...`, `docker compose` v2.40): `api Up (healthy)`, `/health {"status":"ok"}`, `/` has `id="root"`,
+  `/api/presentations` lists `ricoh-delivery-overview` (11) and `sample` (3), deck 200, no "not found" line in the logs.
+- **Runbook step 6 found a production-build defect:** in Chrome against the container, Start did nothing —
+  `AbortError: Failed to load worklet module script: data:video/mp2t;base64,…`. Vite compiles
+  `new URL("./x.ts", import.meta.url)` only inside `new Worker()`; for `audioWorklet.addModule` it inlined the raw `.ts`
+  as an asset with the MPEG-TS MIME type. Dev mode serves the worklets as modules, so every earlier Chrome run (Vite on
+  47914) passed. Fix: both worklets import their URL with `?worker&url` (Vite 6 docs via Context7) → separate
+  `capture-processor-*.js` / `playback-processor-*.js` chunks; `web/app/scripts/check-dist.ts` runs after `vite build`
+  and fails the build if a chunk is missing or `data:video/mp2t` reappears (mutation: reverting one import → build exit 1).
+  Commit `73ded1b`.
+- Step 6 rerun after rebuilding the image: Dev sign-in on 47913, Start → `connected via primary` → `presenting`,
+  `micReady: true`, `buf 105 ms`, transcript flowing, auto-advance to slide 2/3 (`deckIndex` 1), Esc →
+  `closed: reason=client_request usage=53 s` → `idle`, audio released. Same-origin `/ws` and `/decks` proven.
+- Gate at `73ded1b`: `-warnaserror` 0/0; tests 52/48/30/5; web lint clean, shared 3 / app 21, builds + `check-dist: ok`,
+  `generate:api` no drift; secrets guard + self-test OK; AC1 greps empty (`web/bun.lock` mentions `vite-node.mjs` /
+  `vitest.mjs` — dependency binaries, not MVP code).
+- Operational: `docker compose` (v2) lives in WSL, not on the Windows CLI (`docker-compose` v5 standalone there); run compose
+  from `wsl -e bash -lc 'cd /mnt/d/sources/demo/presenter-ai && docker compose --profile full …'` so bind mounts resolve.
