@@ -3,6 +3,7 @@ using System;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using PresenterAi.Infrastructure.Persistence;
@@ -12,9 +13,11 @@ using PresenterAi.Infrastructure.Persistence;
 namespace PresenterAi.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(PresenterAiDbContext))]
-    partial class PresenterAiDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260922214935_SessionsStartedAtDescending")]
+    partial class SessionsStartedAtDescending
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -278,7 +281,6 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("SessionId", "Ordinal")
-                        .IsUnique()
                         .HasDatabaseName("ix_session_turns_session_id_ordinal");
 
                     b.ToTable("session_turns", (string)null);

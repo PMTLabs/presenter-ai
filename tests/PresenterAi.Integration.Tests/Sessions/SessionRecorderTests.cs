@@ -138,8 +138,10 @@ public sealed class SessionRecorderTests(PostgresFixture postgres, RedisFixture 
         await using var factory = new IntegrationApiFactory(postgres, redis, fake.Url, primaryModel: "bad-model");
         using var socket = await ConnectAsync(factory, owner.Id);
         await SendAsync(socket, $"{{\"type\":\"start\",\"presentation\":\"{owner.Presentations.Single().Id}\"}}");
+        // The bridge sends this error only after ObserveStartAsync has retired the recorder and awaited its
+        // EndAsync attempt, so it is the deterministic failed-start barrier before the negative assertion.
         await ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "error");
-        await WaitForAsync(async () => await SessionCountAsync(owner.Id) == 0);
+        (await SessionCountAsync(owner.Id)).Should().Be(0);
     }
 
     [Fact]

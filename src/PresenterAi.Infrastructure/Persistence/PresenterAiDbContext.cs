@@ -27,7 +27,8 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
             entity.Property(user => user.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone");
             entity.Property(user => user.UpdatedAt).HasColumnName("updated_at").HasColumnType("timestamp with time zone");
             entity.Property(user => user.LastSignInAt).HasColumnName("last_sign_in_at").HasColumnType("timestamp with time zone");
-            entity.HasIndex(user => user.Email).IsUnique().HasDatabaseName("ux_users_email_lower");
+            // PostgreSQL's case-insensitive ux_users_email_lower expression index is created by migration SQL;
+            // EF property indexes cannot faithfully model lower(email), so that migration is its source of truth.
         });
 
         modelBuilder.Entity<ExternalLogin>(entity =>
@@ -112,6 +113,7 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
             entity.Property(session => session.UpstreamSessionId).HasColumnName("upstream_session_id");
             entity.Property(session => session.CloseReason).HasColumnName("close_reason");
             entity.HasIndex(session => new { session.UserId, session.StartedAt })
+                .IsDescending(false, true)
                 .HasDatabaseName("ix_sessions_user_id_started_at");
             entity.HasIndex(session => session.PresentationId).HasDatabaseName("ix_sessions_presentation_id");
             entity.HasOne(session => session.Presentation)
@@ -136,6 +138,7 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
             entity.Property(turn => turn.SlideNo).HasColumnName("slide_no");
             entity.Property(turn => turn.At).HasColumnName("at").HasColumnType("timestamp with time zone");
             entity.HasIndex(turn => new { turn.SessionId, turn.Ordinal })
+                .IsUnique()
                 .HasDatabaseName("ix_session_turns_session_id_ordinal");
             entity.HasOne(turn => turn.Session)
                 .WithMany(session => session.Turns)
