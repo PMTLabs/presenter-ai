@@ -80,7 +80,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<ITicketStore>();
-            services.AddSingleton<ITicketStore, TestTicketStore>();
+            services.AddSingleton<TestTicketStore>();
+            services.AddSingleton<ITicketStore>(serviceProvider => serviceProvider.GetRequiredService<TestTicketStore>());
         });
     }
 
