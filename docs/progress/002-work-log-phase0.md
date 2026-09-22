@@ -627,3 +627,26 @@ and Cli pass with no container. `secrets-guard: clean`.
   - On the integrated bridge it passed 60/60 runs.
   - The bounded writer close in `8f1bb07` is a plausible cure, because `DisposeAsync` could wait on a peer that
     never answers. This is not proven; watch CI.
+
+### PR #3 external implementation review, round 2 (`docs/review/007`)
+
+- **Reviewers:** two fresh read-only `pi` agents running gpt-5.6-sol medium, on the round-1 fix diff
+  `032f2eb..06537c3`.
+- **Findings:** 16 in total (A 1 · B 10 · C 0 · D 5). Each reviewer claimed 3 blockers; after re-tracing, none
+  blocks merging.
+  - Three real defects were lowered to improvements and fixed: a sign-out during an in-flight refresh did not
+    stick, the 401 interceptor would replay the one-time SSO code, and rate-limit headers were chosen by path
+    suffix.
+  - R2-P-02 (the 1009 close racing the writer) and R2-I-08 (exact skew pinning) are disputed; four test-hardening
+    items are deferred.
+- **Fixes landed:** `b7a0753` web, `f6886b2` rate-limit metadata, `1e2f537` tests, `b3f4811` CLI import and the
+  bridge comment, by one `pi` implementer (gpt-5.6-terra high) in the `fix-r2` worktree.
+  - Claude removed the implementer's production change for R2-I-06 (token-route body checks and a 30 MiB limit),
+    and tested the 413 and 415 mappings at `DomainExceptionHandler` instead.
+  - Claude found a routing gap: a non-JSON `POST /v1/auth/sso/token` returns 404, not 415, because the global
+    `MapFallback` wins when the content-type policy rejects the endpoint. It predates PR #3; follow-up.
+  - Claude cut the Api suite from 87 s back to 4 s: a CORS row and a rate-limit row were waiting on the test
+    host's unreachable database or code store.
+- **Verification:** build 0/0; .NET Application 52, Infrastructure 31 + 3 skipped, Api 137, Cli 11, Integration
+  40 + 1 skipped; web shared 18 and app 22, lint and both builds; four orchestrator mutations, each caught.
+- **No round 3.** The follow-ups are listed in `docs/review/007` under "Fixes".

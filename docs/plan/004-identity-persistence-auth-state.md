@@ -1,7 +1,7 @@
 # 004 — Identity, persistence and auth-state Redis
 
 **Date:** 2026-09-22
-**Status:** Implemented (2026-09-22) and open as PR #3 into `develop` — revision 2, after external review `pr004-rev-1`. The external implementation review, round 1 (`docs/review/006`), found gaps, including T12's `/v1` headers and CORS half, which had not landed. The fixes have landed on the branch, and a round-2 re-review of them is next. The manual runbook (§7) and the T13 Serilog live cycle are still to be run by the user.
+**Status:** Implemented (2026-09-22) and open as PR #3 into `develop` — revision 2, after external review `pr004-rev-1`. The external implementation review, round 1 (`docs/review/006`), found gaps, including T12's `/v1` headers and CORS half, which had not landed. The fixes have landed on the branch. A round-2 re-review of them (`docs/review/007`) found no blocker, and its fixes have landed too; there is no round 3. The manual runbook (§7) and the T13 Serilog live cycle are still to be run by the user.
 **Size:** L
 **Area:** `src/PresenterAi.Api` (Auth, Endpoints, Realtime, Program), `src/PresenterAi.Application`, `src/PresenterAi.Infrastructure`, `src/PresenterAi.Contracts`, `src/PresenterAi.Cli`, `web/shared`, `web/app`, `web/admin`, `tests/*`, compose/CI/docs
 **Requirement brief confirmed:** 2026-09-22 (G1)
@@ -685,6 +685,7 @@ None blocking. Deferred, with reason:
 | 2026-09-22 | Implementation complete (T1–T13), with one exception | Branch `feature/004-identity-persistence`, PR #3. Build 0/0; 207 tests pass. **The exception, corrected after review round 1:** T12's `/v1` `Cache-Control: no-store`, `X-Request-Id` and CORS half had not landed (`docs/review/006`, I-01 and I-02). Manual runbook §7 and the T13 Serilog live cycle are left to the user. Deviations D1–D9 are below. |
 | 2026-09-22 | External implementation review, round 1 (two `pi` reviewers, gpt-5.6-sol medium) | 20 findings (A 3 · B 6 · C 2 · D 9). 11 were claimed as blockers; the orchestrator re-traced every one: 9 stay blockers, P-02 is lowered to an improvement, and P-03 is disputed as design (D8). I-10 is deferred to the deployment plan. Fixes are in progress; see `docs/review/006`. |
 | 2026-09-22 | Review round 1 fixes landed | Commits `8f1bb07`..`ccd2a23` on the PR branch: every confirmed finding except the deferred I-10. Build 0/0; 252 .NET tests pass and 4 Linux-only tests are skipped; web shared 10 and app 22 pass. Mutations and stability runs are in `docs/review/006` under "Fixes". |
+| 2026-09-22 | External implementation review, round 2, and its fixes | Two fresh `pi` reviewers (gpt-5.6-sol medium) on the round-1 fix diff: 16 findings (A 1 · B 10 · C 0 · D 5). After re-tracing, none blocks merging. Commits `b7a0753`..`b3f4811` fix three real defects (sign-out during a refresh, the SSO code replay, rate-limit headers by path) and the cheap test gaps; R2-P-02 and R2-I-08 are disputed, four test items are deferred. Build 0/0; 271 .NET tests pass and 4 are skipped; web shared 18 and app 22 pass. No round 3; see `docs/review/007` under "Fixes". |
 
 **Review findings and disposition (revision 2):**
 

@@ -80,6 +80,68 @@ The real new defects:
 
 Deferred items are listed for a follow-up after PR #3. None of them changes production behaviour.
 
+## Fixes (landed on `feature/004-identity-persistence`)
+
+One `pi` implementer (gpt-5.6-terra high) worked in the worktree `fix-r2`. The orchestrator corrected its pass,
+and the commits went onto the PR branch.
+
+| Commit | Findings | What changed |
+|---|---|---|
+| `b7a0753` fix(web) | R2-I-01, R2-I-02, R2-I-10 | Session changes bump a generation. A refresh applies its session only when no sign-in or sign-out happened while it was in flight. `signOut` awaits any in-flight refresh, so logout presents the newest cookie. A 401 from `/v1/auth/*` other than `/me` is returned as is. Base-URL tests cover trailing slashes and an empty base. |
+| `f6886b2` fix(api) | R2-I-03, R2-I-07 | One `Limits` table feeds the four policies. The success and 429 headers read the endpoint's `EnableRateLimitingAttribute` policy, not the path. Every policy is tested at its exact threshold, plus an uppercase route and a 404 path ending in `/refresh`. |
+| `1e2f537` test(api) | R2-I-05, R2-I-06, R2-I-09 | CORS on one route per `/v1` group, and logout's credentialed policy. The 413 and 415 catalogue mappings. The look-alike hosts `localhost.evil.test` and `127.0.0.1.nip.io` are rejected for both providers. |
+| `b3f4811` fix(cli) | R2-P-03, R2-P-01 (comment) | A database failure inside import's per-file catch is rethrown to the CLI boundary: one `Database error:` line, exit 1, no `failed:` line. The bridge comment names two routes, two 10 s handshakes and a load bounded only by Npgsql's retries. |
+
+**What the orchestrator changed in the implementer's pass:**
+
+- **R2-I-06:** the implementer added production code to make the test possible: token-route checks that turned a
+  non-JSON or oversized body into a `BadHttpRequestException`, and a 30 MiB request limit on the token endpoint.
+  Both were removed. TestServer does not enforce Kestrel's body-size limit, so the theory now calls
+  `DomainExceptionHandler.TryHandleAsync` directly with a 413 and a 415 `BadHttpRequestException`. It asserts the
+  catalogue code and that the raw input is not echoed.
+- **Found while doing that:** a non-JSON `POST /v1/auth/sso/token` returns **404, not 415**. When the content-type
+  matcher policy rejects the endpoint, the global `MapFallback` is still a candidate and wins. This predates PR #3,
+  and the SPA always sends JSON. It is a follow-up.
+- **`refreshAuth`:** the generation check now runs after `response.json()`, so a sign-out during the body read is
+  honoured.
+- **The Api suite had grown from 4 s to 87 s:**
+  - the authenticated CORS ticket row waited on the test host's unreachable database; it is now anonymous, because
+    CORS runs before authentication;
+  - the token rate-limit row sent a well-formed body that reached the code store; it now sends malformed JSON,
+    which the limiter counts and binding rejects.
+
+  The suite is back to 4 s.
+
+**Verification on the integrated branch:**
+
+- **Build:** 0 warnings, 0 errors.
+- **.NET suite:** Application 52, Infrastructure 31 (+3 Linux-only skipped), Api 137, Cli 11, Integration 40 (+1
+  skipped).
+- **Api and Cli without a container:** pass.
+- **Web:** lint passes; shared 18 and app 22 tests pass; both builds pass.
+- **Also:** the secrets guard and `git diff --check`.
+- **Orchestrator's mutations, each restored and md5-checked:**
+  - both 413 and 415 handler arms deleted;
+  - the `signOut` wait removed;
+  - the old refresh-only retry rule put back;
+  - the token limit set to 3.
+
+  Each mutation failed at least one test. The implementer's own mutations are in
+  `.claude/agent-reports/plan-004/impl-review-r2-fixes-report.md` (gitignored): the generation check, the
+  suffix lookup, logout's CORS policy, a prefix loopback check, an untrimmed base URL and the import rethrow.
+
+**No round 3.** After re-tracing, no blocker remains.
+
+**Follow-ups after PR #3, none blocking:**
+
+- R2-I-04: a 500 and a streaming case for the `/v1` header oracle.
+- R2-P-04: a full catalogue oracle for the schema.
+- R2-P-05: a causal failed-start barrier in the recorder tests.
+- R2-P-06: a real-command test of the `Database unavailable.` path, with a test-only retry configuration.
+- R2-P-02, optional: a single writer that owns both sends and closes.
+- The 415→404 routing fallback above.
+- I-10: trusted forwarded headers, deferred to the deployment plan.
+
 ## Files examined by the reviewers
 
 - **Identity:**
