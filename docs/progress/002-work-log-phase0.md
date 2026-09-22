@@ -608,3 +608,22 @@ and Cli pass with no container. `secrets-guard: clean`.
   `.claude/worktrees/`:
   - `fix-identity`: I-01–I-04, I-07–I-09 and P-05;
   - `fix-persist`: P-01, I-05, I-06, P-02–P-04 and P-06–P-10.
+- **Fixes landed** (cherry-picked onto `feature/004-identity-persistence`): `8f1bb07` bridge, `e2049d6` CLI,
+  `9b656b3` schema, `a86d247` API contract, `48cca65` auth validation, `94400e8` web, `00e12eb` config.
+  - Each implementer needed a second pass after Claude's verification. The findings Claude sent back are listed
+    in `docs/review/006` under "Fixes".
+  - After integration, Claude added `ccd2a23`. The new `Jwt_rejects_a_token_not_yet_valid_beyond_the_clock_skew`
+    failed 3/30 full-suite runs: `nbf` is written in whole seconds, so `now + 31 s` could validate inside the 30 s
+    skew. The margin is now 45 s, and setting `ClockSkew` to the 5-minute default still fails the test.
+- **Verification on the integrated branch:**
+  - build 0/0;
+  - .NET: Application 52, Infrastructure 31 + 3 skipped, Api 119, Cli 11, Integration 39 + 1 skipped;
+  - web: lint passes; shared 10 and app 22 tests pass; both builds pass;
+  - compose config, the secrets guard and `git diff --check` pass;
+  - the Api suite passed 30/30 runs after `ccd2a23`.
+- **Observed, not yet explained:** `BridgeSessionRecorderTests.Disconnect_holds_the_slot_until_the_presenter_is_idle_so_the_next_run_is_recorded`
+  timed out once in about 21 runs on the *old* bridge code, in the `fix-identity` worktree. The timeout was in
+  `ConnectWhenFreeAsync`: the slot was still held more than 5 s after detach.
+  - On the integrated bridge it passed 60/60 runs.
+  - The bounded writer close in `8f1bb07` is a plausible cure, because `DisposeAsync` could wait on a peer that
+    never answers. This is not proven; watch CI.

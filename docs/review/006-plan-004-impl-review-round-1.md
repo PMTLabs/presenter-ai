@@ -74,6 +74,53 @@ Twenty findings in total: A 3, B 6, C 2, D 9. The orchestrator re-traced every b
 | P-06 | **Fix** (improvement) | A new migration for `started_at desc`; the model and snapshot are made honest about the `lower(email)` expression index. |
 | P-07 to P-10 | **Fix** | Oracles, and the missing scope validation. |
 
+## Fixes (landed on `feature/004-identity-persistence`)
+
+Two `pi` implementers (gpt-5.6-terra high) worked in the worktrees `fix-persist` and `fix-identity`. Each needed a
+second pass after the orchestrator's verification. The commits were then cherry-picked onto the PR branch.
+
+| Commit | Findings | What changed |
+|---|---|---|
+| `8f1bb07` fix(bridge) | P-01, I-05, I-06, P-03 (comments) | Cleanup awaits every in-flight start observation (bounded at 90 s), and the start ignores the request token. Every server-initiated close is bounded to 1 s, then aborted, and the pending-auth permit is released before the close. Auth, text and audio frames are capped at 4 KiB (auth overflow closes 4401, after auth 1009). The recorder comments say "attempt" (D8). |
+| `e2049d6` fix(cli) | P-02, P-04, P-09, P-10 | A server error prints `Database error: <MessageText>`; a connectivity failure prints `Database unavailable.` Both exit 1. Paths compare case-sensitively on Linux, and a script or context file that is a link is refused (D9). The file-backed graph validates scopes and build. |
+| `9b656b3` fix(schema) | P-06, P-07, P-08 | Migrations add `sessions (user_id, started_at desc)` and the missing unique `(session_id, ordinal)` on turns. The model no longer claims a plain `Email` index. A catalog oracle pins indexes, uniqueness, FKs and delete behaviour. |
+| `a86d247` fix(api) | I-01, I-02, I-04, I-07 | `/v1` responses are `no-store` with a validated `X-Request-Id`. A default non-credentialed CORS policy covers the bearer routes. Binding failures map to `validation.failed`. The rate-limit headers are truthful: Limit on a success; Remaining 0 and Reset equal to `Retry-After` on a 429; none when disabled. |
+| `48cca65` fix(auth) | I-08, I-09 | JWT rejection oracles. An enabled OAuth provider must have a complete configuration. |
+| `94400e8` fix(web) | I-03 | One shared refresh flight and the configured API base for every auth call. The retry is built from a clone of the request. |
+| `00e12eb` fix(config) | P-05 | JWT issuer and audience in `appsettings.json`, the dev CORS origins, `Jwt:SecretKey` via user-secrets, and `JWT_SECRET_KEY` mapped in compose. |
+| `ccd2a23` test(auth) | (orchestrator) | The not-before skew oracle failed 3 in 30 full-suite runs, because `nbf` is written in whole seconds. It now uses a margin of 45 s. |
+
+**What the orchestrator found in the implementers' first passes** (sent back for a second pass):
+
+- **Rate-limit headers:** the first I-07 design kept the partition limiters in a registry after the framework had
+  disposed them. A refresh an hour after sign-in would have failed with a 500.
+- **Compose:** a compose change could bind the container to its own loopback.
+- **Web retry:** the retry reused a request body that had already been read.
+- **Tests:** the auth-overflow test passed without any size limit, and nothing tested the CLI error handling
+  through the real command path.
+- **Design-time factory:** a change to it broke the documented first run.
+- **Overlapping starts:** a window was left open.
+
+**Verification on the integrated branch:**
+
+- **Build:** `-warnaserror`, 0/0.
+- **.NET suite:** Application 52, Infrastructure 31 (+3 Linux-only skipped), Api 119, Cli 11, Integration 39 (+1
+  skipped).
+- **Api and Cli without a container:** pass.
+- **Web:** lint passes; shared 10 and app 22 tests pass; both builds pass.
+- **Also:** `docker-compose --profile full config -q`, the secrets guard and `git diff --check`.
+- **Stability:** the Api suite ran 30 times after the `nbf` fix, with 0 failures.
+- **Mutations, each restored and md5-checked:**
+  - unbounded close;
+  - a late permit release;
+  - no start wait;
+  - link and case checks disabled (in a Linux container);
+  - rate-limit headers emitted when disabled;
+  - no request clone;
+  - `ClockSkew` set to the 5-minute default.
+
+  Each mutation failed at least one test.
+
 ## Files examined by the reviewers
 
 - **Identity:**
