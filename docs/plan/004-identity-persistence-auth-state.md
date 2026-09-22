@@ -698,3 +698,12 @@ None blocking. Deferred, with reason:
 | F9 | Ticket 201 without `Location`, bare provider list, missing `RateLimit-*` | Ticket is 200; providers use the list envelope; all three `RateLimit-*` headers required in T6 |
 | F10 | CLI persistence/recorder wiring and owner lookup undefined | T10 extends the CLI service graph and defines `--owner` resolution and exit codes |
 | F11 | `SameSite=Strict` + CORS do not close refresh/logout CSRF | `OriginGuard` on cookie-authenticated mutations; cross-origin refusal test |
+
+**Implementation deviations (recorded during PR-A/PR-B, per "never diverge silently"):**
+
+| # | Deviation from the plan as written | Why |
+|---|---|---|
+| D1 | §4.1 says the Redis/Postgres registration fails fast at startup. Implemented as **eager configuration validation with a lazy connection**, and reachability moved to `/health`. | `AddPersistence`/`AddRedis` connected at *registration* time, so calling them from `Program.cs` would have forced all 48 (now 72) `Api.Tests` to need live Postgres and Redis. A misconfigured deployment still fails to boot on a missing setting, and `/health` is what an orchestrator reads. |
+| D2 | `POST /v1/auth/dev/sign-in` is **absent from the checked-in OpenAPI snapshot**. | It is mapped only when `Auth:Dev:Enabled && IsDevelopment()`, while the drift fixture runs under `Testing`. The frontend therefore calls it with a plain typed `fetch` rather than the generated client. |
+| D3 | `AuthTests` now expects `WWW-Authenticate: Bearer` where it expected `Dev`. | The Dev scheme was deleted by T4, so `Dev` became the wrong value. The test was adapted to the new reality rather than production code bent to the old test. |
+| D4 | Eight `NuGetAuditSuppress` entries in `PresenterAi.Infrastructure.csproj`. | EF design-time tooling pulls `System.Security.Cryptography.Xml`, whose every stable version carries those advisories (only 11.0.0 previews exist). Suppressed by advisory id so any *other* transitive advisory still fails the build. Revisit when 11.0.0 ships stable. |
