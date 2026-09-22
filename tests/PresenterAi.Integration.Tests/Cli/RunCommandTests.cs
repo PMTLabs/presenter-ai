@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Persistence.Entities;
 using PresenterAi.Infrastructure.Tests.Live;
@@ -40,6 +41,10 @@ public sealed class RunCommandTests(PostgresFixture postgres)
     public async Task Run_with_an_unknown_owner_exits_non_zero()
     {
         await using var fake = await FakeLiveServer.StartAsync();
+        // An imported existing owner makes this detect a mutation that falls back to a different user.
+        var existing = await SeedUserAsync();
+        await ImportSampleAsync(existing);
+        var before = await SnapshotAsync();
         var output = new StringWriter();
         var error = new StringWriter();
 
@@ -49,8 +54,22 @@ public sealed class RunCommandTests(PostgresFixture postgres)
 
         exit.Should().Be(1);
         error.ToString().Should().Contain("Unknown owner");
-        await using var context = CreateContext();
-        (await context.Sessions.CountAsync(session => session.UserId == "missing-run-owner@example.test")).Should().Be(0);
+        (await SnapshotAsync()).Should().BeEquivalentTo(before);
+    }
+
+    [Fact]
+    public async Task Owner_backed_run_lookup_on_a_missing_database_exits_1_with_a_single_safe_error_line()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        var error = new StringWriter();
+
+        var exit = await PresenterAi.Cli.Program.RunAsync(
+            ["run", "sample", "--owner", "owner@example.test"],
+            MissingDatabaseConfiguration(fake), new StringWriter(), error, CancellationToken.None);
+
+        exit.Should().Be(1);
+        error.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Should().ContainSingle().Which.Should().StartWith("Database error: database");
     }
 
     [Fact]
@@ -104,14 +123,23 @@ public sealed class RunCommandTests(PostgresFixture postgres)
         return await context.Presentations.SingleAsync(presentation => presentation.OwnerId == owner.Id);
     }
 
-    private IConfiguration Configuration(FakeLiveServer fake) =>
+    private IConfiguration Configuration(FakeLiveServer fake, string? connectionString = null) =>
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["ConnectionStrings:Postgres"] = postgres.ConnectionString,
+            ["ConnectionStrings:Postgres"] = connectionString ?? postgres.ConnectionString,
             ["Upstream:Endpoint"] = fake.Url,
             ["Upstream:Key"] = "integration-test-only",
             ["Presenter:AdvanceSilenceMs"] = "200"
         }).Build();
+
+    private IConfiguration MissingDatabaseConfiguration(FakeLiveServer fake)
+    {
+        var connection = new NpgsqlConnectionStringBuilder(postgres.ConnectionString)
+        {
+            Database = "presenter_ai_missing_" + Guid.NewGuid().ToString("N")
+        };
+        return Configuration(fake, connection.ConnectionString);
+    }
 
     private async Task<int> SessionCountFinalisedAsync(string ownerId)
     {
@@ -119,9 +147,19 @@ public sealed class RunCommandTests(PostgresFixture postgres)
         return await context.Sessions.CountAsync(session => session.UserId == ownerId && session.EndedAt != null);
     }
 
+    private async Task<PersistenceSnapshot> SnapshotAsync()
+    {
+        await using var context = CreateContext();
+        return new PersistenceSnapshot(
+            await context.Presentations.OrderBy(item => item.Id).Select(item => item.Id).ToArrayAsync(),
+            await context.Sessions.OrderBy(item => item.Id).Select(item => item.Id).ToArrayAsync());
+    }
+
     private PresenterAiDbContext CreateContext() => new(new DbContextOptionsBuilder<PresenterAiDbContext>()
         .UseNpgsql(postgres.ConnectionString)
         .Options);
+
+    private sealed record PersistenceSnapshot(string[] PresentationIds, string[] SessionIds);
 
     private static async Task WaitForAsync(Func<Task<bool>> condition)
     {

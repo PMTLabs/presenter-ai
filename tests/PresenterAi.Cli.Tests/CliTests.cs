@@ -103,6 +103,18 @@ public sealed class CliTests
             .Should().Equal("Configuration invalid: Missing required setting: Upstream:Key");
     }
 
+    [Theory]
+    [InlineData("Npgsql")]
+    [InlineData("retry")]
+    public void Database_connectivity_failures_are_classified_for_the_command_boundary(string kind)
+    {
+        Exception exception = kind == "Npgsql"
+            ? new Npgsql.NpgsqlException("unreachable")
+            : new Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException("retry limit", new Npgsql.NpgsqlException("unreachable"));
+
+        Program.IsDatabaseConnectivityFailure(exception).Should().BeTrue();
+    }
+
     [Fact]
     public async Task Import_without_owner_exits_2()
     {

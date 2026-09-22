@@ -22,6 +22,11 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
             var id = Path.GetFileNameWithoutExtension(file);
             try
             {
+                if (new FileInfo(file).LinkTarget is not null)
+                {
+                    throw new ArgumentException($"presentation file must not be a symbolic link: {id}");
+                }
+
                 var script = ScriptParser.Parse(await File.ReadAllTextAsync(file, cancellationToken).ConfigureAwait(false), id);
                 rows.Add(new PresentationListRow(id, script.Meta.Title, script.Slides.Count, script.Meta.Deck, script.Meta.Driver, null));
             }
@@ -45,6 +50,11 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
         }
 
         var file = Path.Combine(_rootDir, "presentations", $"{id}.md");
+        if (new FileInfo(file).LinkTarget is not null)
+        {
+            throw new ArgumentException($"presentation file must not be a symbolic link: {id}", nameof(id));
+        }
+
         var markdown = await File.ReadAllTextAsync(file, cancellationToken).ConfigureAwait(false);
         var script = ScriptParser.Parse(markdown, id);
         string? context = null;
@@ -56,6 +66,11 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
                 throw new ArgumentException($"context path escapes the project: {script.Meta.Context}");
             }
 
+            if (new FileInfo(contextPath).LinkTarget is not null)
+            {
+                throw new ArgumentException($"context file must not be a symbolic link: {script.Meta.Context}");
+            }
+
             context = await File.ReadAllTextAsync(contextPath, cancellationToken).ConfigureAwait(false);
         }
 
@@ -64,8 +79,14 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
             new LoadedPresentation(script.Meta.Id, script.Meta, script.Slides, context));
     }
 
-    private bool IsWithinRoot(string path) => path.StartsWith(_rootDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(path, _rootDir, StringComparison.OrdinalIgnoreCase);
+    private bool IsWithinRoot(string path)
+    {
+        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return path.StartsWith(_rootDir + Path.DirectorySeparatorChar, comparison)
+            || string.Equals(path, _rootDir, comparison);
+    }
 
     [GeneratedRegex("^[\\w.-]+$")]
     private static partial Regex IdRegex();

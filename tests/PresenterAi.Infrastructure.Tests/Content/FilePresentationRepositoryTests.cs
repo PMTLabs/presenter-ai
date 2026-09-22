@@ -59,6 +59,54 @@ public sealed class FilePresentationRepositoryTests : IDisposable
         source.Presentation.Context.Should().Be(loaded.Context);
     }
 
+    [LinuxOnlyFact]
+    public async Task Refuses_a_symbolic_linked_script_file()
+    {
+        var external = Path.Combine(Path.GetDirectoryName(_root)!, "external-script.md");
+        await File.WriteAllTextAsync(external, await File.ReadAllTextAsync(Path.Combine(_root, "presentations", "with-context.md")));
+        var link = Path.Combine(_root, "presentations", "linked.md");
+        File.CreateSymbolicLink(link, external);
+        var repository = new FilePresentationRepository(_root);
+
+        await repository.Invoking(item => item.ReadSourceAsync("linked"))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*symbolic link*");
+    }
+
+    [LinuxOnlyFact]
+    public async Task Refuses_a_symbolic_linked_context_file()
+    {
+        var external = Path.Combine(Path.GetDirectoryName(_root)!, "external-context.md");
+        await File.WriteAllTextAsync(external, "outside context");
+        var context = Path.Combine(_root, "presentations", "with-context-context.md");
+        File.Delete(context);
+        File.CreateSymbolicLink(context, external);
+        var repository = new FilePresentationRepository(_root);
+
+        await repository.Invoking(item => item.ReadSourceAsync("with-context"))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*symbolic link*");
+    }
+
+    [LinuxOnlyFact]
+    public async Task Rejects_a_sibling_root_that_differs_only_by_case()
+    {
+        var sibling = Path.Combine(Path.GetDirectoryName(_root)!, Path.GetFileName(_root).ToUpperInvariant());
+        Directory.CreateDirectory(sibling);
+        await File.WriteAllTextAsync(Path.Combine(sibling, "outside.md"), "must not be readable");
+        await File.WriteAllTextAsync(Path.Combine(_root, "presentations", "case-context.md"), $"""
+            ---
+            title: Case context
+            deck: decks/sample/index.html
+            context: ../{Path.GetFileName(sibling)}/outside.md
+            ---
+            ## Slide 1: One
+            Hello.
+            """);
+        var repository = new FilePresentationRepository(_root);
+
+        await repository.Invoking(item => item.ReadSourceAsync("case-context"))
+            .Should().ThrowAsync<ArgumentException>().WithMessage("*escapes the project*");
+    }
+
     [Fact]
     public async Task Rejects_a_context_path_outside_the_root()
     {
@@ -74,5 +122,17 @@ public sealed class FilePresentationRepositoryTests : IDisposable
     public void Dispose()
     {
         try { Directory.Delete(_root, recursive: true); } catch (IOException) { }
+    }
+}
+
+[AttributeUsage(AttributeTargets.Method)]
+internal sealed class LinuxOnlyFactAttribute : FactAttribute
+{
+    public LinuxOnlyFactAttribute()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Skip = "Symbolic-link and case-sensitive-path checks require Linux.";
+        }
     }
 }

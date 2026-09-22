@@ -135,9 +135,13 @@ public static class ImportCommand
     {
         var presentations = Path.GetFullPath(Path.Combine(contentRoot, "presentations"));
         var directory = Path.GetDirectoryName(Path.GetFullPath(path));
-        return string.Equals(directory, presentations, StringComparison.OrdinalIgnoreCase)
+        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return string.Equals(directory, presentations, comparison)
             && string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase)
-            && File.Exists(path);
+            && File.Exists(path)
+            && new FileInfo(path).LinkTarget is null;
     }
 
     private static IReadOnlyList<ResolvedFile> Expand(IReadOnlyList<string> arguments, string currentDirectory)

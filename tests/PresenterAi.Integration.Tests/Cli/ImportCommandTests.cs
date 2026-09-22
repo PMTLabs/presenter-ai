@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Npgsql;
 using PresenterAi.Application.Content;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Persistence;
@@ -45,6 +46,9 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
     [Fact]
     public async Task An_unknown_owner_exits_non_zero_and_writes_no_rows()
     {
+        // An existing account makes the oracle catch a mutation that resolves an unknown email to another user.
+        await SeedUserAsync();
+        var before = await SnapshotAsync();
         var root = FindRepositoryRoot();
         var configuration = Configuration();
         var output = new StringWriter();
@@ -56,6 +60,22 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
         exit.Should().Be(1);
         error.ToString().Should().Contain("Unknown owner");
         output.ToString().Should().BeEmpty();
+        (await SnapshotAsync()).Should().BeEquivalentTo(before);
+    }
+
+    [Fact]
+    public async Task Import_owner_lookup_on_a_missing_database_exits_1_with_a_single_safe_error_line()
+    {
+        var root = FindRepositoryRoot();
+        var error = new StringWriter();
+
+        var exit = await PresenterAi.Cli.Program.RunAsync(
+            ["import", Path.Combine(root, "presentations", "sample.md"), "--owner", "owner@example.test", "--content-root", root],
+            MissingDatabaseConfiguration(), new StringWriter(), error, CancellationToken.None);
+
+        exit.Should().Be(1);
+        error.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+            .Should().ContainSingle().Which.Should().StartWith("Database error: database");
     }
 
     [Fact]
@@ -74,6 +94,40 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
         output.ToString().Should().BeEmpty();
         await using var context = CreateContext();
         (await context.Presentations.CountAsync(presentation => presentation.OwnerId == owner.Id)).Should().Be(0);
+    }
+
+    [LinuxOnlyFact]
+    public async Task Symbolic_linked_script_and_context_files_are_refused()
+    {
+        var owner = await SeedUserAsync();
+        var sourceRoot = FindRepositoryRoot();
+        var root = Path.Combine(Path.GetTempPath(), "presenter-ai-linked-import", Guid.NewGuid().ToString("N"));
+        var presentations = Path.Combine(root, "presentations");
+        Directory.CreateDirectory(presentations);
+        try
+        {
+            var externalScript = Path.Combine(Path.GetDirectoryName(root)!, "external-script.md");
+            File.Copy(Path.Combine(sourceRoot, "presentations", "sample.md"), externalScript);
+            File.CreateSymbolicLink(Path.Combine(presentations, "linked.md"), externalScript);
+            File.Copy(Path.Combine(sourceRoot, "presentations", "sample.md"), Path.Combine(presentations, "sample.md"));
+            var externalContext = Path.Combine(Path.GetDirectoryName(root)!, "external-context.md");
+            File.Copy(Path.Combine(sourceRoot, "presentations", "sample-context.md"), externalContext);
+            File.CreateSymbolicLink(Path.Combine(presentations, "sample-context.md"), externalContext);
+
+            var output = new StringWriter();
+            var exit = await PresenterAi.Cli.Program.RunAsync(
+                ["import", Path.Combine(presentations, "*.md"), "--owner", owner.Email, "--content-root", root],
+                Configuration(), output, new StringWriter(), CancellationToken.None);
+
+            exit.Should().Be(1);
+            output.ToString().Should().Contain("linked.md: failed").And.Contain("sample.md: failed");
+            await using var context = CreateContext();
+            (await context.Presentations.CountAsync(item => item.OwnerId == owner.Id)).Should().Be(0);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 
     [Fact]
@@ -140,17 +194,48 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
         return user;
     }
 
-    private Microsoft.Extensions.Configuration.IConfiguration Configuration() =>
+    private Microsoft.Extensions.Configuration.IConfiguration Configuration(string? connectionString = null) =>
         new Microsoft.Extensions.Configuration.ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:Postgres"] = postgres.ConnectionString
+                ["ConnectionStrings:Postgres"] = connectionString ?? postgres.ConnectionString
             })
             .Build();
+
+    private IConfiguration MissingDatabaseConfiguration()
+    {
+        var connection = new NpgsqlConnectionStringBuilder(postgres.ConnectionString)
+        {
+            Database = "presenter_ai_missing_" + Guid.NewGuid().ToString("N")
+        };
+        return Configuration(connection.ConnectionString);
+    }
+
+    private async Task<PersistenceSnapshot> SnapshotAsync()
+    {
+        await using var context = CreateContext();
+        return new PersistenceSnapshot(
+            await context.Presentations.OrderBy(item => item.Id).Select(item => item.Id).ToArrayAsync(),
+            await context.Sessions.OrderBy(item => item.Id).Select(item => item.Id).ToArrayAsync());
+    }
 
     private PresenterAiDbContext CreateContext() => new(new DbContextOptionsBuilder<PresenterAiDbContext>()
         .UseNpgsql(postgres.ConnectionString)
         .Options);
+
+    private sealed record PersistenceSnapshot(string[] PresentationIds, string[] SessionIds);
+
+    [AttributeUsage(AttributeTargets.Method)]
+    private sealed class LinuxOnlyFactAttribute : FactAttribute
+    {
+        public LinuxOnlyFactAttribute()
+        {
+            if (!OperatingSystem.IsLinux())
+            {
+                Skip = "Symbolic-link import confinement requires Linux.";
+            }
+        }
+    }
 
     private static string FindRepositoryRoot()
     {

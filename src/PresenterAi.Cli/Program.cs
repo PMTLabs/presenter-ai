@@ -1,7 +1,10 @@
+using System.Data.Common;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using PresenterAi.Infrastructure;
 
 namespace PresenterAi.Cli;
@@ -54,11 +57,47 @@ public static class Program
             await error.WriteLineAsync($"Configuration invalid: {exception.Message}").ConfigureAwait(false);
             return 2;
         }
+        catch (Exception exception) when (FindPostgresException(exception) is { } postgres)
+        {
+            await error.WriteLineAsync($"Database error: {postgres.MessageText}").ConfigureAwait(false);
+            return 1;
+        }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             await error.WriteLineAsync("Cancelled.").ConfigureAwait(false);
             return 1;
         }
+        catch (Exception exception) when (IsDatabaseConnectivityFailure(exception))
+        {
+            await error.WriteLineAsync("Database unavailable.").ConfigureAwait(false);
+            return 1;
+        }
+    }
+
+    internal static bool IsDatabaseConnectivityFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is NpgsqlException or DbException or RetryLimitExceededException)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static PostgresException? FindPostgresException(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgres)
+            {
+                return postgres;
+            }
+        }
+
+        return null;
     }
 
     internal static ServiceProvider BuildImportServices(IConfiguration configuration, string contentRoot)
@@ -120,7 +159,7 @@ public static class Program
         services.AddFileImportSource();
         services.AddLiveSessions();
         services.AddPresenter(fileBacked: true);
-        return services.BuildServiceProvider();
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
     }
 
     private static IConfiguration BuildConfiguration(string[] args)
