@@ -1,3 +1,8 @@
+// `?worker&url` makes Vite compile the worklet to its own JS chunk and hand back its URL. A bare
+// `new URL("./x.ts", import.meta.url)` is only compiled inside `new Worker(...)`; for audioWorklet.addModule
+// the production build inlined the raw .ts as `data:video/mp2t`, which Chrome refuses to load as a module.
+import playbackProcessorUrl from "./worklets/playback-processor.ts?worker&url";
+
 export class AudioPlayback {
   private node: AudioWorkletNode | null = null;
   bufferedMs = 0;
@@ -8,9 +13,7 @@ export class AudioPlayback {
     },
   ) {}
   async start() {
-    await this.options.context.audioWorklet.addModule(
-      new URL("./worklets/playback-processor.ts", import.meta.url),
-    );
+    await this.options.context.audioWorklet.addModule(playbackProcessorUrl);
     this.node = new AudioWorkletNode(
       this.options.context,
       "playback-processor",

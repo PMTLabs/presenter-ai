@@ -3,6 +3,8 @@ import {
   createAudioContext,
   resumeWithTimeout,
 } from "./playback";
+// See playback.ts: `?worker&url` is the form Vite compiles for audioWorklet.addModule.
+import captureProcessorUrl from "./worklets/capture-processor.ts?worker&url";
 
 export type StartedAudio = {
   context: AudioContext;
@@ -86,9 +88,7 @@ export class AudioCapture {
       return;
     }
     this.stream = stream;
-    await context.audioWorklet.addModule(
-      new URL("./worklets/capture-processor.ts", import.meta.url),
-    );
+    await context.audioWorklet.addModule(captureProcessorUrl);
     if (this.stopped || signal?.aborted) {
       this.stop();
       return;
