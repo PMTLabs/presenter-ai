@@ -378,3 +378,7 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   `vitest.mjs` — dependency binaries, not MVP code).
 - Operational: `docker compose` (v2) lives in WSL, not on the Windows CLI (`docker-compose` v5 standalone there); run compose
   from `wsl -e bash -lc 'cd /mnt/d/sources/demo/presenter-ai && docker compose --profile full …'` so bind mounts resolve.
+- CI on PR #2 was red on `PresentationEndpointTests.Static_ui_has_no_cache_header`: the one remaining test that GET `/`
+  on the factory default, which resolves to `web/app/dist` — built locally, never in CI (A-class miss of the T3 move).
+  Class fix: `ApiFactory` now defaults `Content:WebRoot` to a non-existent path, so no test can pass because a local
+  build exists; the test opts into `WebRootFixture`. Mutation: default client on `/` fails with 404 locally as in CI.
