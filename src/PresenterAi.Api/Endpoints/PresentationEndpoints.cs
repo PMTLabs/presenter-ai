@@ -13,7 +13,7 @@ public static class PresentationEndpoints
 {
     public static IEndpointRouteBuilder MapPresentationEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        var group = endpoints.MapGroup("/v1/presentations").RequireAuthorization();
+        var group = endpoints.MapGroup("/v1/presentations").RequireAuthorization().RequireCors("Default");
         group.MapGet("", ListAsync)
             .WithName("ListPresentations")
             .Produces<ListResponse<PresentationSummary>>()

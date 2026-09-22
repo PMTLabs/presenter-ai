@@ -38,6 +38,7 @@ public static class SessionEndpoints
                 }
             })
             .RequireAuthorization()
+            .RequireCors("Default")
             .WithName("CreateSessionTicket")
             .Produces<SessionTicketResponse>(StatusCodes.Status200OK)
             .ProducesProblem(StatusCodes.Status401Unauthorized)

@@ -176,10 +176,14 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
 - `Authorization: Bearer <jwt>` for users; `X-Api-Key: <key>` for CLI/API keys (never both). Tokens are never
   in query strings or cookies for the API; the SPA keeps the access token in memory and the refresh token via
   `POST /v1/auth/refresh` (httpOnly cookie, `SameSite=Strict`).
-- Responses: `traceparent`, `X-Request-Id` (echoed if sent), `RateLimit-Limit` / `RateLimit-Remaining` /
-  `RateLimit-Reset` (IETF draft names) on rate-limited routes, `Retry-After` on 429/503, `Cache-Control:
-  no-store` on everything under `/v1` except explicitly cacheable static assets, `ETag` where §4 says.
-- CORS: only the SPA origins from configuration; credentials allowed only for the refresh endpoint.
+- Responses: `traceparent`, `X-Request-Id` (echoed if well-formed, otherwise generated), and `Cache-Control:
+  no-store` on everything under `/v1` except explicitly cacheable static assets. When rate limiting is enabled,
+  successful rate-limited routes emit `RateLimit-Limit` only. A 429 additionally emits
+  `RateLimit-Remaining: 0`, `RateLimit-Reset`, and an equal whole-second `Retry-After`, derived from the limiter
+  lease (or the configured window when metadata is unavailable). They are absent when rate limiting is disabled.
+  `ETag` appears where §4 says.
+- CORS: only the SPA origins from configuration; credentialed CORS is restricted to the cookie-authenticated
+  refresh and logout endpoints.
 - Uploads: multipart, field name `file`, size limit per route (decks 100 MB, documents 50 MB), MIME sniffed
   server-side, filename sanitised, stored under an opaque key — the original name is metadata only.
 - Never log request bodies of uploads, scripts, prompts, transcripts or keys; log ids and sizes.

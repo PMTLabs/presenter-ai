@@ -8,6 +8,8 @@ namespace PresenterAi.Api.Middleware;
 
 public static class AuthRateLimiting
 {
+    private static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
+
     public static class Policies
     {
         public const string Authorize = "auth-authorize";
@@ -26,11 +28,15 @@ public static class AuthRateLimiting
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.OnRejected = async (context, _) =>
             {
-                var (limit, _) = LimitFor(context.HttpContext.Request.Path);
+                var (_, limit) = PolicyFor(context.HttpContext.Request.Path);
+                var retryAfter = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan value)
+                    ? value
+                    : Window;
+                var reset = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
                 context.HttpContext.Response.Headers["RateLimit-Limit"] = limit.ToString();
                 context.HttpContext.Response.Headers["RateLimit-Remaining"] = "0";
-                context.HttpContext.Response.Headers["RateLimit-Reset"] = "60";
-                context.HttpContext.Response.Headers.RetryAfter = "60";
+                context.HttpContext.Response.Headers["RateLimit-Reset"] = reset.ToString();
+                context.HttpContext.Response.Headers.RetryAfter = reset.ToString();
                 await Problems.Create(context.HttpContext, ErrorCodes.RateLimitExceeded,
                     StatusCodes.Status429TooManyRequests, "Too many requests. Please try again later.")
                     .ExecuteAsync(context.HttpContext).ConfigureAwait(false);
@@ -46,13 +52,12 @@ public static class AuthRateLimiting
     public static IApplicationBuilder UseAuthRateLimitHeaders(this IApplicationBuilder app) =>
         app.Use(async (context, next) =>
         {
-            var (limit, applies) = LimitFor(context.Request.Path);
-            if (applies)
+            if (context.RequestServices.GetRequiredService<IOptions<Options>>().Value.Enabled
+                && PolicyFor(context.Request.Path) is (_, var limit) && limit > 0)
             {
                 context.Response.Headers["RateLimit-Limit"] = limit.ToString();
-                context.Response.Headers["RateLimit-Remaining"] = "1";
-                context.Response.Headers["RateLimit-Reset"] = "60";
             }
+
             await next().ConfigureAwait(false);
         });
 
@@ -67,20 +72,20 @@ public static class AuthRateLimiting
                     _ => new FixedWindowRateLimiterOptions
                     {
                         PermitLimit = limit,
-                        Window = TimeSpan.FromMinutes(1),
+                        Window = Window,
                         QueueLimit = 0
                     })
                 : RateLimitPartition.GetNoLimiter("disabled");
         });
     }
 
-    private static (int Limit, bool Applies) LimitFor(PathString path)
+    private static (string? Policy, int Limit) PolicyFor(PathString path)
     {
         var value = path.Value ?? string.Empty;
-        if (value.EndsWith("/authorize", StringComparison.Ordinal)) return (20, true);
-        if (value.EndsWith("/callback", StringComparison.Ordinal)) return (20, true);
-        if (value.EndsWith("/sso/token", StringComparison.Ordinal)) return (30, true);
-        if (value.EndsWith("/refresh", StringComparison.Ordinal)) return (30, true);
-        return (0, false);
+        if (value.EndsWith("/authorize", StringComparison.Ordinal)) return (Policies.Authorize, 20);
+        if (value.EndsWith("/callback", StringComparison.Ordinal)) return (Policies.Callback, 20);
+        if (value.EndsWith("/sso/token", StringComparison.Ordinal)) return (Policies.Token, 30);
+        if (value.EndsWith("/refresh", StringComparison.Ordinal)) return (Policies.Refresh, 30);
+        return (null, 0);
     }
 }

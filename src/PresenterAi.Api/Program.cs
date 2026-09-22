@@ -5,6 +5,7 @@ using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
 using PresenterAi.Api.Auth;
@@ -90,11 +91,23 @@ builder.Services.AddAuthentication(options =>
     };
 });
 builder.Services.AddAuthorization();
-builder.Services.AddCors(options => options.AddPolicy("Refresh", policy =>
+builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadRequest = true);
+builder.Services.AddCors(options =>
 {
+    options.DefaultPolicyName = "Default";
     var origins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
-    policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod().AllowCredentials();
-}));
+    options.AddDefaultPolicy(policy => policy
+        .WithOrigins(origins)
+        .WithHeaders("Authorization", "Content-Type", "X-Request-Id")
+        .WithExposedHeaders("X-Request-Id", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "Retry-After")
+        .AllowAnyMethod());
+    options.AddPolicy("Refresh", policy => policy
+        .WithOrigins(origins)
+        .WithHeaders("Authorization", "Content-Type", "X-Request-Id")
+        .WithExposedHeaders("X-Request-Id", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "Retry-After")
+        .AllowAnyMethod()
+        .AllowCredentials());
+});
 builder.Services.AddAuthRateLimiting(builder.Configuration);
 
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -113,6 +126,7 @@ builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document,
 
 var app = builder.Build();
 app.UseExceptionHandler();
+app.UseV1SecurityHeaders();
 
 var contentOptions = app.Services.GetRequiredService<IOptions<ContentOptions>>().Value;
 var webRoot = Path.GetFullPath(contentOptions.WebRoot, app.Environment.ContentRootPath);

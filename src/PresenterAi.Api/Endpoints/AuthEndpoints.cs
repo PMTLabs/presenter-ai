@@ -21,7 +21,7 @@ public static class AuthEndpoints
         IConfiguration configuration,
         IHostEnvironment environment)
     {
-        var group = endpoints.MapGroup("/v1/auth").WithTags("Auth");
+        var group = endpoints.MapGroup("/v1/auth").WithTags("Auth").RequireCors("Default");
         var sso = group.MapGroup("/sso");
 
         sso.MapGet("/providers", (SsoService service) =>

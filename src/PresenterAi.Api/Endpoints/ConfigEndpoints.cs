@@ -11,6 +11,7 @@ public static class ConfigEndpoints
         endpoints.MapGet("/v1/config", (UpstreamRoutes routes, IOptions<PresenterOptions> presenter) =>
                 Results.Ok(new ConfigDto(routes.Upstreams[0].Model, routes.Voice, presenter.Value.AdvanceSilenceMs)))
             .RequireAuthorization()
+            .RequireCors("Default")
             .WithName("GetConfig")
             .Produces<ConfigDto>();
         return endpoints;

@@ -1,6 +1,8 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using PresenterAi.Api.Tests.Infrastructure;
@@ -49,31 +51,72 @@ public sealed class AuthEndpointSecurityTests
     }
 
     [Fact]
-    public async Task Rate_limited_routes_emit_all_rate_limit_headers_and_retry_after()
+    public async Task Rate_limited_routes_emit_truthful_rate_limit_headers_and_retry_after()
     {
         using var factory = new ApiFactory
         {
             Overrides = new Dictionary<string, string?>
             {
-                ["RateLimiting:Enabled"] = "true"
+                ["RateLimiting:Enabled"] = "true",
+                ["OAuth:ApiBaseUrl"] = "https://api.example.test",
+                ["OAuth:StateEncryptionKey"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+                ["OAuth:AllowedRedirectUris:0"] = "https://app.example.test",
+                ["OAuth:Google:Enabled"] = "true",
+                ["OAuth:Google:ClientId"] = "client",
+                ["OAuth:Google:ClientSecret"] = "test-only-secret",
+                ["OAuth:Google:AuthorizationEndpoint"] = "https://identity.example.test/authorize",
+                ["OAuth:Google:TokenEndpoint"] = "https://identity.example.test/token",
+                ["OAuth:Google:UserInfoEndpoint"] = "https://identity.example.test/userinfo"
             }
         };
-        using var client = factory.CreateClient();
-        var url = "/v1/auth/sso/google/authorize?redirect_uri=x&code_challenge=short&state=s";
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        var url = "/v1/auth/sso/google/authorize?redirect_uri=https%3A%2F%2Fapp.example.test&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&state=state";
+        using var first = await client.GetAsync(url);
+        using var second = await client.GetAsync(url);
+        first.StatusCode.Should().Be(HttpStatusCode.Found);
+        second.StatusCode.Should().Be(HttpStatusCode.Found);
+        Header(first, "RateLimit-Limit").Should().Be("20");
+        first.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
+        first.Headers.Contains("RateLimit-Reset").Should().BeFalse();
+        Header(second, "RateLimit-Limit").Should().Be("20");
+        second.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
+        second.Headers.Contains("RateLimit-Reset").Should().BeFalse();
+
         HttpResponseMessage? last = null;
-        for (var index = 0; index < 21; index++)
+        for (var index = 0; index < 19; index++)
         {
             last?.Dispose();
             last = await client.GetAsync(url);
         }
 
         last!.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
-        last.Headers.Contains("RateLimit-Limit").Should().BeTrue();
-        last.Headers.Contains("RateLimit-Remaining").Should().BeTrue();
-        last.Headers.Contains("RateLimit-Reset").Should().BeTrue();
-        last.Headers.RetryAfter.Should().NotBeNull();
+        Header(last, "RateLimit-Remaining").Should().Be("0");
+        var reset = Header(last, "RateLimit-Reset");
+        var retryAfter = last.Headers.RetryAfter!.Delta!.Value.TotalSeconds;
+        retryAfter.Should().BeInRange(1, 60);
+        retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture).Should().Be(reset);
         last.Dispose();
     }
+
+    [Fact]
+    public async Task Disabled_rate_limiting_emits_no_rate_limit_headers()
+    {
+        using var factory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["RateLimiting:Enabled"] = "false"
+            }
+        };
+        using var client = factory.CreateClient();
+        using var response = await client.GetAsync(
+            "/v1/auth/sso/google/authorize?redirect_uri=https%3A%2F%2Fapp.example.test&code_challenge=challenge&state=state");
+        response.Headers.Contains("RateLimit-Limit").Should().BeFalse();
+        response.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
+        response.Headers.Contains("RateLimit-Reset").Should().BeFalse();
+    }
+
+    private static string Header(HttpResponseMessage response, string name) => response.Headers.GetValues(name).Single();
 
     [Fact]
     public void Dev_sign_in_is_absent_outside_development_and_mapped_in_development()
