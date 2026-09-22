@@ -9,6 +9,9 @@ namespace PresenterAi.Cli;
 
 public static class RunCommand
 {
+    // The local content root has no owner boundary; the file-backed presenter loader intentionally ignores this.
+    private const string LocalContentOwner = "local-file-content";
+
     public static async Task<int> RunAsync(
         RunArguments arguments,
         IConfiguration configuration,
@@ -146,7 +149,8 @@ public static class RunCommand
 
         try
         {
-            if (!await presenter.StartAsync(arguments.Id, cancellationToken: cancellationToken).ConfigureAwait(false))
+            var start = await presenter.StartAsync(arguments.Id, fromIndex: null, ownerId: LocalContentOwner, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!start.Started)
             {
                 await error.WriteLineAsync($"Run failed: could not start presentation \"{arguments.Id}\".").ConfigureAwait(false);
                 return 1;

@@ -13,7 +13,7 @@ public interface IPresenter : IAsyncDisposable
 
     PresenterSnapshot Snapshot();
 
-    Task<bool> StartAsync(string id, int? fromIndex = null, CancellationToken cancellationToken = default);
+    Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default);
     Task<bool> NextAsync(CancellationToken cancellationToken = default);
     Task<bool> PrevAsync(CancellationToken cancellationToken = default);
     Task<bool> GotoAsync(int index, CancellationToken cancellationToken = default);

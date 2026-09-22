@@ -5,13 +5,13 @@ using PresenterAi.Application.Scripts;
 
 namespace PresenterAi.Infrastructure.Content;
 
-public sealed partial class FilePresentationRepository(string rootDir) : IPresentationRepository
+public sealed partial class FilePresentationRepository(string rootDir) : IPresentationImportSource
 {
     // Trailing separators are trimmed so the IsWithinRoot prefix check works for "../../"-style roots
     // (Path.GetFullPath keeps the trailing separator, which broke every context load in a real run).
     private readonly string _rootDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDir));
 
-    public async Task<IReadOnlyList<PresentationListRow>> ListAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<PresentationListRow>> ListFilesAsync(CancellationToken cancellationToken = default)
     {
         var directory = Path.Combine(_rootDir, "presentations");
         var rows = new List<PresentationListRow>();
@@ -34,7 +34,7 @@ public sealed partial class FilePresentationRepository(string rootDir) : IPresen
         return rows.OrderBy(row => row.Id, StringComparer.Ordinal).ToArray();
     }
 
-    public async Task<LoadedPresentation> LoadAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<LoadedPresentation> ReadAsync(string id, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(id) || !IdRegex().IsMatch(id))
         {

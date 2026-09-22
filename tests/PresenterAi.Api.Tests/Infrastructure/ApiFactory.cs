@@ -6,7 +6,11 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using PresenterAi.Application.Auth;
+using PresenterAi.Application.Content;
+using PresenterAi.Application.Presenting;
+using PresenterAi.Infrastructure.Content;
 using Microsoft.IdentityModel.Tokens;
 
 namespace PresenterAi.Api.Tests.Infrastructure;
@@ -80,6 +84,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             services.RemoveAll<ITicketStore>();
+            services.RemoveAll<IPresentationRepository>();
+            services.AddScoped<IPresentationRepository, TestPresentationRepository>();
             services.AddSingleton<TestTicketStore>();
             services.AddSingleton<ITicketStore>(serviceProvider => serviceProvider.GetRequiredService<TestTicketStore>());
         });
@@ -99,6 +105,43 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         }
 
         throw new DirectoryNotFoundException("PresenterAi.slnx was not found above the test assembly.");
+    }
+}
+
+internal sealed class TestPresentationRepository : IPresentationRepository
+{
+    private readonly FilePresentationRepository _source;
+
+    public TestPresentationRepository(IOptions<ContentOptions> options, IWebHostEnvironment environment)
+    {
+        _source = new FilePresentationRepository(Path.GetFullPath(options.Value.RootDir, environment.ContentRootPath));
+    }
+
+    public async Task<PresentationListResult> ListAsync(
+        string ownerId,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwner(ownerId);
+        var rows = await _source.ListFilesAsync(cancellationToken).ConfigureAwait(false);
+        var offset = (long)(page - 1) * pageSize;
+        var skip = (int)Math.Min(offset, int.MaxValue);
+        return new PresentationListResult(rows.Skip(skip).Take(pageSize).ToArray(), rows.Count);
+    }
+
+    public Task<LoadedPresentation> LoadAsync(string ownerId, string id, CancellationToken cancellationToken = default)
+    {
+        EnsureOwner(ownerId);
+        return _source.ReadAsync(id, cancellationToken);
+    }
+
+    private static void EnsureOwner(string ownerId)
+    {
+        if (!string.Equals(ownerId, "test-user", StringComparison.Ordinal))
+        {
+            throw new FileNotFoundException("The owner-scoped presentation was not found.");
+        }
     }
 }
 

@@ -20,7 +20,7 @@ public sealed class SpaFallbackTests(ApiFactory factory, WebRootFixture webRoot)
     public async Task Api_unknown_route_is_404_not_index()
     {
         using var client = factory.WithWebHostBuilder(builder => builder.UseSetting("Content:WebRoot", webRoot.Root)).CreateClient();
-        var response = await client.GetAsync("/api/nope");
+        var response = await client.GetAsync("/v1/nope");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
         (await response.Content.ReadAsStringAsync()).ToLowerInvariant().Should().NotContain("<html");
     }

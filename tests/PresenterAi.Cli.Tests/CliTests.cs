@@ -130,11 +130,11 @@ public sealed class CliTests
 
         public PresenterSnapshot Snapshot() => new("presenting", "sample", "sample", 0, 3, false, false, "test", null, 0, 200);
 
-        public Task<bool> StartAsync(string id, int? fromIndex = null, CancellationToken cancellationToken = default)
+        public Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default)
         {
             State?.Invoke(Snapshot());
             Slide?.Invoke(1);
-            return Task.FromResult(true);
+            return Task.FromResult(new PresenterStartResult(true, id, "test", "test", "test-model"));
         }
 
         public Task<bool> NextAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);

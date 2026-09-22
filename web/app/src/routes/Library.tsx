@@ -12,7 +12,7 @@ export function Library() {
   useEffect(() => {
     let active = true;
     void apiClient
-      .GET("/api/presentations")
+      .GET("/v1/presentations")
       .then(({ data, error: requestError }) => {
         if (!active) return;
         if (requestError) {
@@ -24,7 +24,7 @@ export function Library() {
           );
           return;
         }
-        if (data) setPresentations(data);
+        if (data) setPresentations(data.items);
       })
       .catch(() => {
         if (active) setError("Unable to load presentations.");

@@ -300,7 +300,11 @@ public sealed class PresenterTests
     public async Task Falls_back_to_next_upstream_on_startup_error()
     {
         await using var harness = Create(upstreams: 2, failAttempts: [0]);
-        Assert.True(await harness.Presenter.StartAsync("p"));
+        var start = await harness.Presenter.StartAsync("p", null, "test-owner");
+        Assert.True(start.Started);
+        Assert.Equal("fallback", start.Upstream);
+        Assert.Equal("sess_test", start.UpstreamSessionId);
+        Assert.Equal("test", start.Model);
         Assert.Equal(2, harness.Sessions.Count);
         Assert.Equal("fallback", harness.Sessions[1].Name);
         Assert.Empty(harness.Sessions[0].Sent);
@@ -326,7 +330,9 @@ public sealed class PresenterTests
     {
         await using var harness = Create(upstreams: 2, failAttempts: [0, 1]);
 
-        Assert.False(await harness.Presenter.StartAsync("p"));
+        var start = await harness.Presenter.StartAsync("p", null, "test-owner");
+        Assert.False(start.Started);
+        Assert.Null(start.Upstream);
         Assert.Equal("idle", harness.Presenter.Snapshot().State);
         Assert.All(harness.Sessions, session => Assert.Equal(1, session.DisposeCount));
     }
@@ -478,7 +484,7 @@ public sealed class PresenterTests
                 sessions.Add(session);
                 return session;
             },
-            (id, _) => id == "missing"
+            (_, id, _) => id == "missing"
                 ? Task.FromException<LoadedPresentation>(new InvalidOperationException("no such file"))
                 : Task.FromResult(new LoadedPresentation(
                     id,

@@ -1,6 +1,8 @@
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using PresenterAi.Api.Tests.Infrastructure;
+using PresenterAi.Application.Content;
 
 namespace PresenterAi.Api.Tests;
 
@@ -11,7 +13,7 @@ public sealed class AuthTests
     {
         using var factory = new ApiFactory { Overrides = new Dictionary<string, string?> { ["Auth:Dev:Enabled"] = "false" } };
         using var client = factory.CreateClient();
-        var response = await client.GetAsync("/api/config");
+        var response = await client.GetAsync("/v1/config");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.Unauthorized);
         var body = JsonNode.Parse(await response.Content.ReadAsStringAsync())!.AsObject();
         body["code"]!.GetValue<string>().Should().Be("auth.required");
@@ -24,10 +26,17 @@ public sealed class AuthTests
     }
 
     [Fact]
+    public void Api_host_does_not_register_the_ownerless_import_source()
+    {
+        using var factory = new ApiFactory();
+        factory.Services.GetService<IPresentationImportSource>().Should().BeNull();
+    }
+
+    [Fact]
     public async Task Jwt_bearer_authenticates_requests_with_a_valid_token()
     {
         using var factory = new ApiFactory();
         using var client = factory.CreateAuthenticatedClient();
-        (await client.GetAsync("/api/config")).StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        (await client.GetAsync("/v1/config")).StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
     }
 }

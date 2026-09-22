@@ -11,6 +11,4 @@ public sealed record SsoTokenRequest(string Code, string? CodeVerifier, string? 
 
 public sealed record SsoProviderResponse(string Id);
 
-public sealed record ListResponse<T>(IReadOnlyList<T> Items, int Page, int PageSize, int Total);
-
 public sealed record SessionTicketResponse(string Ticket, int ExpiresInSeconds);

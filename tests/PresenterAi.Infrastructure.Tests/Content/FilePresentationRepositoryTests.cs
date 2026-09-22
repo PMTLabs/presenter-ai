@@ -49,7 +49,7 @@ public sealed class FilePresentationRepositoryTests : IDisposable
         };
         var repository = new FilePresentationRepository(_root + suffix);
 
-        var loaded = await repository.LoadAsync("with-context");
+        var loaded = await repository.ReadAsync("with-context");
 
         loaded.Context.Should().Be("Background facts.");
         loaded.Slides.Should().HaveCount(1);
@@ -60,7 +60,7 @@ public sealed class FilePresentationRepositoryTests : IDisposable
     {
         var repository = new FilePresentationRepository(_root + Path.DirectorySeparatorChar);
 
-        var load = () => repository.LoadAsync("escaping");
+        var load = () => repository.ReadAsync("escaping");
 
         await load.Should().ThrowAsync<ArgumentException>().WithMessage("*escapes the project*");
     }

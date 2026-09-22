@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type components, createApiClient } from './client';
 import { clearAuthSession, setAuthSession } from '../auth/authStore';
 
-const responseBody = [
-  { id: 'sample', title: 'Sample', slideCount: 3, deck: 'sample', driver: 'show' },
-] satisfies components['schemas']['PresentationSummary'][];
+const responseBody = {
+  items: [{ id: 'sample', title: 'Sample', slideCount: 3, deck: 'sample', driver: 'show' }],
+  page: 1,
+  pageSize: 25,
+  total: 1,
+};
 
 describe('generated API client', () => {
   afterEach(() => {
@@ -21,7 +24,7 @@ describe('generated API client', () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(responseBody), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await createApiClient('http://localhost').GET('/api/presentations');
+    await createApiClient('http://localhost').GET('/v1/presentations');
     const request = fetchMock.mock.calls[0]?.[0] as Request;
     expect(request.headers.get('Authorization')).toBe('Bearer access-token');
   });
@@ -42,7 +45,7 @@ describe('generated API client', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(responseBody), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await createApiClient('http://localhost').GET('/api/presentations');
+    await createApiClient('http://localhost').GET('/v1/presentations');
     expect(fetchMock).toHaveBeenCalledTimes(3);
     const refresh = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(refresh.credentials).toBe('include');
@@ -57,14 +60,14 @@ describe('generated API client', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const { data, error } = await createApiClient('http://localhost').GET('/api/presentations');
+    const { data, error } = await createApiClient('http://localhost').GET('/v1/presentations');
     expect(error).toBeUndefined();
     expect(data).toEqual(responseBody);
     if (!data) throw new Error('expected generated response data');
-    const typedResponse = data satisfies components['schemas']['PresentationSummary'][];
-    expect(typedResponse[0]?.id).toBe('sample');
+    const typedResponse = data satisfies components['schemas']['ListResponseOfPresentationSummary'];
+    expect(typedResponse.items[0]?.id).toBe('sample');
     expect(fetchMock).toHaveBeenCalledOnce();
     const request = fetchMock.mock.calls[0]?.[0] as Request;
-    expect(request.url).toBe('http://localhost/api/presentations');
+    expect(request.url).toBe('http://localhost/v1/presentations');
   });
 });

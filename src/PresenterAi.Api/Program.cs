@@ -170,7 +170,7 @@ app.MapFallback(async context =>
         return;
     }
 
-    if (path.StartsWith("/api/", StringComparison.Ordinal)
+    if (path.StartsWith("/v1/", StringComparison.Ordinal)
         || path == "/ws"
         || path.StartsWith("/openapi/", StringComparison.Ordinal)
         || path == "/health")

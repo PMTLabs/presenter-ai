@@ -245,7 +245,7 @@ public sealed class PresenterBridge : IAsyncDisposable
 
                     int? fromIndex = document.RootElement.TryGetProperty("fromIndex", out var from) && from.TryGetInt32(out var value) ? value : null;
                     _logger.LogDebug("Starting presentation {PresentationId} for user {UserId}", presentation.GetString(), connection.UserId);
-                    ObserveCommand(_presenter.StartAsync(presentation.GetString()!, fromIndex, cancellationToken), connection, "start", true);
+                    ObserveCommand(_presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, cancellationToken), connection, "start", true);
                     return;
                 case "next": ObserveCommand(_presenter.NextAsync(cancellationToken), connection, type, false); return;
                 case "prev": ObserveCommand(_presenter.PrevAsync(cancellationToken), connection, type, false); return;

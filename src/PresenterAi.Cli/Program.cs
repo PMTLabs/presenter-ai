@@ -75,8 +75,9 @@ public static class Program
         services.AddLogging();
         services.AddUpstreamOptions(effectiveConfiguration);
         services.AddFileContent(effectiveConfiguration, contentRoot);
+        services.AddFileImportSource();
         services.AddLiveSessions();
-        services.AddPresenter();
+        services.AddPresenter(fileBacked: true);
         return services.BuildServiceProvider();
     }
 

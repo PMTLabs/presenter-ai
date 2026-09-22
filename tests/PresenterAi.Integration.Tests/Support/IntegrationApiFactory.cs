@@ -1,10 +1,43 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.IdentityModel.Tokens;
 
 namespace PresenterAi.Integration.Tests.Support;
 
 public sealed class IntegrationApiFactory(PostgresFixture postgres, RedisFixture redis) : WebApplicationFactory<Program>
 {
+    public HttpClient CreateAuthenticatedClient(string userId)
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+            "Bearer", CreateTestToken(userId));
+        return client;
+    }
+
+    private static string CreateTestToken(string userId)
+    {
+        var now = DateTime.UtcNow;
+        var token = new JwtSecurityToken(
+            issuer: "https://integration.presenter-ai.test",
+            audience: "presenter-ai-integration",
+            claims:
+            [
+                new Claim(JwtRegisteredClaimNames.Sub, userId),
+                new Claim(JwtRegisteredClaimNames.Email, "integration-test@example.test"),
+                new Claim("role", "user"),
+                new Claim(ClaimTypes.Role, "user")
+            ],
+            notBefore: now,
+            expires: now.AddMinutes(10),
+            signingCredentials: new SigningCredentials(
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes("integration-only-jwt-signing-key-not-a-credential-123456")),
+                SecurityAlgorithms.HmacSha256));
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");

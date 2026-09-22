@@ -131,7 +131,7 @@ export function Present() {
     let active = true;
     setError(null);
     void apiClient
-      .GET("/api/presentations/{id}", { params: { path: { id } } })
+      .GET("/v1/presentations/{id}", { params: { path: { id } } })
       .then(({ data, error: requestError }) => {
         if (!active) return;
         if (requestError) {
