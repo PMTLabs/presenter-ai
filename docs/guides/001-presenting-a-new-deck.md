@@ -83,9 +83,14 @@ session (cap ≈48 k characters; longer files are truncated with a warning). Poi
 
 ## 5. Load it and check the numbers
 
+Start the .NET API from the repository root:
+
 ```bash
-npm start                    # → http://localhost:47913
+dotnet run --project src/PresenterAi.Api   # → http://localhost:47913
 ```
+
+For the React path, run `cd web && bun run dev`, then open `http://localhost:47914/present/<name>`. The
+classic page is at <http://localhost:47913>.
 
 Pick the presentation in the dropdown. Before pressing Start, read the header line and the log:
 
@@ -96,12 +101,17 @@ Pick the presentation in the dropdown. Before pressing Start, read the header li
 
 Dry run without a browser (costs a few cents of session time, stops after slide 2):
 
+From the repository root, run the .NET `presenter-cli` equivalent:
+
 ```bash
-node scripts/headless-run.mjs <name> --stop-after-slide 2
+dotnet run --project src/PresenterAi.Cli -- run <name> --stop-after-slide 2
 ```
 
 It prints each slide change, the transcript of what was spoken and a speech/silence bar, so you
 can see whether the narration is read verbatim and whether the advance timing fits.
+
+> **Legacy Node MVP — kept until plan 004:** `npm start` serves the original page on port 47913, and
+> `node scripts/headless-run.mjs <name> --stop-after-slide 2` is the legacy dry run.
 
 ## 6. Rehearse
 
