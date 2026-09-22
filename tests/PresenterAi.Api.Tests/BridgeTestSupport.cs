@@ -38,6 +38,22 @@ internal static class BridgeTestSupport
         return socket;
     }
 
+    // The previous owner releases the slot only after its cleanup, so a connect made straight after a disconnect
+    // can legitimately be told busy; retry until the slot is free.
+    public static async Task<WebSocket> ConnectWhenFreeAsync(ApiFactory factory)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        while (true)
+        {
+            var socket = await ConnectWithTicketAsync(factory);
+            var frame = await ReceiveAsync(socket);
+            if (frame.Text is not null && !frame.Text.Contains("\"code\":\"busy\"", StringComparison.Ordinal)) return socket;
+            socket.Dispose();
+            if (DateTimeOffset.UtcNow >= deadline) throw new TimeoutException("Timed out waiting for the bridge slot.");
+            await Task.Delay(20);
+        }
+    }
+
     public static async Task<WebSocket> ConnectAnonymousAsync(ApiFactory factory) =>
         await factory.Server.CreateWebSocketClient()
             .ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);

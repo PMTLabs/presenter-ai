@@ -17,6 +17,8 @@ namespace PresenterAi.Api.Realtime;
 public sealed class PresenterBridge : IAsyncDisposable
 {
     private const string BusyMessage = "Another presenter page is already connected. Close it first.";
+    // LiveSession.CloseAsync is itself bounded, so only a wedged presenter loop reaches this.
+    private static readonly TimeSpan EndToIdleBound = TimeSpan.FromSeconds(5);
     private readonly IPresenter _presenter;
     private readonly ILogger<PresenterBridge> _logger;
     private readonly ITicketStore _ticketStore;
@@ -340,8 +342,31 @@ public sealed class PresenterBridge : IAsyncDisposable
 
     private async Task ObserveEndAsync()
     {
-        try { await _presenter.EndAsync().ConfigureAwait(false); }
+        // EndAsync returns once the close is requested, with the presenter still "ending"; it turns idle only when
+        // the loop handles the upstream close queued behind that command. Releasing the slot before then lets the
+        // next browser's start slip past PrepareRecorder and run unrecorded, and lets the recorder barrier finish
+        // before the upstream's Closed (billed seconds, close reason) has reached it.
+        var idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnState(PresenterSnapshot snapshot)
+        {
+            if (snapshot.State == "idle") idle.TrySetResult();
+        }
+
+        _presenter.State += OnState;
+        try
+        {
+            await _presenter.EndAsync().ConfigureAwait(false);
+            if (_presenter.Snapshot().State != "idle")
+            {
+                await idle.Task.WaitAsync(EndToIdleBound).ConfigureAwait(false);
+            }
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Presenter was not idle {Bound} after browser disconnect; releasing the slot anyway", EndToIdleBound);
+        }
         catch (Exception exception) { _logger.LogError(exception, "Presenter end after browser disconnect failed"); }
+        finally { _presenter.State -= OnState; }
     }
 
     internal void ConfigureOutboundForTest(int capacity, Func<Task>? beforeSocketSendAsync)

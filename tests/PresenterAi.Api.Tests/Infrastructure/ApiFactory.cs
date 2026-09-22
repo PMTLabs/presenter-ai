@@ -184,6 +184,7 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
     public int DetachCount { get; private set; }
     public int BeginCount { get; private set; }
     public int EndCount { get; private set; }
+    public bool ClosedBeforeEnd { get; private set; }
 
     public void Attach(IPresenter presenter)
     {
@@ -191,7 +192,10 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
         _slide = _ => { };
         _transcript = _ => { };
         _usage = _ => { };
-        _closed = _ => { };
+        _closed = _ =>
+        {
+            if (Volatile.Read(ref _ended) == 0) ClosedBeforeEnd = true;
+        };
         presenter.Slide += _slide;
         presenter.Transcript += _transcript;
         presenter.Usage += _usage;
