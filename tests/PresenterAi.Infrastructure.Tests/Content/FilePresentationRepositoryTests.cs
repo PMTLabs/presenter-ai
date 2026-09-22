@@ -33,14 +33,21 @@ public sealed class FilePresentationRepositoryTests : IDisposable
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData("/")]
-    [InlineData("\\")]
-    public async Task Loads_context_whether_or_not_the_root_has_a_trailing_separator(string suffix)
+    [InlineData("none")]
+    [InlineData("primary")]
+    [InlineData("alt")]
+    public async Task Loads_context_whether_or_not_the_root_has_a_trailing_separator(string separator)
     {
         // The real appsettings root is "../../" → Path.GetFullPath keeps the trailing separator; the first
-        // real run failed every context load with "context path escapes the project".
-        var repository = new FilePresentationRepository(_root + suffix.Replace('/', Path.DirectorySeparatorChar));
+        // real run failed every context load with "context path escapes the project". Both separators the OS
+        // recognises are covered ('' and '/' on Windows, '/' twice on Linux — a literal '' is a file name there).
+        var suffix = separator switch
+        {
+            "primary" => Path.DirectorySeparatorChar.ToString(),
+            "alt" => Path.AltDirectorySeparatorChar.ToString(),
+            _ => string.Empty
+        };
+        var repository = new FilePresentationRepository(_root + suffix);
 
         var loaded = await repository.LoadAsync("with-context");
 
