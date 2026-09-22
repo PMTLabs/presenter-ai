@@ -77,6 +77,16 @@
           "PresentationEndpoints"
         ],
         "operationId": "GetPresentation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",

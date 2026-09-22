@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc;
 using PresenterAi.Api.Errors;
 using PresenterAi.Application.Content;
 using PresenterAi.Contracts.Presentations;
@@ -34,7 +35,7 @@ public static class PresentationEndpoints
         }
     }
 
-    private static async Task<IResult> LoadAsync(string id, IPresentationRepository repository, CancellationToken cancellationToken)
+    private static async Task<IResult> LoadAsync([FromRoute] string id, IPresentationRepository repository, CancellationToken cancellationToken)
     {
         try
         {
