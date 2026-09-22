@@ -9,6 +9,7 @@ using PresenterAi.Api.Auth;
 using PresenterAi.Api.Endpoints;
 using PresenterAi.Api.Realtime;
 using PresenterAi.Infrastructure.Content;
+using PresenterAi.Application.Content;
 using PresenterAi.Infrastructure.Live;
 using PresenterAi.Api.Errors;
 using PresenterAi.Contracts;
@@ -57,11 +58,11 @@ var app = builder.Build();
 app.UseExceptionHandler();
 
 var contentOptions = app.Services.GetRequiredService<IOptions<ContentOptions>>().Value;
-var rootDir = Path.GetFullPath(contentOptions.RootDir, app.Environment.ContentRootPath);
 var webRoot = Path.GetFullPath(contentOptions.WebRoot, app.Environment.ContentRootPath);
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(Path.Combine(rootDir, "decks")),
+    // The deck root comes from the same IDeckStore the content layer registers (T16 wiring audit: no other consumer).
+    FileProvider = new PhysicalFileProvider(app.Services.GetRequiredService<IDeckStore>().DeckRoot),
     RequestPath = "/decks",
     ServeUnknownFileTypes = true
 });

@@ -40,6 +40,11 @@ services:
       Kestrel__Endpoints__Http__Url: http://0.0.0.0:47913
       Upstream__Endpoint: "${UPSTREAM_ENDPOINT:-}"
       Upstream__Key: "${UPSTREAM_KEY:-}"
+      Upstream__Model: "${UPSTREAM_MODEL:-gpt-live-1}"
+      Upstream__Voice: "${UPSTREAM_VOICE:-marin}"
+      Upstream__Fallback__Key: "${FALLBACK_OPENAI_KEY:-}"
+      Presenter__AdvanceSilenceMs: "${ADVANCE_SILENCE_MS:-3000}"
+      Presenter__LogEvents: "${LOG_EVENTS:-false}"
       Content__RootDir: /app/content
     volumes:
       - ./presentations:/app/content/presentations:ro

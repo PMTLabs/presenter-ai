@@ -56,7 +56,11 @@ public static class DependencyInjection
     public static IServiceCollection AddLiveSessions(this IServiceCollection services)
     {
         services.TryAddSingleton(TimeProvider.System);
-        services.TryAddSingleton<LiveSessionOptions>();
+        // Presenter:LogEvents (Node LOG_EVENTS) is the only reader-facing switch; it feeds the session's event logging.
+        services.TryAddSingleton(serviceProvider => new LiveSessionOptions
+        {
+            LogEvents = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PresenterOptions>>().Value.LogEvents
+        });
         services.AddSingleton<ILiveSessionFactory, LiveSessionFactory>();
         return services;
     }

@@ -270,3 +270,23 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   thinking slide-2-notes` ×2) while the headless client and the Node page receive them once; `deck adapter` logged
   twice (StrictMode double effect); `__presenterDebug().wsOpen` is derived from the presenter state, not the socket;
   the upstream transcribed a spurious `You: a dark` user turn from the server-side silence pump (no mic).
+
+### Review round 3 (pi gpt-5.6-terra:medium, `906af83..41d093a`, new web scope) — in progress
+
+- `docs/review/004-plan-002-impl-review-round-3.md`: F1 D major (route teardown leaves mic/AudioContext alive),
+  F2–F4 D minor (StrictMode double deck load = the duplicated `deck adapter` log; detail request ignores errors;
+  Library shows `detail` before `errorMessages[code]`), F5–F7 B (backoff schedule, text-message parsing, playback
+  start oracles). No blocker on the .NET side; round-2 class fixes verified at every site. The duplicated *server*
+  log lines have no client/store path — the fixer adds a stale-socket guard and a test; re-checked in Chrome after.
+  Ledger row added. Fixes by pi gpt-5.6-terra:medium (web only).
+
+### T16 — wiring audit (pi gpt-5.6-luna:medium scout) — done, docs/PR pending
+
+- `docs/research/004-plan-002-wiring-audit.md` holds the six tables (DI → resolvers, option keys → readers, bridge
+  frames → handlers on both sides, endpoints → callers, entry-point log lines, lifecycle) and the disposition.
+  Real gaps fixed: `IDeckStore` had no consumer (the deck static root now comes from it), `Presenter:LogEvents` was
+  bound but never read (feeds `LiveSessionOptions.LogEvents`), compose mapped only two of the `.env` keys (now
+  `UPSTREAM_MODEL`/`UPSTREAM_VOICE`/`FALLBACK_OPENAI_KEY`/`ADVANCE_SILENCE_MS`/`LOG_EVENTS`; `.env.example` says
+  `true/false` for the .NET host). False positives: `Auth:Dev:*` is read by `DevAuthHandler`; `upstream-error` is an
+  internal event (wire frame = `error{code}`); `busy` is `error{code:"busy"}` + 1013 by design. `/api/config` and
+  `pong` are Node-parity shapes without app callers.
