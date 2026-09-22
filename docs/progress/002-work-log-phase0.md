@@ -432,3 +432,36 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
 - Known forward risk handed to PR-B: `AddPersistence`/`AddRedis` connect and throw at *registration* time, so
   calling them from `Program.cs` would make all 48 `Api.Tests` need live Postgres and Redis. PR-B's brief
   therefore specifies eager config validation with a lazy connection, plus reachability on `/health`.
+
+### PR-B (T4, T5, T6, T7, T11a) — `9d84159`, `a9eaaf7`, `e81b667`, `4159e7e`
+
+- Implemented by external `pi` agents in two packages (auth stack, then tickets + frontend auth).
+- Caught during review: the first auth package tried to add a `TestingDevCompatibility` middleware that
+  authenticated every request under `ASPNETCORE_ENVIRONMENT=Testing`, which is a worse `DevAuthHandler`. It was
+  stopped mid-flight; `ApiFactory` now mints real signed JWTs instead. The same package shipped **zero** tests for
+  T4–T6 until sent back. Writing them exposed a real defect: dev sign-in let `AuthFailureException` escape as 500.
+- Mutation-verified guards: the conditional refresh-token revoke, the unverified-email collision refusal, the
+  refresh/logout `Origin` check, and ticket-before-CAS ordering on `/ws`.
+- **Orchestrator error, fixed in `4159e7e`:** `e81b667` was committed with a required `ApiFactory` registration
+  left unstaged, so HEAD was red (`BridgeContractTests.Expired_ticket_closes_4401`: "No service for type
+  TestTicketStore") while the reported "176 green" had been observed on the working tree. Found on resume by
+  stashing the stray change and re-running at HEAD. The true baseline was 177. Lesson: after committing, confirm
+  `git status` is clean before quoting the working tree's test result as the commit's.
+
+### PR-C part 1 (T8, T11b) — `0717d29`
+
+- Two seams the plan left open were settled in the brief before dispatch. (1) `IPresenter` is a singleton and the
+  DbContext is scoped under `ValidateOnBuild`/`ValidateScopes`, so the loader opens a scope per call. (2)
+  `CliTests` runs the real `run` command off disk with no Testcontainers, so `presenter-cli run` stays
+  file-backed.
+- Round 1 reproduced (180 passing) but was not committable: four test-only ownerless shims in production types, no
+  paging, the API container could still resolve the ownerless reader, and five oracle gaps. The decisive one was
+  shown by mutation: passing `"someone-else"` as the owner from the bridge left all 73 API tests green, because
+  the test double discarded the owner.
+- Round 2 fixed all eight items. The orchestrator re-ran seven mutations across both rounds (owner filter on
+  load/list, empty list, the bridge's owner in both directions, a fixed upstream label, `Skip(0)`, and the import
+  source registered in the API) and every one fails a test. It also removed two test-harness barriers the agent
+  added defensively: `PresenterTests` passed 8/8 runs without them, so the harness now matches HEAD.
+- Green at `0717d29`: build 0/0; **183 passed** (Application 52, Infrastructure 30, Api 75, Integration 21, Cli 5);
+  Api and Cli pass with no container; web lint/build/test (shared 5, app 22); OpenAPI drift green with no `/api`
+  paths left; `secrets-guard: clean`.
