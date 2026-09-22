@@ -73,6 +73,56 @@ public sealed class AuthEndpointIntegrationTests(PostgresFixture postgres, Redis
             .Should().Be("auth.account_disabled");
     }
 
+    [Fact]
+    public async Task Current_user_and_session_ticket_routes_serve_the_signed_in_user_and_refuse_disabled_accounts()
+    {
+        using var factory = new IntegrationApiFactory(postgres, redis);
+        using var client = factory.CreateClient();
+
+        await using (var setup = new PresenterAiDbContext(new DbContextOptionsBuilder<PresenterAiDbContext>()
+            .UseNpgsql(postgres.ConnectionString).Options))
+        {
+            await setup.Database.MigrateAsync();
+            await setup.Database.ExecuteSqlRawAsync("TRUNCATE TABLE session_turns, sessions, presentations, refresh_tokens, external_logins, users CASCADE");
+        }
+
+        var anonymousTicket = await client.PostAsync("/v1/sessions/ticket", content: null);
+        anonymousTicket.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        (await CodeAsync(anonymousTicket)).Should().Be("auth.required");
+
+        var signIn = JsonNode.Parse(await (await client.PostAsync("/v1/auth/dev/sign-in", content: null)).Content.ReadAsStringAsync())!;
+        var userId = signIn["user"]!["id"]!.GetValue<string>();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+            "Bearer", signIn["accessToken"]!.GetValue<string>());
+
+        var me = await client.GetAsync("/v1/auth/me");
+        me.StatusCode.Should().Be(HttpStatusCode.OK);
+        var meBody = JsonNode.Parse(await me.Content.ReadAsStringAsync())!;
+        meBody["id"]!.GetValue<string>().Should().Be(userId);
+        meBody["email"]!.GetValue<string>().Should().Be("integration-dev@example.test");
+
+        var ticketResponse = await client.PostAsync("/v1/sessions/ticket", content: null);
+        ticketResponse.StatusCode.Should().Be(HttpStatusCode.OK);
+        var ticketBody = JsonNode.Parse(await ticketResponse.Content.ReadAsStringAsync())!;
+        ticketBody["expiresInSeconds"]!.GetValue<int>().Should().Be(30);
+        var ticket = ticketBody["ticket"]!.GetValue<string>();
+        var tickets = factory.Services.GetRequiredService<ITicketStore>();
+        (await tickets.ClaimAsync(ticket)).Should().Be(userId);
+        (await tickets.ClaimAsync(ticket)).Should().BeNull();
+
+        await DisableUserAsync(postgres.ConnectionString, userId);
+
+        var disabledMe = await client.GetAsync("/v1/auth/me");
+        disabledMe.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await CodeAsync(disabledMe)).Should().Be("auth.account_disabled");
+        var disabledTicket = await client.PostAsync("/v1/sessions/ticket", content: null);
+        disabledTicket.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        (await CodeAsync(disabledTicket)).Should().Be("auth.account_disabled");
+    }
+
+    private static async Task<string> CodeAsync(HttpResponseMessage response) =>
+        JsonNode.Parse(await response.Content.ReadAsStringAsync())!["code"]!.GetValue<string>();
+
     private static async Task DisableUserAsync(string connectionString, string userId)
     {
         await using var db = new PresenterAiDbContext(new DbContextOptionsBuilder<PresenterAiDbContext>()

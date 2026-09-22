@@ -54,5 +54,4 @@ public sealed class OAuthProviderSettings
     public string AuthorizationEndpoint { get; set; } = string.Empty;
     public string TokenEndpoint { get; set; } = string.Empty;
     public string UserInfoEndpoint { get; set; } = string.Empty;
-    public string? TenantId { get; set; }
 }

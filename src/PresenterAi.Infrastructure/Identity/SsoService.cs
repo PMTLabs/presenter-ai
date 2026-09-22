@@ -30,7 +30,6 @@ public sealed class OAuthProviderOptions
     public string AuthorizationEndpoint { get; set; } = string.Empty;
     public string TokenEndpoint { get; set; } = string.Empty;
     public string UserInfoEndpoint { get; set; } = string.Empty;
-    public string? TenantId { get; set; }
 }
 
 public sealed class SsoFailureException(string code, int status, string detail) : Exception(detail)
