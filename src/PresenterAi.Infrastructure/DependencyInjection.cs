@@ -1,15 +1,55 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
+using Microsoft.EntityFrameworkCore;
+using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
+using PresenterAi.Infrastructure.Persistence;
+using PresenterAi.Infrastructure.Redis;
 
 namespace PresenterAi.Infrastructure;
 
 public static class DependencyInjection
 {
+    public static IServiceCollection AddPersistence(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var connectionString = configuration.GetConnectionString("Postgres");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException("Missing required setting: ConnectionStrings:Postgres");
+        }
+
+        services.AddDbContext<PresenterAiDbContext>(options =>
+            options.UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure()));
+        return services;
+    }
+
+    public static IServiceCollection AddRedis(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var connectionString = configuration.GetConnectionString("Redis");
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new InvalidOperationException("Missing required setting: ConnectionStrings:Redis");
+        }
+
+        var connection = RedisConnection.Connect(connectionString);
+        services.AddSingleton<IConnectionMultiplexer>(connection);
+        services.AddOptions<SessionRedisOptions>()
+            .Bind(configuration.GetSection("Session"));
+        services.AddSingleton<ITicketStore, TicketStore>();
+        services.AddSingleton<ISsoCodeStore, SsoCodeStore>();
+        services.AddSingleton<ISsoStateStore, SsoStateStore>();
+        return services;
+    }
+
     public static IServiceCollection AddUpstreamOptions(
         this IServiceCollection services,
         IConfiguration configuration)
