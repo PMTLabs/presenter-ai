@@ -8,7 +8,7 @@ export default defineConfig({
   server: {
     port: 47914,
     proxy: {
-      '/api': apiTarget,
+      '/v1': apiTarget,
       '/ws': { target: apiTarget, ws: true },
       '/decks': apiTarget,
       '/health': apiTarget,
