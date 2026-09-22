@@ -16,6 +16,7 @@ export interface AuthTokenResponse {
 
 let accessToken: string | null = null;
 let refreshPromise: Promise<boolean> | null = null;
+let sessionGeneration = 0;
 
 export function getAccessToken() {
   return accessToken;
@@ -26,6 +27,7 @@ export function hasAccessToken() {
 }
 
 function saveSession(response: AuthTokenResponse) {
+  sessionGeneration++;
   accessToken = response.accessToken;
   useAuthStore.setState({ user: response.user });
 }
@@ -35,6 +37,7 @@ export function setAuthSession(response: AuthTokenResponse) {
 }
 
 export function clearAuthSession() {
+  sessionGeneration++;
   accessToken = null;
   useAuthStore.setState({ user: null });
 }
@@ -42,6 +45,7 @@ export function clearAuthSession() {
 // All callers, including startup and the API interceptor, share this flight so a rotating cookie is redeemed once.
 export function refreshAuth(baseUrl = apiBaseUrl()): Promise<boolean> {
   if (refreshPromise) return refreshPromise;
+  const generation = sessionGeneration;
   refreshPromise = (async () => {
     const response = await fetch(apiUrl("/v1/auth/refresh", baseUrl), {
       method: "POST",
@@ -49,7 +53,9 @@ export function refreshAuth(baseUrl = apiBaseUrl()): Promise<boolean> {
       headers: { Accept: "application/json" },
     });
     if (!response.ok) return false;
-    saveSession((await response.json()) as AuthTokenResponse);
+    const session = (await response.json()) as AuthTokenResponse;
+    if (sessionGeneration !== generation) return hasAccessToken();
+    saveSession(session);
     return true;
   })().finally(() => {
     refreshPromise = null;
@@ -77,7 +83,9 @@ export const useAuthStore = create<AuthState>(() => ({
     saveSession((await response.json()) as AuthTokenResponse);
   },
   signOut: async () => {
+    sessionGeneration++;
     try {
+      await refreshPromise?.catch(() => undefined);
       await fetch(apiUrl("/v1/auth/logout"), {
         method: "POST",
         credentials: "include",

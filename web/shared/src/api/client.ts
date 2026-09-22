@@ -23,10 +23,11 @@ function withAuthorization(input: FetchInput, init: FetchInit, token: string | n
     : [input, requestInit];
 }
 
-function isRefreshRequest(input: FetchInput): boolean {
+function isNonBearerAuthRequest(input: FetchInput): boolean {
   const raw = input instanceof Request ? input.url : String(input);
   try {
-    return new URL(raw, "http://presenter-ai.invalid").pathname === "/v1/auth/refresh";
+    const path = new URL(raw, "http://presenter-ai.invalid").pathname;
+    return path.startsWith("/v1/auth/") && path !== "/v1/auth/me";
   } catch {
     return false;
   }
@@ -41,7 +42,7 @@ async function authenticatedFetch(
   const retrySource = input instanceof Request ? input.clone() : input;
   const [authorizedInput, authorizedInit] = withAuthorization(input, init, tokenUsed);
   const response = await fetch(authorizedInput, authorizedInit);
-  if (response.status !== 401 || isRefreshRequest(input))
+  if (response.status !== 401 || isNonBearerAuthRequest(input))
     return response;
 
   // A concurrent refresh may have replaced the token while this request was in flight. Retrying it is enough;
