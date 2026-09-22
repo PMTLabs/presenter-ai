@@ -1,0 +1,507 @@
+{
+  "openapi": "3.1.1",
+  "info": {
+    "title": "PresenterAi.Api | v1",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:47913/"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "PresenterAi.Api"
+        ],
+        "operationId": "Health",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "tags": [
+          "PresenterAi.Api"
+        ],
+        "operationId": "GetConfig",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presentations": {
+      "get": {
+        "tags": [
+          "PresentationEndpoints"
+        ],
+        "operationId": "ListPresentations",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PresentationSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/presentations/{id}": {
+      "get": {
+        "tags": [
+          "PresentationEndpoints"
+        ],
+        "operationId": "GetPresentation",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresentationDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ConfigDto": {
+        "required": [
+          "model",
+          "voice",
+          "advanceSilenceMs"
+        ],
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string"
+          },
+          "advanceSilenceMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "PresentationDetail": {
+        "required": [
+          "id",
+          "meta",
+          "slides",
+          "hasContext"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PresentationMetaDto"
+          },
+          "slides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SlideDto"
+            }
+          },
+          "hasContext": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PresentationMetaDto": {
+        "required": [
+          "id",
+          "title",
+          "deck",
+          "driver",
+          "voice",
+          "context",
+          "advanceSilenceMs",
+          "chunkChars"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "deck": {
+            "type": "string"
+          },
+          "driver": {
+            "type": "string"
+          },
+          "voice": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "context": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "advanceSilenceMs": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "chunkChars": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "PresentationSummary": {
+        "required": [
+          "id",
+          "title",
+          "slideCount",
+          "deck",
+          "driver",
+          "error"
+        ],
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "slideCount": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "deck": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "driver": {
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "error": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      },
+      "SlideDto": {
+        "required": [
+          "index",
+          "number",
+          "title",
+          "narration",
+          "notes"
+        ],
+        "type": "object",
+        "properties": {
+          "index": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "number": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "title": {
+            "type": "string"
+          },
+          "narration": {
+            "type": "string"
+          },
+          "notes": {
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "PresenterAi.Api"
+    },
+    {
+      "name": "PresentationEndpoints"
+    }
+  ],
+  "x-error-codes": [
+    {
+      "code": "auth.account_disabled",
+      "title": "Account disabled",
+      "status": 403
+    },
+    {
+      "code": "auth.forbidden",
+      "title": "Forbidden",
+      "status": 403
+    },
+    {
+      "code": "auth.required",
+      "title": "Authentication required",
+      "status": 401
+    },
+    {
+      "code": "auth.signup_not_allowed",
+      "title": "Sign-up not allowed",
+      "status": 403
+    },
+    {
+      "code": "auth.sso_code_used",
+      "title": "SSO code already used",
+      "status": 400
+    },
+    {
+      "code": "auth.sso_provider_disabled",
+      "title": "SSO provider disabled",
+      "status": 400
+    },
+    {
+      "code": "auth.sso_state_invalid",
+      "title": "Invalid SSO state",
+      "status": 400
+    },
+    {
+      "code": "concurrency.conflict",
+      "title": "Concurrency conflict",
+      "status": 412
+    },
+    {
+      "code": "deck.no_driver",
+      "title": "Deck driver not found",
+      "status": 422
+    },
+    {
+      "code": "deck.not_found",
+      "title": "Deck not found",
+      "status": 404
+    },
+    {
+      "code": "deck.unsupported_format",
+      "title": "Unsupported deck format",
+      "status": 415
+    },
+    {
+      "code": "document.not_found",
+      "title": "Document not found",
+      "status": 404
+    },
+    {
+      "code": "document.not_ready",
+      "title": "Document not ready",
+      "status": 409
+    },
+    {
+      "code": "document.too_large",
+      "title": "Document too large",
+      "status": 413
+    },
+    {
+      "code": "generation.busy",
+      "title": "Generation busy",
+      "status": 409
+    },
+    {
+      "code": "generation.job_failed",
+      "title": "Generation job failed",
+      "status": 500
+    },
+    {
+      "code": "generation.job_not_found",
+      "title": "Generation job not found",
+      "status": 404
+    },
+    {
+      "code": "generation.quota_exceeded",
+      "title": "Generation quota exceeded",
+      "status": 429
+    },
+    {
+      "code": "internal.error",
+      "title": "Internal server error",
+      "status": 500
+    },
+    {
+      "code": "internal.not_implemented",
+      "title": "Not implemented",
+      "status": 501
+    },
+    {
+      "code": "model.not_allowed",
+      "title": "Model not allowed",
+      "status": 403
+    },
+    {
+      "code": "model.not_found",
+      "title": "Model not found",
+      "status": 404
+    },
+    {
+      "code": "model.retired",
+      "title": "Model retired",
+      "status": 410
+    },
+    {
+      "code": "presentation.invalid_script",
+      "title": "Invalid presentation script",
+      "status": 400
+    },
+    {
+      "code": "presentation.not_found",
+      "title": "Presentation not found",
+      "status": 404
+    },
+    {
+      "code": "presentation.slide_count_mismatch",
+      "title": "Presentation slide count mismatch",
+      "status": 409
+    },
+    {
+      "code": "provider.disabled",
+      "title": "Provider disabled",
+      "status": 409
+    },
+    {
+      "code": "provider.not_found",
+      "title": "Provider not found",
+      "status": 404
+    },
+    {
+      "code": "provider.test_failed",
+      "title": "Provider test failed",
+      "status": 502
+    },
+    {
+      "code": "rate_limit.exceeded",
+      "title": "Rate limit exceeded",
+      "status": 429
+    },
+    {
+      "code": "session.already_running",
+      "title": "Session already running",
+      "status": 409
+    },
+    {
+      "code": "session.quota_exceeded",
+      "title": "Session quota exceeded",
+      "status": 429
+    },
+    {
+      "code": "session.slots_busy",
+      "title": "Session slots busy",
+      "status": 429
+    },
+    {
+      "code": "session.ticket_invalid",
+      "title": "Invalid session ticket",
+      "status": 401
+    },
+    {
+      "code": "upstream.rate_limited",
+      "title": "Upstream rate limited",
+      "status": 429
+    },
+    {
+      "code": "upstream.rejected",
+      "title": "Upstream rejected request",
+      "status": 502
+    },
+    {
+      "code": "upstream.unavailable",
+      "title": "Upstream unavailable",
+      "status": 503
+    },
+    {
+      "code": "validation.failed",
+      "title": "Validation failed",
+      "status": 400
+    },
+    {
+      "code": "validation.payload_too_large",
+      "title": "Payload too large",
+      "status": 413
+    },
+    {
+      "code": "validation.unsupported_media_type",
+      "title": "Unsupported media type",
+      "status": 415
+    }
+  ]
+}

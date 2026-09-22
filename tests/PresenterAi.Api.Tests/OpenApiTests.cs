@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FluentAssertions;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
@@ -166,6 +167,37 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
                 field => field.GetCustomAttribute<DescriptionAttribute>()?.Description
                     ?? throw new InvalidOperationException($"Missing DescriptionAttribute on {field.Name}"),
                 StringComparer.Ordinal);
+
+    [Fact]
+    public async Task Checked_in_document_matches_live_document()
+    {
+        using var client = factory.CreateClient();
+        var live = JsonNode.Parse(await client.GetStringAsync("/openapi/v1.json"));
+        var snapshotPath = Path.Combine(FindRepositoryRoot(), "web", "shared", "openapi", "v1.json");
+        var snapshot = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath));
+
+        JsonNode.DeepEquals(Normalize(live), Normalize(snapshot)).Should().BeTrue("the checked-in OpenAPI snapshot must match the live document");
+    }
+
+    private static JsonNode? Normalize(JsonNode? document)
+    {
+        if (document is JsonObject root && root["servers"] is JsonArray servers)
+        {
+            foreach (var server in servers.OfType<JsonObject>()) server["url"] = "<server>";
+        }
+
+        return document;
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "PresenterAi.slnx"))) return directory.FullName;
+        }
+
+        throw new DirectoryNotFoundException("PresenterAi.slnx was not found above the test assembly.");
+    }
 
     private static async Task<JsonDocument> GetDocumentAsync(HttpClient client)
     {

@@ -143,3 +143,7 @@ Things learned from the live service that the code relies on:
 | Deck not driven (`deck adapter: none matched`) | Deck is not same-origin or has no `show()`/`Reveal`/`section.slide`; set `driver:` explicitly or adapt the deck. |
 | Echo / the model answers itself | Use headphones or press M while it speaks. |
 | Rate limit on Azure (10 RPM) | Set `FALLBACK_OPENAI_KEY`; the app fails over automatically at session start. |
+
+## Web (React)
+
+The React workspaces run through Bun: `cd web && bun run dev` starts the app on port 47914 and admin on 47915. The app proxies `/api`, `/ws`, `/decks`, and `/health` to the API on port 47913. Refresh the checked-in OpenAPI client with `cd web && bun run generate:api` (or pass `-- --url http://localhost:47913/openapi/v1.json` while the API is running).

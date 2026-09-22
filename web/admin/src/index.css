@@ -1,0 +1,4 @@
+/* Copied from InkSpoke web/admin/src/index.css @ b83e691f */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
