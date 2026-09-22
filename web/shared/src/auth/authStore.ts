@@ -1,5 +1,6 @@
-import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import { signInDev as createDevUser } from "./devSignIn";
 
 export interface AuthUser {
   id: string;
@@ -17,11 +18,9 @@ export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
       user: null,
-      signInDev: () => set({
-        user: { id: 'dev-user', email: 'dev@presenter-ai.local', displayName: 'Dev user' },
-      }),
+      signInDev: () => set({ user: createDevUser() }),
       signOut: () => set({ user: null }),
     }),
-    { name: 'presenter-auth' },
+    { name: "presenter-auth" },
   ),
 );
