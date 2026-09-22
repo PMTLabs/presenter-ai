@@ -204,12 +204,12 @@ export function Present() {
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-2">
-        <span className="rounded-full bg-blue-100 px-3 py-1 text-xs">
+        <span className="rounded-full bg-blue-100 px-3 py-1 text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
           {snapshot.state}
         </span>
         <SlidePill />
         <UsagePill />
-        <span className="rounded-full bg-gray-200 px-3 py-1 text-xs dark:bg-gray-800">
+        <span className="rounded-full bg-gray-200 px-3 py-1 text-xs text-gray-900 dark:bg-gray-800 dark:text-gray-100">
           buf {bufferedMs} ms
         </span>
       </div>

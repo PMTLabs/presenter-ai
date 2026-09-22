@@ -13,7 +13,7 @@ export function AdminLayout() {
   const signOut = useAuthStore((state) => state.signOut);
 
   return (
-    <div className="flex h-screen bg-gray-50 dark:bg-gray-950">
+    <div className="flex h-screen bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       {sidebarOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setSidebarOpen(false)} />}
       <aside className={cn(
         'fixed inset-y-0 left-0 z-40 flex flex-col bg-gray-900 text-gray-300 transition-all lg:static lg:translate-x-0',
