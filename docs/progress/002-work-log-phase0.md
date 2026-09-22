@@ -592,3 +592,19 @@ and Cli pass with no container. `secrets-guard: clean`.
     asserts `idle` after one `Flush()`.
   - The harness's "two barriers and a yield" (`Presenter.WaitUntilIdleAsync`) can run before the close hop.
   - It failed 3/15 runs on this branch and 1/15 on `origin/develop`, checked in a throwaway worktree.
+  - **User decision (2026-09-22):** fix it in its own small PR into `develop` after PR #3 merges, not inside PR #3.
+
+### PR #3 external implementation review, round 1 (`docs/review/006`)
+
+- **Reviewers:** two read-only `pi` agents running gpt-5.6-sol medium, one for identity and one for persistence.
+- **Findings:** 20 in total (A 3 · B 6 · C 2 · D 9).
+- **Triage** (every claimed blocker re-traced in the code):
+  - 9 blockers are confirmed;
+  - P-02 is lowered to an improvement (**D9**);
+  - P-03 is disputed as design (**D8**, best-effort recording);
+  - I-10 (trusted forwarded headers) is deferred to the deployment plan.
+  The user confirmed D8, D9 and the I-10 deferral.
+- **Fixes:** dispatched to two `pi` implementers (gpt-5.6-terra high) in parallel worktrees, both under
+  `.claude/worktrees/`:
+  - `fix-identity`: I-01–I-04, I-07–I-09 and P-05;
+  - `fix-persist`: P-01, I-05, I-06, P-02–P-04 and P-06–P-10.
