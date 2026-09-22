@@ -8,12 +8,12 @@
 
 | Finding | Class | Fix applied |
 |---|---|---|
-| F1 sessions never disposed | D | _pending — see work log_ |
-| F2 unobserved shutdown tasks | D | _pending_ |
-| F3 guard misses `\u`-escaped JSON names | D | _pending_ |
-| F4 `stop-after-slide` oracle accepts slide N+1 | B | _pending_ |
-| F5 backpressure test drives the seam | B | _pending_ |
-
+| F1 sessions never disposed | D | Class: `ILiveSession : IAsyncDisposable`; `Presenter` disposes every rejected fallback candidate (guarded, never masks the connect error), the closed session from its own loop (never inside the `Closed` callback, which runs on the session's receive loop) and an open session on `DisposeAsync`. Four `PresenterTests` oracles; mutations (drop the catch disposal → `Expected: 1 Actual: 0` at `PresenterTests.cs:309`; drop the post-close disposal → `:327`). `795132f`. Note: the reviewer's "socket leak" overstated — `Finish()` already aborts the socket; what was undisposed were the `ClientWebSocket`/CTS/pump handles and loop tasks. |
+| F2 unobserved shutdown tasks | D | Class (every `_ =`/`Task.Run` in `src/**` enumerated): `Presenter.ObserveBackground` logs faults of the producer-queue and wrap-up `EndAsync` tasks; a throwing `CloseAsync` logs, transitions `OnClosed("connection_lost")` → `Idle`, disposes, then faults the command deterministically; `RunCommand` retains the end task and folds its fault into `Run failed: …`/exit 1. Mutation (bare rethrow) → `Expected: "idle" Actual: "ending"` at `PresenterTests.cs:353`. `795132f`. |
+| F3 guard misses `\u`-escaped JSON names | D (minor) | Boundary stated in the script header: escape sequences in names/values are outside the class (source spelling only — an escaped credential name is deliberate evasion, not the accidental commit the guard exists for). Self-test unchanged (12/12). `795132f`. |
+| F4 `stop-after-slide` oracle accepts slide N+1 | B | The behaviour is Node parity (`scripts/headless-run.mjs:77` fires the stop on the *next* slide event); the plan's "shows two slides" claim (§6 T12, runbook #10) corrected in place, semantics commented in `RunCommand`. The test keeps its mandated name and asserts the stop line right after `SLIDE 3` and no `SLIDE 4`. `2490669` |
+| F5 backpressure test drives the seam | B | Outbound capacity and a pre-send gate are internal, test-only settings; `Client_that_cannot_drain_fills_outbound_queue_and_is_closed_1011` fills the real bounded channel (capacity 2, writer gated, 50 audio deltas from the fake) → real `TryWrite` failure → 1011. Old seam test removed. Mutation (swallow `TryWrite == false`) → `TimeoutException` at `BridgeTests.cs:140`. `795132f`. |
+| (found while running T11 in Chrome, not by the review) | D | `/decks/{**path}` 404 endpoint was selected by the implicit `UseRouting` before `StaticFileMiddleware`, which then skipped every deck file ("Deck not found: /ricoh/index.html"); `UseRouting()` now follows the static middleware; `Deck_file_is_served_from_the_content_root` dies on the old order. `795132f`. |
 ---
 
 ## Summary
