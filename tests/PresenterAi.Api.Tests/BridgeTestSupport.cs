@@ -11,8 +11,9 @@ namespace PresenterAi.Api.Tests;
 
 internal static class BridgeTestSupport
 {
-    public static ApiFactory Factory(FakeLiveServer fake, string model = "gpt-live-1") => new()
+    public static ApiFactory Factory(FakeLiveServer fake, string model = "gpt-live-1", bool queuedPresenter = false) => new()
     {
+        UseQueuedPresenter = queuedPresenter,
         Overrides = new Dictionary<string, string?>
         {
             ["Upstream:Endpoint"] = fake.Url,
@@ -60,6 +61,16 @@ internal static class BridgeTestSupport
 
     public static async Task SendAsync(WebSocket socket, string text) =>
         await socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, CancellationToken.None);
+
+    public static async Task SendFragmentedAsync(WebSocket socket, string text, WebSocketMessageType messageType) =>
+        await SendFragmentedAsync(socket, Encoding.UTF8.GetBytes(text), messageType).ConfigureAwait(false);
+
+    public static async Task SendFragmentedAsync(WebSocket socket, byte[] bytes, WebSocketMessageType messageType)
+    {
+        var split = bytes.Length / 2;
+        await socket.SendAsync(bytes.AsMemory(0, split), messageType, false, CancellationToken.None).ConfigureAwait(false);
+        await socket.SendAsync(bytes.AsMemory(split), messageType, true, CancellationToken.None).ConfigureAwait(false);
+    }
 
     public static async Task<JsonObject> ReceiveUntilAsync(WebSocket socket, Func<JsonObject, bool> predicate)
     {

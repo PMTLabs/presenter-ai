@@ -116,6 +116,27 @@ public sealed class BridgeTests
     }
 
     [Fact]
+    public async Task Backpressure_against_a_silent_peer_releases_the_slot_after_the_bounded_close()
+    {
+        await using var fake = await FakeLiveServer.StartAsync(audioDeltasPerAppend: 50);
+        using var factory = BridgeTestSupport.Factory(fake);
+        var sendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sends = 0;
+        factory.Services.GetRequiredService<PresenterBridge>().ConfigureOutboundForTest(
+            2,
+            () => Interlocked.Increment(ref sends) == 1 ? Task.CompletedTask : sendGate.Task);
+        using var silent = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendAsync(silent, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await BridgeTestSupport.WaitForAsync(() => fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.instructions.append"));
+        sendGate.TrySetResult();
+
+        // Do not receive the 1011 frame or acknowledge it. Abort after one second must wake the receive owner.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
+        next.State.Should().Be(WebSocketState.Open);
+    }
+
+    [Fact]
     public async Task Client_that_cannot_drain_fills_outbound_queue_and_is_closed_1011()
     {
         await using var fake = await FakeLiveServer.StartAsync(audioDeltasPerAppend: 50);

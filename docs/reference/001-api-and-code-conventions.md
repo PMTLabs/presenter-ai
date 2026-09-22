@@ -163,7 +163,9 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   Node parity page never sends it; the React client sends it from day one with a dummy ticket); plan 003 makes
   it mandatory when real tickets exist.
 - Text frames are JSON `{type, …}` both ways; binary frames are PCM16 mono 24 kHz, 20 ms = 960 bytes.
-  The frozen command/message set is in plan 002 §4.3; new message types are added, never renamed.
+  Auth and text-command frames are limited to 4 KiB and binary audio frames to 4 KiB while fragments accumulate;
+  an authenticated oversized frame closes 1009 (Message Too Big). The frozen command/message set is in plan 002
+  §4.3; new message types are added, never renamed.
 - Error frames: `{"type":"error","code":"<catalogue code>","message":"…"}` — the same `code` values as HTTP.
   Close codes: `1000` normal, `1013` busy (second client), `1011` server cannot keep up, `4401` auth,
   `4409` `session.already_running`, `4429` `session.slots_busy`.

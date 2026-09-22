@@ -19,6 +19,16 @@ public sealed class PresenterBridge : IAsyncDisposable
     private const string BusyMessage = "Another presenter page is already connected. Close it first.";
     // LiveSession.CloseAsync is itself bounded, so only a wedged presenter loop reaches this.
     private static readonly TimeSpan EndToIdleBound = TimeSpan.FromSeconds(5);
+    // LiveSession spends up to two 10-second handshakes per attempt (connect and session-start), and Presenter
+    // tries at most four routes. Leave ten seconds for the repository load: 10 + (4 * 2 * 10) = 90 seconds.
+    // This observes the real queued start before cleanup without allowing a wedged load to retain the slot forever.
+    private static readonly TimeSpan StartObservationBound = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan ServerCloseBound = TimeSpan.FromSeconds(1);
+    private const int MaxAuthenticationFrameBytes = 4 * 1024;
+    // Browser commands contain only a type, opaque presentation id and small numeric fields; 4 KiB is generous.
+    private const int MaxTextCommandBytes = 4 * 1024;
+    // The capture worklet sends 480 PCM16 samples (960 bytes) every 20 ms; permit four frames for transport margin.
+    private const int MaxAudioFrameBytes = 4 * 1024;
     private readonly IPresenter _presenter;
     private readonly ILogger<PresenterBridge> _logger;
     private readonly ITicketStore _ticketStore;
@@ -92,10 +102,13 @@ public sealed class PresenterBridge : IAsyncDisposable
         finally
         {
             // A writer fault must not relinquish ownership. Only the receive owner can perform cleanup, and the
-            // slot stays held until presenter shutdown and the recorder barrier have both completed.
+            // slot stays held until presenter shutdown and the recorder attempt barrier have both completed.
             var owned = ReferenceEquals(Volatile.Read(ref _client), connection);
             if (owned)
             {
+                // StartAsync only means the command was queued until its task completes. In particular, do not
+                // inspect idle or retire the recorder until ObserveStartAsync has also attempted BeginAsync.
+                await connection.WaitForStartObservationAsync(_logger, StartObservationBound).ConfigureAwait(false);
                 if (_presenter.Snapshot().State != "idle")
                 {
                     await ObserveEndAsync().ConfigureAwait(false);
@@ -121,6 +134,18 @@ public sealed class PresenterBridge : IAsyncDisposable
             return null;
         }
 
+        var permitHeld = true;
+        async Task RejectAsync()
+        {
+            if (permitHeld)
+            {
+                _pendingAuth.Release();
+                permitHeld = false;
+            }
+
+            await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+        }
+
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(requestCancellation);
@@ -131,9 +156,9 @@ public sealed class PresenterBridge : IAsyncDisposable
             do
             {
                 result = await socket.ReceiveAsync(buffer, timeout.Token).ConfigureAwait(false);
-                if (result.MessageType != WebSocketMessageType.Text)
+                if (result.MessageType != WebSocketMessageType.Text || frame.Length + result.Count > MaxAuthenticationFrameBytes)
                 {
-                    await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                    await RejectAsync().ConfigureAwait(false);
                     return null;
                 }
 
@@ -151,14 +176,14 @@ public sealed class PresenterBridge : IAsyncDisposable
                 || ticket.ValueKind != JsonValueKind.String
                 || string.IsNullOrWhiteSpace(ticket.GetString()))
             {
-                await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                await RejectAsync().ConfigureAwait(false);
                 return null;
             }
 
             var userId = await _ticketStore.ClaimAsync(ticket.GetString()!, timeout.Token).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(userId))
             {
-                await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                await RejectAsync().ConfigureAwait(false);
                 return null;
             }
 
@@ -167,32 +192,46 @@ public sealed class PresenterBridge : IAsyncDisposable
         catch (OperationCanceledException)
         {
             if (!requestCancellation.IsCancellationRequested)
-                await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                await RejectAsync().ConfigureAwait(false);
             return null;
         }
         catch (Exception exception)
         {
             _logger.LogDebug(exception, "WebSocket ticket authentication failed");
-            await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+            await RejectAsync().ConfigureAwait(false);
             return null;
         }
         finally
         {
-            _pendingAuth.Release();
+            if (permitHeld)
+            {
+                _pendingAuth.Release();
+            }
         }
     }
 
-    private static async Task CloseInvalidTicketAsync(WebSocket socket)
+    private static Task CloseInvalidTicketAsync(WebSocket socket) =>
+        CloseServerInitiatedAsync(socket, (WebSocketCloseStatus)4401, "session.ticket_invalid");
+
+    private static async Task CloseServerInitiatedAsync(WebSocket socket, WebSocketCloseStatus status, string reason)
     {
         if (socket.State is not (WebSocketState.Open or WebSocketState.CloseReceived))
+        {
             return;
+        }
 
+        using var timeout = new CancellationTokenSource(ServerCloseBound);
         try
         {
-            await socket.CloseAsync((WebSocketCloseStatus)4401, "session.ticket_invalid", CancellationToken.None).ConfigureAwait(false);
+            await socket.CloseAsync(status, reason, timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            socket.Abort();
         }
         catch (WebSocketException)
         {
+            socket.Abort();
         }
     }
 
@@ -208,6 +247,13 @@ public sealed class PresenterBridge : IAsyncDisposable
                 result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    return;
+                }
+
+                var maximum = result.MessageType == WebSocketMessageType.Binary ? MaxAudioFrameBytes : MaxTextCommandBytes;
+                if (frame.Length + result.Count > maximum)
+                {
+                    await CloseServerInitiatedAsync(socket, WebSocketCloseStatus.MessageTooBig, "message too big").ConfigureAwait(false);
                     return;
                 }
 
@@ -264,10 +310,12 @@ public sealed class PresenterBridge : IAsyncDisposable
                     int? fromIndex = document.RootElement.TryGetProperty("fromIndex", out var from) && from.TryGetInt32(out var value) ? value : null;
                     _logger.LogDebug("Starting presentation {PresentationId} for user {UserId}", presentation.GetString(), connection.UserId);
                     var recorder = connection.PrepareRecorder(_recorderFactory, _presenter);
-                    ObserveStart(
-                        _presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, cancellationToken),
+                    // Once queued, a presenter command cannot be withdrawn. Its observer must outlive this
+                    // request so disconnect cleanup sees the actual start and its recorder BeginAsync attempt.
+                    connection.ObserveStart(ObserveStartAsync(
+                        _presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, CancellationToken.None),
                         connection,
-                        recorder);
+                        recorder));
                     return;
                 case "next": ObserveCommand(_presenter.NextAsync(cancellationToken), connection, type, false); return;
                 case "prev": ObserveCommand(_presenter.PrevAsync(cancellationToken), connection, type, false); return;
@@ -337,15 +385,12 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
     }
 
-    private void ObserveStart(Task<PresenterStartResult> task, ClientConnection connection, ISessionRecorder? recorder) =>
-        _ = ObserveStartAsync(task, connection, recorder);
-
     private async Task ObserveEndAsync()
     {
         // EndAsync returns once the close is requested, with the presenter still "ending"; it turns idle only when
         // the loop handles the upstream close queued behind that command. Releasing the slot before then lets the
-        // next browser's start slip past PrepareRecorder and run unrecorded, and lets the recorder barrier finish
-        // before the upstream's Closed (billed seconds, close reason) has reached it.
+        // next browser's start slip past PrepareRecorder and run unrecorded, and lets the recorder finalisation
+        // attempt finish before the upstream's Closed (billed seconds, close reason) has reached it.
         var idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnState(PresenterSnapshot snapshot)
         {
@@ -393,7 +438,7 @@ public sealed class PresenterBridge : IAsyncDisposable
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "error", message = BusyMessage, code = "busy" }, JsonOptions);
         await socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
-        await socket.CloseAsync((WebSocketCloseStatus)1013, "busy", cancellationToken).ConfigureAwait(false);
+        await CloseServerInitiatedAsync(socket, (WebSocketCloseStatus)1013, "busy").ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -421,6 +466,8 @@ public sealed class PresenterBridge : IAsyncDisposable
         private Action<PresenterClosed>? _runClosedHandler;
         private ISessionRecorder? _recorder;
         private bool _recorderActive;
+        private readonly object _startLock = new();
+        private Task? _startObservation;
 
         public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
         {
@@ -462,8 +509,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             {
                 if (Volatile.Read(ref _failed) != 0 && _socket.State == WebSocketState.Open)
                 {
-                    try { await _socket.CloseAsync((WebSocketCloseStatus)1011, "server cannot keep up", CancellationToken.None).ConfigureAwait(false); }
-                    catch (WebSocketException) { }
+                    await CloseServerInitiatedAsync(_socket, (WebSocketCloseStatus)1011, "server cannot keep up").ConfigureAwait(false);
                 }
             }
         }
@@ -486,6 +532,47 @@ public sealed class PresenterBridge : IAsyncDisposable
         {
             _outbound.Writer.TryComplete();
             return _writer;
+        }
+
+        internal void ObserveStart(Task observation)
+        {
+            lock (_startLock)
+            {
+                // A second start can finish Started=false while the first is still loading. Retaining only the
+                // latest task would let disconnect cleanup overtake the first recorder BeginAsync attempt.
+                _startObservation = _startObservation is { IsCompleted: false } prior
+                    ? Task.WhenAll(prior, observation)
+                    : observation;
+            }
+        }
+
+        internal async Task WaitForStartObservationAsync(ILogger logger, TimeSpan bound)
+        {
+            Task? observation;
+            lock (_startLock)
+            {
+                observation = _startObservation;
+            }
+
+            if (observation is null)
+            {
+                return;
+            }
+
+            try
+            {
+                await observation.WaitAsync(bound).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                logger.LogWarning("Presenter start observation exceeded {Bound}; releasing the browser slot", bound);
+            }
+            catch (Exception exception)
+            {
+                // ObserveStartAsync normally handles and reports its own failure. Keep cleanup safe if an
+                // unexpected observer failure escaped before it could do so.
+                logger.LogError(exception, "Presenter start observation failed during browser disconnect cleanup");
+            }
         }
 
         internal ISessionRecorder? PrepareRecorder(ISessionRecorderFactory factory, IPresenter presenter)

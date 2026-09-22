@@ -20,6 +20,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 {
     public IReadOnlyDictionary<string, string?>? Overrides { get; set; }
     public string EnvironmentName { get; set; } = "Testing";
+    public bool UseQueuedPresenter { get; set; }
 
     public HttpClient CreateAuthenticatedClient(string? userId = null, string? email = null, string role = "user")
     {
@@ -84,6 +85,13 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
+            if (UseQueuedPresenter)
+            {
+                services.RemoveAll<IPresenter>();
+                services.AddSingleton<TestQueuedPresenter>();
+                services.AddSingleton<IPresenter>(serviceProvider => serviceProvider.GetRequiredService<TestQueuedPresenter>());
+            }
+
             services.RemoveAll<ITicketStore>();
             services.RemoveAll<IPresentationRepository>();
             services.AddScoped<IPresentationRepository, TestPresentationRepository>();
@@ -111,6 +119,59 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
         throw new DirectoryNotFoundException("PresenterAi.slnx was not found above the test assembly.");
     }
+}
+
+internal sealed class TestQueuedPresenter : IPresenter
+{
+    private PresenterSnapshot _snapshot = new("idle", null, null, 0, 0, false, false, null, null, 0, 200);
+    private int _starts;
+    public TaskCompletionSource StartEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource StartGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public CancellationToken StartCancellationToken { get; private set; }
+
+    public event Action<PresenterSnapshot>? State;
+    public event Action<int>? Slide { add { } remove { } }
+    public event Action<PresenterAudio>? Audio { add { } remove { } }
+    public event Action<PresenterTranscript>? Transcript { add { } remove { } }
+    public event Action<PresenterUsage>? Usage { add { } remove { } }
+    public event Action<PresenterClosed>? Closed;
+    public event Action<PresenterLog>? Log { add { } remove { } }
+    public event Action<PresenterUpstreamError>? UpstreamError { add { } remove { } }
+
+    public PresenterSnapshot Snapshot() => _snapshot;
+
+    public async Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default)
+    {
+        StartCancellationToken = cancellationToken;
+        if (Interlocked.Increment(ref _starts) != 1)
+        {
+            return new PresenterStartResult(false, id, null, null, null);
+        }
+
+        StartEntered.TrySetResult();
+        await StartGate.Task.ConfigureAwait(false);
+        _snapshot = new("presenting", id, id, 0, 1, false, false, "queued", null, 0, 200);
+        State?.Invoke(_snapshot);
+        return new PresenterStartResult(true, id, "test", "queued", "test-model");
+    }
+
+    public Task<bool> EndAsync(CancellationToken cancellationToken = default)
+    {
+        _snapshot = new("idle", null, null, 0, 0, false, false, null, null, 0, 200);
+        Closed?.Invoke(new PresenterClosed("disconnect", 0));
+        State?.Invoke(_snapshot);
+        return Task.FromResult(true);
+    }
+
+    public Task<bool> NextAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> PrevAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> GotoAsync(int index, CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> PauseAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> ResumeAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> MuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> UnmuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) => Task.FromResult(false);
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
 internal sealed class TestPresentationRepository : IPresentationRepository
@@ -184,6 +245,7 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
     public int DetachCount { get; private set; }
     public int BeginCount { get; private set; }
     public int EndCount { get; private set; }
+    public bool BeginBeforeEnd { get; private set; }
     public bool ClosedBeforeEnd { get; private set; }
 
     public void Attach(IPresenter presenter)
@@ -217,6 +279,7 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
     public Task BeginAsync(string userId, PresenterStartResult result, CancellationToken cancellationToken = default)
     {
         BeginCount++;
+        BeginBeforeEnd = EndCount == 0;
         return Task.CompletedTask;
     }
 

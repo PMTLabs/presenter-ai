@@ -45,7 +45,7 @@ public sealed class SessionRecorder : ISessionRecorder
     private int _disposed;
     private bool _aborted;
     // Only the single worker reads this flag. The first end/closed work item wins, so no later event can
-    // overwrite the row after the barrier has completed.
+    // overwrite the row after the finalisation attempt has completed.
     private bool _finalized;
     private string? _sessionId;
     private int _ordinal;
@@ -229,7 +229,7 @@ public sealed class SessionRecorder : ISessionRecorder
                 }
                 catch (Exception exception)
                 {
-                    // A bad database operation must not kill the barrier worker or presenter.
+                    // A bad database operation must not kill the attempt worker or presenter.
                     _logger.LogError(exception, "Session recording operation failed");
                 }
             }
@@ -333,7 +333,7 @@ public sealed class SessionRecorder : ISessionRecorder
     private async Task ProcessEndAsync(EndWork end)
     {
         // This is deliberately worker-local: ClosedWork and the bridge EndWork can both be queued for one run,
-        // but only the first item may write final metadata or complete the barrier.
+        // but only the first item may write final metadata or complete the finalisation attempt.
         if (_finalized)
         {
             return;
@@ -433,7 +433,7 @@ public sealed class SessionRecorder : ISessionRecorder
             await Task.Delay(FinalFlushBound).ConfigureAwait(false);
             if (!_endCompletion.Task.IsCompleted)
             {
-                _logger.LogError("Session recorder final flush exceeded {BoundSeconds} seconds", FinalFlushBound.TotalSeconds);
+                _logger.LogError("Session recorder finalisation attempt exceeded {BoundSeconds} seconds", FinalFlushBound.TotalSeconds);
                 _lifetime.Cancel();
                 _endCompletion.TrySetResult();
             }

@@ -77,6 +77,61 @@ public sealed class BridgeContractTests
     }
 
     [Fact]
+    public async Task Silent_unauthenticated_peer_does_not_hold_the_pending_auth_permit()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        factory.Overrides = new Dictionary<string, string?>
+        {
+            ["Upstream:Endpoint"] = fake.Url,
+            ["Session:AuthFrameTimeoutSeconds"] = "1",
+            ["Session:MaxPendingAuthConnections"] = "1"
+        };
+        using var silent = await BridgeTestSupport.ConnectAnonymousAsync(factory);
+
+        // Do not call ReceiveAsync: ManagedWebSocket will not acknowledge the server's close frame.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        using var valid = await BridgeTestSupport.ConnectAsync(factory);
+        valid.State.Should().Be(WebSocketState.Open);
+    }
+
+    [Fact]
+    public async Task Oversized_fragmented_auth_frame_closes_4401()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        var ticket = Guid.NewGuid().ToString("N");
+        await factory.Services.GetRequiredService<PresenterAi.Application.Auth.ITicketStore>().IssueAsync(ticket, "test-user");
+        using var socket = await BridgeTestSupport.ConnectAnonymousAsync(factory);
+        var frame = $"{{\"type\":\"auth\",\"ticket\":\"{ticket}\",\"padding\":\"{new string('x', 4 * 1024)}\"}}";
+        await BridgeTestSupport.SendFragmentedAsync(socket, frame, WebSocketMessageType.Text);
+
+        (await BridgeTestSupport.ReceiveCloseAsync(socket)).CloseStatus.Should().Be((WebSocketCloseStatus)4401);
+    }
+
+    [Fact]
+    public async Task Oversized_fragmented_text_command_closes_1009()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendFragmentedAsync(socket, new string('x', 4 * 1024 + 1), WebSocketMessageType.Text);
+
+        (await BridgeTestSupport.ReceiveCloseAsync(socket)).CloseStatus.Should().Be(WebSocketCloseStatus.MessageTooBig);
+    }
+
+    [Fact]
+    public async Task Oversized_fragmented_audio_frame_closes_1009()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendFragmentedAsync(socket, new byte[4 * 1024 + 1], WebSocketMessageType.Binary);
+
+        (await BridgeTestSupport.ReceiveCloseAsync(socket)).CloseStatus.Should().Be(WebSocketCloseStatus.MessageTooBig);
+    }
+
+    [Fact]
     public async Task Stalled_unauthenticated_socket_does_not_occupy_the_slot()
     {
         await using var fake = await FakeLiveServer.StartAsync();

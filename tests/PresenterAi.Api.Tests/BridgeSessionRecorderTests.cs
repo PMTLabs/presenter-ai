@@ -10,6 +10,60 @@ namespace PresenterAi.Api.Tests;
 public sealed class BridgeSessionRecorderTests
 {
     [Fact]
+    public async Task Disconnect_during_a_queued_start_keeps_the_slot_until_the_recorder_attempt_is_finalised()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake, queuedPresenter: true);
+        var recorders = factory.Services.GetRequiredService<TestSessionRecorderFactory>();
+        var presenter = factory.Services.GetRequiredService<TestQueuedPresenter>();
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await presenter.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        presenter.StartCancellationToken.CanBeCanceled.Should().BeFalse();
+
+        // CloseOutput sends the peer close but deliberately does not receive the server reply, exercising
+        // cleanup after a close frame without a completed browser close handshake.
+        await first.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "disconnect", CancellationToken.None);
+
+        using var blocked = await BridgeTestSupport.ConnectWithTicketAsync(factory);
+        (await BridgeTestSupport.ReceiveAsync(blocked)).Text.Should().Contain("\"code\":\"busy\"");
+
+        presenter.StartGate.TrySetResult();
+        await BridgeTestSupport.WaitForAsync(() => recorders.Recorders.Count == 1
+            && recorders.Recorders[0].BeginCount == 1
+            && recorders.Recorders[0].EndCount == 1
+            && recorders.Recorders[0].DetachCount == 1);
+        recorders.Recorders[0].BeginBeforeEnd.Should().BeTrue();
+
+        using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
+        next.State.Should().Be(WebSocketState.Open);
+    }
+
+    [Fact]
+    public async Task Disconnect_during_overlapping_starts_waits_for_the_first_start_observation()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake, queuedPresenter: true);
+        var recorders = factory.Services.GetRequiredService<TestSessionRecorderFactory>();
+        var presenter = factory.Services.GetRequiredService<TestQueuedPresenter>();
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await presenter.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await first.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "disconnect", CancellationToken.None);
+
+        using var blocked = await BridgeTestSupport.ConnectWithTicketAsync(factory);
+        (await BridgeTestSupport.ReceiveAsync(blocked)).Text.Should().Contain("\"code\":\"busy\"");
+
+        presenter.StartGate.TrySetResult();
+        await BridgeTestSupport.WaitForAsync(() => recorders.Recorders.Count == 1
+            && recorders.Recorders[0].BeginCount == 1
+            && recorders.Recorders[0].EndCount == 1
+            && recorders.Recorders[0].DetachCount == 1);
+        recorders.Recorders[0].BeginBeforeEnd.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Disconnect_waits_for_the_recorder_barrier_before_releasing_the_slot()
     {
         await using var fake = await FakeLiveServer.StartAsync();
