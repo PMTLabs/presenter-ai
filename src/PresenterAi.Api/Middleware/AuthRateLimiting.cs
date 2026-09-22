@@ -20,6 +20,15 @@ public static class AuthRateLimiting
 
     public sealed class Options { public bool Enabled { get; set; } = true; }
 
+    private static readonly IReadOnlyDictionary<string, int> Limits =
+        new Dictionary<string, int>(StringComparer.Ordinal)
+    {
+        [Policies.Authorize] = 20,
+        [Policies.Callback] = 20,
+        [Policies.Token] = 30,
+        [Policies.Refresh] = 30
+    };
+
     public static IServiceCollection AddAuthRateLimiting(this IServiceCollection services, IConfiguration configuration)
     {
         services.Configure<Options>(configuration.GetSection("RateLimiting"));
@@ -28,23 +37,23 @@ public static class AuthRateLimiting
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
             options.OnRejected = async (context, _) =>
             {
-                var (_, limit) = PolicyFor(context.HttpContext.Request.Path);
-                var retryAfter = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan value)
-                    ? value
-                    : Window;
-                var reset = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
-                context.HttpContext.Response.Headers["RateLimit-Limit"] = limit.ToString();
-                context.HttpContext.Response.Headers["RateLimit-Remaining"] = "0";
-                context.HttpContext.Response.Headers["RateLimit-Reset"] = reset.ToString();
-                context.HttpContext.Response.Headers.RetryAfter = reset.ToString();
+                if (LimitFor(context.HttpContext) is { } limit)
+                {
+                    var retryAfter = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out TimeSpan value)
+                        ? value
+                        : Window;
+                    var reset = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+                    context.HttpContext.Response.Headers["RateLimit-Limit"] = limit.ToString();
+                    context.HttpContext.Response.Headers["RateLimit-Remaining"] = "0";
+                    context.HttpContext.Response.Headers["RateLimit-Reset"] = reset.ToString();
+                    context.HttpContext.Response.Headers.RetryAfter = reset.ToString();
+                }
                 await Problems.Create(context.HttpContext, ErrorCodes.RateLimitExceeded,
                     StatusCodes.Status429TooManyRequests, "Too many requests. Please try again later.")
                     .ExecuteAsync(context.HttpContext).ConfigureAwait(false);
             };
-            AddPolicy(options, Policies.Authorize, 20);
-            AddPolicy(options, Policies.Callback, 20);
-            AddPolicy(options, Policies.Token, 30);
-            AddPolicy(options, Policies.Refresh, 30);
+            foreach (var (name, limit) in Limits)
+                AddPolicy(options, name, limit);
         });
         return services;
     }
@@ -53,7 +62,7 @@ public static class AuthRateLimiting
         app.Use(async (context, next) =>
         {
             if (context.RequestServices.GetRequiredService<IOptions<Options>>().Value.Enabled
-                && PolicyFor(context.Request.Path) is (_, var limit) && limit > 0)
+                && LimitFor(context) is { } limit)
             {
                 context.Response.Headers["RateLimit-Limit"] = limit.ToString();
             }
@@ -79,13 +88,9 @@ public static class AuthRateLimiting
         });
     }
 
-    private static (string? Policy, int Limit) PolicyFor(PathString path)
+    private static int? LimitFor(HttpContext context)
     {
-        var value = path.Value ?? string.Empty;
-        if (value.EndsWith("/authorize", StringComparison.Ordinal)) return (Policies.Authorize, 20);
-        if (value.EndsWith("/callback", StringComparison.Ordinal)) return (Policies.Callback, 20);
-        if (value.EndsWith("/sso/token", StringComparison.Ordinal)) return (Policies.Token, 30);
-        if (value.EndsWith("/refresh", StringComparison.Ordinal)) return (Policies.Refresh, 30);
-        return (null, 0);
+        var policy = context.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName;
+        return policy is not null && Limits.TryGetValue(policy, out var limit) ? limit : null;
     }
 }

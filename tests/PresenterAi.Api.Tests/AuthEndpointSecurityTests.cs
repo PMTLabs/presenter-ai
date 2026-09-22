@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using FluentAssertions;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -50,52 +51,63 @@ public sealed class AuthEndpointSecurityTests
         body.Should().NotContainKey("providers");
     }
 
-    [Fact]
-    public async Task Rate_limited_routes_emit_truthful_rate_limit_headers_and_retry_after()
+    [Theory]
+    [InlineData("/v1/auth/sso/google/authorize?redirect_uri=https%3A%2F%2Fapp.example.test&code_challenge=challenge&state=state", 20)]
+    [InlineData("/v1/auth/sso/google/callback?code=code&state=state", 20)]
+    [InlineData("/v1/auth/sso/token", 30)]
+    [InlineData("/v1/auth/refresh", 30)]
+    public async Task Rate_limited_routes_advertise_the_limit_at_which_the_next_request_is_rejected(string path, int limit)
     {
         using var factory = new ApiFactory
         {
-            Overrides = new Dictionary<string, string?>
-            {
-                ["RateLimiting:Enabled"] = "true",
-                ["OAuth:ApiBaseUrl"] = "https://api.example.test",
-                ["OAuth:StateEncryptionKey"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
-                ["OAuth:AllowedRedirectUris:0"] = "https://app.example.test",
-                ["OAuth:Google:Enabled"] = "true",
-                ["OAuth:Google:ClientId"] = "client",
-                ["OAuth:Google:ClientSecret"] = "test-only-secret",
-                ["OAuth:Google:AuthorizationEndpoint"] = "https://identity.example.test/authorize",
-                ["OAuth:Google:TokenEndpoint"] = "https://identity.example.test/token",
-                ["OAuth:Google:UserInfoEndpoint"] = "https://identity.example.test/userinfo"
-            }
+            Overrides = new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" }
         };
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
-        var url = "/v1/auth/sso/google/authorize?redirect_uri=https%3A%2F%2Fapp.example.test&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&state=state";
-        using var first = await client.GetAsync(url);
-        using var second = await client.GetAsync(url);
-        first.StatusCode.Should().Be(HttpStatusCode.Found);
-        second.StatusCode.Should().Be(HttpStatusCode.Found);
-        Header(first, "RateLimit-Limit").Should().Be("20");
-        first.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
-        first.Headers.Contains("RateLimit-Reset").Should().BeFalse();
-        Header(second, "RateLimit-Limit").Should().Be("20");
-        second.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
-        second.Headers.Contains("RateLimit-Reset").Should().BeFalse();
 
-        HttpResponseMessage? last = null;
-        for (var index = 0; index < 19; index++)
+        for (var request = 1; request <= limit; request++)
         {
-            last?.Dispose();
-            last = await client.GetAsync(url);
+            using var response = await client.SendAsync(RateLimitRequest(path));
+            response.StatusCode.Should().NotBe(HttpStatusCode.TooManyRequests);
         }
 
-        last!.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
-        Header(last, "RateLimit-Remaining").Should().Be("0");
-        var reset = Header(last, "RateLimit-Reset");
-        var retryAfter = last.Headers.RetryAfter!.Delta!.Value.TotalSeconds;
+        using var rejected = await client.SendAsync(RateLimitRequest(path));
+        rejected.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        Header(rejected, "RateLimit-Limit").Should().Be(limit.ToString());
+        Header(rejected, "RateLimit-Remaining").Should().Be("0");
+        var reset = Header(rejected, "RateLimit-Reset");
+        var retryAfter = rejected.Headers.RetryAfter!.Delta!.Value.TotalSeconds;
         retryAfter.Should().BeInRange(1, 60);
         retryAfter.ToString(System.Globalization.CultureInfo.InvariantCulture).Should().Be(reset);
-        last.Dispose();
+    }
+
+    [Fact]
+    public async Task Rate_limit_headers_follow_endpoint_metadata_for_case_insensitive_routes()
+    {
+        using var factory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" }
+        };
+        using var client = factory.CreateClient();
+        using var response = await client.GetAsync(
+            "/v1/auth/sso/google/AUTHORIZE?redirect_uri=https%3A%2F%2Fapp.example.test&code_challenge=challenge&state=state");
+
+        Header(response, "RateLimit-Limit").Should().Be("20");
+    }
+
+    [Fact]
+    public async Task Non_rate_limited_404_paths_do_not_get_rate_limit_headers()
+    {
+        using var factory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?> { ["RateLimiting:Enabled"] = "true" }
+        };
+        using var client = factory.CreateClient();
+        using var response = await client.GetAsync("/v1/not-a-route/refresh");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        response.Headers.Contains("RateLimit-Limit").Should().BeFalse();
+        response.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
+        response.Headers.Contains("RateLimit-Reset").Should().BeFalse();
     }
 
     [Fact]
@@ -114,6 +126,27 @@ public sealed class AuthEndpointSecurityTests
         response.Headers.Contains("RateLimit-Limit").Should().BeFalse();
         response.Headers.Contains("RateLimit-Remaining").Should().BeFalse();
         response.Headers.Contains("RateLimit-Reset").Should().BeFalse();
+    }
+
+    private static HttpRequestMessage RateLimitRequest(string path)
+    {
+        if (path.EndsWith("/token", StringComparison.Ordinal))
+        {
+            // Malformed on purpose: the limiter counts it, and binding rejects it before the unreachable code store.
+            return new HttpRequestMessage(HttpMethod.Post, path)
+            {
+                Content = new StringContent("{", Encoding.UTF8, "application/json")
+            };
+        }
+
+        if (path.EndsWith("/refresh", StringComparison.Ordinal))
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, path);
+            request.Headers.TryAddWithoutValidation("Origin", "http://localhost:47914").Should().BeTrue();
+            return request;
+        }
+
+        return new HttpRequestMessage(HttpMethod.Get, path);
     }
 
     private static string Header(HttpResponseMessage response, string name) => response.Headers.GetValues(name).Single();
