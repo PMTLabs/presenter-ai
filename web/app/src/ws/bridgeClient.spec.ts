@@ -42,7 +42,7 @@ describe("BridgeClient", () => {
   });
 
   it("start sends presentation id", () => {
-    const c = new BridgeClient("ws://test", FakeSocket as any);
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
     const ws = FakeSocket.instances.at(-1)!;
     ws.fire("open", {});
@@ -53,17 +53,17 @@ describe("BridgeClient", () => {
   });
 
   it("sends auth frame first", () => {
-    const c = new BridgeClient("ws://test", FakeSocket as any);
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
     const ws = FakeSocket.instances.at(-1)!;
     ws.fire("open", {});
-    expect(ws.sent[0]).toBe('{"type":"auth","ticket":"dev"}');
+    expect(ws.sent[0]).toBe('{"type":"auth","ticket":"test-ticket"}');
   });
 
   it("reconnects with the exponential schedule capped at ten seconds", () => {
     vi.useFakeTimers();
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
-    const c = new BridgeClient("ws://test", FakeSocket as any);
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     const delays = [500, 1000, 2000, 4000, 8000, 10000, 10000];
     c.connect();
 
@@ -80,7 +80,7 @@ describe("BridgeClient", () => {
   });
 
   it("snapshot → idle after reconnect", () => {
-    const c = new BridgeClient("ws://test", FakeSocket as any);
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
     const ws = FakeSocket.instances.at(-1)!;
     ws.fire("message", {
@@ -97,7 +97,7 @@ describe("BridgeClient", () => {
   });
 
   it("parses every text message and binary audio", () => {
-    const c = new BridgeClient("ws://test", FakeSocket as any);
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
     const ws = FakeSocket.instances.at(-1)!;
     const audio = new Uint8Array([1, 2]).buffer;
@@ -143,7 +143,7 @@ describe("BridgeClient", () => {
   });
 
   it("ignores events from a socket disconnected while connecting", () => {
-    const c = new BridgeClient("ws://test", FakeSocket as any);
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     const opens: number[] = [];
     const states: Snapshot[] = [];
     const logs: BridgeMessage[] = [];
@@ -170,6 +170,6 @@ describe("BridgeClient", () => {
     expect(c.snapshot.state).toBe("idle");
 
     second.fire("open", {});
-    expect(second.sent[0]).toBe('{"type":"auth","ticket":"dev"}');
+    expect(second.sent[0]).toBe('{"type":"auth","ticket":"test-ticket"}');
   });
 });

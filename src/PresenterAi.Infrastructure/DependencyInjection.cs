@@ -1,15 +1,54 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
+using Microsoft.EntityFrameworkCore;
+using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
+using PresenterAi.Infrastructure.Persistence;
+using PresenterAi.Infrastructure.Redis;
+using PresenterAi.Infrastructure.Sessions;
 
 namespace PresenterAi.Infrastructure;
 
 public static class DependencyInjection
 {
+    public static IServiceCollection AddPersistence(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var connectionString = configuration.GetConnectionString("Postgres");
+        services.AddDbContext<PresenterAiDbContext>(options =>
+            options.UseNpgsql(connectionString ?? string.Empty, npgsql => npgsql.EnableRetryOnFailure()));
+        services.AddScoped<IPresentationRepository, PostgresPresentationRepository>();
+        services.TryAddSingleton<ISessionRecorderFactory, SessionRecorderFactory>();
+        return services;
+    }
+
+    public static IServiceCollection AddRedis(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        var connectionString = configuration.GetConnectionString("Redis");
+        // Validate the setting at API startup, but defer the network connection until the first auth-state
+        // store is resolved. This keeps presentation-only test hosts bootable without Docker.
+        services.AddSingleton<IConnectionMultiplexer>(_ => RedisConnection.Connect(connectionString ?? string.Empty));
+        services.AddOptions<SessionRedisOptions>()
+            .Bind(configuration.GetSection("Session"));
+        services.AddSingleton<ITicketStore, TicketStore>();
+        services.AddSingleton<ISsoCodeStore, SsoCodeStore>();
+        services.AddSingleton<ISsoStateStore, SsoStateStore>();
+        services.AddSingleton(serviceProvider => new Lazy<ISsoCodeStore>(
+            () => serviceProvider.GetRequiredService<ISsoCodeStore>()));
+        services.AddSingleton(serviceProvider => new Lazy<ISsoStateStore>(
+            () => serviceProvider.GetRequiredService<ISsoStateStore>()));
+        return services;
+    }
+
     public static IServiceCollection AddUpstreamOptions(
         this IServiceCollection services,
         IConfiguration configuration)
@@ -46,10 +85,15 @@ public static class DependencyInjection
             var options = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ContentOptions>>().Value;
             return Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.RootDir, contentRootPath));
         });
-        services.AddSingleton<IPresentationRepository>(serviceProvider =>
-            new FilePresentationRepository(serviceProvider.GetRequiredService<string>()));
         services.AddSingleton<IDeckStore>(serviceProvider =>
             new FileDeckStore(serviceProvider.GetRequiredService<string>()));
+        return services;
+    }
+
+    public static IServiceCollection AddFileImportSource(this IServiceCollection services)
+    {
+        services.AddSingleton<IPresentationImportSource>(serviceProvider =>
+            new FilePresentationRepository(serviceProvider.GetRequiredService<string>()));
         return services;
     }
 
@@ -65,21 +109,39 @@ public static class DependencyInjection
         return services;
     }
 
-    public static IServiceCollection AddPresenter(this IServiceCollection services)
+    public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
-            var repository = serviceProvider.GetRequiredService<IPresentationRepository>();
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
             var routes = serviceProvider.GetRequiredService<UpstreamRoutes>();
             var settings = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PresenterOptions>>().Value;
             var timeProvider = serviceProvider.GetRequiredService<TimeProvider>();
 
+            Func<string, string, CancellationToken, Task<LoadedPresentation>> loader;
+            if (fileBacked)
+            {
+                var source = serviceProvider.GetRequiredService<IPresentationImportSource>();
+                loader = (_, id, cancellationToken) => source.ReadAsync(id, cancellationToken);
+            }
+            else
+            {
+                // The presenter is a singleton, so never capture the scoped DbContext or repository.
+                // A fresh scope gives each load its own unit of work and preserves host scope validation.
+                var scopeFactory = serviceProvider.GetRequiredService<IServiceScopeFactory>();
+                loader = async (ownerId, id, cancellationToken) =>
+                {
+                    await using var scope = scopeFactory.CreateAsyncScope();
+                    var repository = scope.ServiceProvider.GetRequiredService<IPresentationRepository>();
+                    return await repository.LoadAsync(ownerId, id, cancellationToken).ConfigureAwait(false);
+                };
+            }
+
             return new Presenter(
                 (request, attempt) => attempt < routes.Upstreams.Count
                     ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice))
                     : null,
-                repository.LoadAsync,
+                loader,
                 new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice),
                 timeProvider);
         });

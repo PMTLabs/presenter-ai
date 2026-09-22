@@ -18,7 +18,7 @@ public sealed class BridgeSlotTests
         // This test seam models a writer failure while the owner's receive loop remains alive. Before the CAS fix,
         // writer completion released the slot and a second socket would incorrectly receive state.
         await factory.Services.GetRequiredService<PresenterBridge>().StopCurrentWriterForTestAsync();
-        using var second = await factory.Server.CreateWebSocketClient().ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory);
         var busy = (await BridgeTestSupport.ReceiveAsync(second)).Text;
         busy.Should().NotBeNull();
         JsonNode.Parse(busy!)!["code"]!.GetValue<string>().Should().Be("busy");

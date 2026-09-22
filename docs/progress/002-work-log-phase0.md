@@ -384,3 +384,269 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   build exists; the test opts into `WebRootFixture`. Mutation: default client on `/` fails with 404 locally as in CI.
 - PR https://github.com/PMTLabs/presenter-ai/pull/2 → `develop`: CI green at `524c6cc` (`dotnet` and `web` on both
   workflow runs). Merge awaits the user.
+
+## 2026-09-22 — plan 004 (identity, persistence, auth-state Redis)
+
+- Discovery: two scout agents (inkspoke auth/identity/Redis inventory at commit `b83e691f`; presenter-ai as-built
+  auth/content/sessions sweep). Reports kept in the session scratchpad, not the repo — they are inventories of an
+  external codebase.
+- G1 2026-09-22 after 2 interview rounds (8 questions): scope is research step 0.5 + the auth slice of 0.6;
+  presentations + sessions to Postgres with decks left on disk; Dev sign-in becomes a Development-only token
+  endpoint and `DevAuthHandler` dies; config allowlist + `Admin:BootstrapEmails`; mandatory `/ws` ticket frame with
+  an anonymous upgrade; API keys deferred (the CLI stays in-process); singleton presenter kept; Testcontainers in CI.
+- External plan review `pr004-rev-1` (codex, gpt-5.6-sol medium): NO — 9 blockers + 2 improvements, all folded into
+  revision 2. Three were factual errors in the draft, each re-verified against the code before fold-in:
+  `StartAsync`/`LoadAsync` touch nine test files (not the two production sites cited) and `FilePresentationRepository`
+  implements the interface T8 changes; `LoadedPresentation` carries the *content* of the context file
+  (`FilePresentationRepository.cs:44-58`) which the schema had no column for; nothing exposes the chosen upstream, so
+  `sessions.upstream` was unfillable. See `docs/review/005-plan-004-external-review.md` and the plan's §10 table.
+- Design consequences worth remembering: the `/ws` ticket is claimed **before** the single-client CAS slot (an
+  unauthenticated socket could otherwise park on the only slot and hand real users `busy`); refresh rotation is a
+  conditional revoke with an affected-row check, not just a transaction; `IPresentationRepository` splits into an
+  owner-scoped contract plus an ownerless `IPresentationImportSource` for the importer.
+- G2 2026-09-22: plan approved at `docs/plan/004-identity-persistence-auth-state.md`, 14 tasks in three PRs.
+  Implementation not started — it awaits an explicit instruction.
+
+### PR-A (T1, T2, T3, T12-config) — `7be5bd4`, `1164c7d`, `b9cd186`
+
+- Implemented by an external `pi` agent (`openai-codex/gpt-5.6-luna:high`); orchestrator reviewed the diff and
+  verified every claim rather than accepting the report.
+- Green at `b9cd186`: `dotnet build -warnaserror` 0/0; `dotnet test` 140 passed across five projects
+  (Application 52, Api 48, Infrastructure 30, Integration 5, Cli 5); `secrets-guard: clean`.
+- **Testcontainers needs `DOCKER_HOST=tcp://localhost:2375` on this Windows host** even though the `docker` CLI
+  works unaided — the daemon is in WSL and Testcontainers does not discover it. With it unset all 5 integration
+  tests fail, so the documented `dotnet test PresenterAi.slnx` breaks on a clean Windows checkout without it.
+  `AGENTS.md` and the fixture failure message now name that exact value; the agent's original `npipe:` suggestion
+  does not work here.
+- Orchestrator fixes on top of the agent's work: the agent had silenced the whole transitive NuGet audit
+  (`NuGetAuditMode=direct`) to get EF design-time tooling to restore. The real finding is
+  `System.Security.Cryptography.Xml` — every stable version carries eight advisories and only 11.0.0 previews
+  exist. Replaced with eight `NuGetAuditSuppress` entries by advisory id, so any *other* transitive advisory
+  (including a runtime one from Npgsql or StackExchange.Redis) still fails the build; mutation-tested by removing
+  one suppression and confirming the restore breaks. Also deduplicated the Docker help message into
+  `Support/DockerHelp.cs` and added the admin origin (47915) to the CORS example.
+- Verified rather than assumed: the Testcontainers fixtures are load-bearing (a dead `DOCKER_HOST` fails them with
+  the intended guidance), the Redis claims are genuinely atomic (`StringGetDeleteAsync` = `GETDEL`,
+  `When.NotExists` = `SET NX`), every column of plan §4.3 is mapped including `presentations.context` and
+  `external_logins.provider_email_verified`, and ids are `prefix_` + 16 hex chars per conventions §3.
+- Known forward risk handed to PR-B: `AddPersistence`/`AddRedis` connect and throw at *registration* time, so
+  calling them from `Program.cs` would make all 48 `Api.Tests` need live Postgres and Redis. PR-B's brief
+  therefore specifies eager config validation with a lazy connection, plus reachability on `/health`.
+
+### PR-B (T4, T5, T6, T7, T11a) — `9d84159`, `a9eaaf7`, `e81b667`, `4159e7e`
+
+- Implemented by external `pi` agents in two packages (auth stack, then tickets + frontend auth).
+- Caught during review: the first auth package tried to add a `TestingDevCompatibility` middleware that
+  authenticated every request under `ASPNETCORE_ENVIRONMENT=Testing`, which is a worse `DevAuthHandler`. It was
+  stopped mid-flight; `ApiFactory` now mints real signed JWTs instead. The same package shipped **zero** tests for
+  T4–T6 until sent back. Writing them exposed a real defect: dev sign-in let `AuthFailureException` escape as 500.
+- Mutation-verified guards: the conditional refresh-token revoke, the unverified-email collision refusal, the
+  refresh/logout `Origin` check, and ticket-before-CAS ordering on `/ws`.
+- **Orchestrator error, fixed in `4159e7e`:** `e81b667` was committed with a required `ApiFactory` registration
+  left unstaged, so HEAD was red (`BridgeContractTests.Expired_ticket_closes_4401`: "No service for type
+  TestTicketStore") while the reported "176 green" had been observed on the working tree. Found on resume by
+  stashing the stray change and re-running at HEAD. The true baseline was 177. Lesson: after committing, confirm
+  `git status` is clean before quoting the working tree's test result as the commit's.
+
+### PR-C part 1 (T8, T11b) — `0717d29`
+
+- Two seams the plan left open were settled in the brief before dispatch. (1) `IPresenter` is a singleton and the
+  DbContext is scoped under `ValidateOnBuild`/`ValidateScopes`, so the loader opens a scope per call. (2)
+  `CliTests` runs the real `run` command off disk with no Testcontainers, so `presenter-cli run` stays
+  file-backed.
+- Round 1 reproduced (180 passing) but was not committable: four test-only ownerless shims in production types, no
+  paging, the API container could still resolve the ownerless reader, and five oracle gaps. The decisive one was
+  shown by mutation: passing `"someone-else"` as the owner from the bridge left all 73 API tests green, because
+  the test double discarded the owner.
+- Round 2 fixed all eight items. The orchestrator re-ran seven mutations across both rounds (owner filter on
+  load/list, empty list, the bridge's owner in both directions, a fixed upstream label, `Skip(0)`, and the import
+  source registered in the API) and every one fails a test. It also removed two test-harness barriers the agent
+  added defensively: `PresenterTests` passed 8/8 runs without them, so the harness now matches HEAD.
+- Green at `0717d29`: build 0/0; **183 passed** (Application 52, Infrastructure 30, Api 75, Integration 21, Cli 5);
+  Api and Cli pass with no container; web lint/build/test (shared 5, app 22); OpenAPI drift green with no `/api`
+  paths left; `secrets-guard: clean`.
+
+### PR-C part 2 (T9, T10, T12-docs) — `e63a393`, `7332e81`, `4ac958d`
+
+- **User decision (D5):** `presenter-cli run --owner <email>` records exactly like `/ws`. Without `--owner`, `run`
+  stays file-backed and unrecorded. A local-file run has neither a user row nor a presentation row, and both are
+  required foreign keys on `sessions`. **D6:** a failed start writes no row, because `sessions.upstream` is NOT NULL.
+- Round 1 (fresh `pi` agent) reproduced 199 passing, but review found two recorder defects:
+  - the worker could finalise a row twice. When `Closed` and disconnect cleanup were both queued, the second write
+    replaced the upstream's close reason and billed seconds after the slot had been released;
+  - an end that arrived between a queued and a processed begin dropped the row of a run that had really started.
+
+  It also found four oracle gaps: waits that were satisfied at begin rather than at finalisation, the real
+  `Detach` untested, a fallback test that could not tell session ids apart, and a sleep before a negative
+  assertion. The first agent's context was 61% full, so round 2 went to a fresh agent together with `run --owner`.
+- Found by the orchestrator while doing T12-docs: both Vite dev proxies still forwarded `/api` rather than `/v1`,
+  so `bun run dev:app` could not reach sign-in or any `/v1` call. The gap dated from PR-B. Fixed in `7332e81`.
+- Mutations the orchestrator re-ran itself (each file backed up and restored byte for byte by md5); all five fail
+  a test:
+  - finalise-once removed;
+  - the bridge not awaiting the recorder barrier;
+  - `run --owner` not awaiting `EndAsync`;
+  - the importer never matching an existing row;
+  - a disabled owner accepted.
+
+  The agents reported a further nine (fallback label and session id, real and bridge detach, the begin/end race,
+  context path stored instead of text, and others).
+- Green at `4ac958d` (tree clean after commit): build 0/0; **206 passed** (Application 52, Infrastructure 31,
+  Api 78, Integration 36, Cli 9). Api and Cli pass with no container. Web lint/build/test (shared 5, app 22).
+  `secrets-guard: clean`.
+
+### T13 wiring audit (orchestrator, direct)
+
+Traced every plan-004 registration, config key and endpoint to a reader or caller, across the API graph
+(`src/PresenterAi.Api/Program.cs`) and the three CLI graphs (`src/PresenterAi.Cli/Program.cs`). All three CLI graphs
+build under `ValidateScopes` + `ValidateOnBuild`, except the file-backed `BuildServices`, which predates plan 004.
+
+**Registrations → resolvers**
+
+| Registration | Graphs | Resolved by |
+|---|---|---|
+| `PresenterAiDbContext` (`AddPersistence`) | API, run, import | `TokenService`, `SsoService`, `/health`, `SessionRecorder` (scope per write), `ImportCommand:30`, `RunCommand:37`, `OwnerResolver` |
+| `IPresentationRepository` → `PostgresPresentationRepository` | API, run, import | `PresentationEndpoints`, the presenter's scoped loader (`DependencyInjection.cs:135`), `RunCommand:45` (`FindIdBySlugAsync`) |
+| `ISessionRecorderFactory` (`TryAddSingleton`) | API, run, import (unused there) | `PresenterBridge` ctor → `PrepareRecorder` (`:264`), `RunCommand:60` |
+| `IConnectionMultiplexer` (lazy) | API | `TicketStore`, `SsoCodeStore`, `SsoStateStore`, `/health` |
+| `ITicketStore` | API | issued in `SessionEndpoints:31`, claimed in `PresenterBridge:156` |
+| `ISsoCodeStore`, `ISsoStateStore` (+ `Lazy<>`) | API | `SsoService` |
+| `SignInPolicy`, `TokenService`, `SsoService`, `HttpClient "sso"` | API | `AuthEndpoints`, `SessionEndpoints`; `SsoService:175` (policy), `:198` (client) |
+| `IPresentationImportSource` | CLI file-backed, import | file loader in `AddPresenter(fileBacked: true)`, `ImportCommand:27`; `AuthTests:32` asserts the API cannot resolve it |
+
+**`ISessionRecorder` in both `StartAsync` callers:** the bridge attaches in `PrepareRecorder` before
+`StartAsync` (`PresenterBridge.cs:264-266`), begins on success (`:318`), and awaits `EndRecorderAsync` in `finally`
+(`:102`). `RunCommand` attaches (`:188`), begins (`:196`), then `EndAsync` → `Detach` (`:244-248`). The no-owner `run`
+has no recorder (D5).
+
+**Config keys (§4.3) → readers:** `ConnectionStrings:{Postgres,Redis}` → `AddPersistence`/`AddRedis` and the
+fail-fast checks (API `Program.cs:209-212`, CLI `Build{Run,Import}Services`). `Jwt:*` → `JwtSettings`
+(`TokenService`, JwtBearer, `AuthEndpoints`). `OAuth:*` → `OAuthOptions` (`SsoService`), validated through
+`OAuthSettings`. `Auth:Dev:*` → `AuthEndpoints:187`, `TokenService.UpsertDevelopmentUserAsync`.
+`Auth:SignIn:*`, `Admin:BootstrapEmails` → `SignInPolicy` (and `TokenService` for the dev user).
+`Cors:AllowedOrigins` → the CORS policy and `OriginGuard`. `RateLimiting:Enabled` → `AuthRateLimiting:63`.
+`Session:*` → `SessionRedisOptions` (`TicketStore`, `SessionEndpoints`, `PresenterBridge:41-42`).
+
+**Endpoints → callers:** every `/v1` route has a caller in `web/` and/or a test. Sign-in, SSO, refresh and logout
+are called from `SignIn.tsx`, `AuthCallback.tsx` and `authStore.ts`. Presentations are called from `Library.tsx`
+and `Present.tsx`, and `/ws` from `bridgeClient.ts`. `/v1/config` is covered by tests only; the old
+`/api/config` had no web caller either (plan §4.4).
+
+**Flagged and fixed:**
+1. `GET /v1/auth/me` had no caller anywhere. The web client never needs it, because sign-in and refresh return the
+   user.
+2. `POST /v1/sessions/ticket` had a web caller but no test over HTTP. That left F8's ticket-issuance refusal of a
+   disabled account unguarded.
+   - One new integration test covers both routes:
+     `AuthEndpointIntegrationTests.Current_user_and_session_ticket_routes_serve_the_signed_in_user_and_refuse_disabled_accounts`.
+     It does a real dev sign-in, then checks `/me`, then issues a ticket and claims it through real Redis exactly
+     once, then disables the user and gets 403 `auth.account_disabled` from both routes. An anonymous ticket request
+     gets 401.
+   - Mutations: the ticket route skipping the user reload, a ticket issued for the wrong user, and `GetUserAsync`
+     not enforcing `is_disabled`. Each one fails the test, and both files were restored byte for byte (md5).
+3. `OAuth:Microsoft:TenantId` was bound by both OAuth classes but read by nothing. The tenant already lives in the
+   Microsoft endpoint URLs (`/common/`). The key is removed from both classes and `appsettings.Example.json`; this is
+   plan deviation **D7**.
+
+**Noted, not changed (no caller missing, low risk):**
+- `Admin:BootstrapEmails` is normalised in two places: `SignInPolicy` for SSO and `TokenService` for the dev user.
+- The dev sign-in reads `Jwt:RefreshTokenDays` raw (default 30), while the other routes use `IOptions<JwtSettings>`.
+- `OAuthSettings` (the validator) and `OAuthOptions` (the reader) bind the same section with identical shapes, so a
+  field added to only one of them would drift.
+- The import graph registers the unused `ISessionRecorderFactory` through `AddPersistence`.
+
+**Not run (needs a live upstream and a browser, so it is for the user):** plan T13's Serilog-at-debug cycle, sign-in
+→ import → present → close with one log line per entry point, together with runbook §7 steps 8–16.
+
+Green after T13: build 0/0; **207 passed** (Application 52, Infrastructure 31, Api 78, Integration 37, Cli 9). Api
+and Cli pass with no container. `secrets-guard: clean`.
+
+### PR #3 opened (user: "One PR into develop"); first CI run found a bridge race
+
+- `feature/004-identity-persistence` was pushed and https://github.com/PMTLabs/presenter-ai/pull/3 opened against
+  `develop`, as AGENTS.md says. Handoff 010 had said `master`, which was wrong.
+- **What CI showed:** `dotnet` was red on the `pull_request` run and green on the `push` run of the same commit.
+  `BridgeSessionRecorderTests.Two_sequential_runs_do_not_leak_handlers` timed out waiting for the second recorder.
+- **Root cause (a production defect, not only test timing):**
+  1. The bridge's `finally` awaited `IPresenter.EndAsync`, which returns while the presenter is still `ending`.
+  2. `idle` comes one loop hop later, when the upstream close queued behind the End command is handled.
+  3. The slot was released inside that hop. A browser reconnecting in that window found `PrepareRecorder` refusing
+     (the state was not idle), yet its `start` queued behind the close and presented anyway, **unrecorded**.
+  4. The recorder barrier could also finish before the upstream's `Closed` (billed seconds, close reason) reached
+     it.
+- **Fix:** `ObserveEndAsync` now waits (up to 5 s) for the presenter's `idle` state before the recorder barrier and
+  the slot release. That makes the F6 comment true.
+- **Regression test:** `Disconnect_holds_the_slot_until_the_presenter_is_idle_so_the_next_run_is_recorded`.
+  - It holds the real presenter between `ending` and `idle` through a `Closed` handler. The hold also lets go early
+    if the bridge reaches the recorder barrier first.
+  - It then asserts: a connect during the hold is told `busy`; the recorder saw `Closed` before its barrier; and the
+    next run gets its own recorder.
+  - Mutations, both failing it every time and restored by md5: dropping the idle wait (5/5 runs), and ending the
+    recorder before the idle wait (3/3).
+- **Same pattern fixed in two more tests:** reconnecting straight after a disconnect can legitimately be told
+  `busy`, because the slot is released after cleanup. The two recorder tests that reconnect now use
+  `BridgeTestSupport.ConnectWhenFreeAsync`; the integration tests already retried.
+- **Stability:** the Api suite passed 10/10 consecutive runs (79 tests); the session integration tests passed 3/3.
+- **Pre-existing flake, not fixed here (predates plan 004):**
+  - `PresenterTests.Last_slide_silence_sends_wrap_up_then_closes` (and once `Wrap_up_without_audio_ends_after_fallback`)
+    asserts `idle` after one `Flush()`.
+  - The harness's "two barriers and a yield" (`Presenter.WaitUntilIdleAsync`) can run before the close hop.
+  - It failed 3/15 runs on this branch and 1/15 on `origin/develop`, checked in a throwaway worktree.
+  - **User decision (2026-09-22):** fix it in its own small PR into `develop` after PR #3 merges, not inside PR #3.
+
+### PR #3 external implementation review, round 1 (`docs/review/006`)
+
+- **Reviewers:** two read-only `pi` agents running gpt-5.6-sol medium, one for identity and one for persistence.
+- **Findings:** 20 in total (A 3 · B 6 · C 2 · D 9).
+- **Triage** (every claimed blocker re-traced in the code):
+  - 9 blockers are confirmed;
+  - P-02 is lowered to an improvement (**D9**);
+  - P-03 is disputed as design (**D8**, best-effort recording);
+  - I-10 (trusted forwarded headers) is deferred to the deployment plan.
+  The user confirmed D8, D9 and the I-10 deferral.
+- **Fixes:** dispatched to two `pi` implementers (gpt-5.6-terra high) in parallel worktrees, both under
+  `.claude/worktrees/`:
+  - `fix-identity`: I-01–I-04, I-07–I-09 and P-05;
+  - `fix-persist`: P-01, I-05, I-06, P-02–P-04 and P-06–P-10.
+- **Fixes landed** (cherry-picked onto `feature/004-identity-persistence`): `8f1bb07` bridge, `e2049d6` CLI,
+  `9b656b3` schema, `a86d247` API contract, `48cca65` auth validation, `94400e8` web, `00e12eb` config.
+  - Each implementer needed a second pass after Claude's verification. The findings Claude sent back are listed
+    in `docs/review/006` under "Fixes".
+  - After integration, Claude added `ccd2a23`. The new `Jwt_rejects_a_token_not_yet_valid_beyond_the_clock_skew`
+    failed 3/30 full-suite runs: `nbf` is written in whole seconds, so `now + 31 s` could validate inside the 30 s
+    skew. The margin is now 45 s, and setting `ClockSkew` to the 5-minute default still fails the test.
+- **Verification on the integrated branch:**
+  - build 0/0;
+  - .NET: Application 52, Infrastructure 31 + 3 skipped, Api 119, Cli 11, Integration 39 + 1 skipped;
+  - web: lint passes; shared 10 and app 22 tests pass; both builds pass;
+  - compose config, the secrets guard and `git diff --check` pass;
+  - the Api suite passed 30/30 runs after `ccd2a23`.
+- **Observed, not yet explained:** `BridgeSessionRecorderTests.Disconnect_holds_the_slot_until_the_presenter_is_idle_so_the_next_run_is_recorded`
+  timed out once in about 21 runs on the *old* bridge code, in the `fix-identity` worktree. The timeout was in
+  `ConnectWhenFreeAsync`: the slot was still held more than 5 s after detach.
+  - On the integrated bridge it passed 60/60 runs.
+  - The bounded writer close in `8f1bb07` is a plausible cure, because `DisposeAsync` could wait on a peer that
+    never answers. This is not proven; watch CI.
+
+### PR #3 external implementation review, round 2 (`docs/review/007`)
+
+- **Reviewers:** two fresh read-only `pi` agents running gpt-5.6-sol medium, on the round-1 fix diff
+  `032f2eb..06537c3`.
+- **Findings:** 16 in total (A 1 · B 10 · C 0 · D 5). Each reviewer claimed 3 blockers; after re-tracing, none
+  blocks merging.
+  - Three real defects were lowered to improvements and fixed: a sign-out during an in-flight refresh did not
+    stick, the 401 interceptor would replay the one-time SSO code, and rate-limit headers were chosen by path
+    suffix.
+  - R2-P-02 (the 1009 close racing the writer) and R2-I-08 (exact skew pinning) are disputed; four test-hardening
+    items are deferred.
+- **Fixes landed:** `b7a0753` web, `f6886b2` rate-limit metadata, `1e2f537` tests, `b3f4811` CLI import and the
+  bridge comment, by one `pi` implementer (gpt-5.6-terra high) in the `fix-r2` worktree.
+  - Claude removed the implementer's production change for R2-I-06 (token-route body checks and a 30 MiB limit),
+    and tested the 413 and 415 mappings at `DomainExceptionHandler` instead.
+  - Claude found a routing gap: a non-JSON `POST /v1/auth/sso/token` returns 404, not 415, because the global
+    `MapFallback` wins when the content-type policy rejects the endpoint. It predates PR #3; follow-up.
+  - Claude cut the Api suite from 87 s back to 4 s: a CORS row and a rate-limit row were waiting on the test
+    host's unreachable database or code store.
+- **Verification:** build 0/0; .NET Application 52, Infrastructure 31 + 3 skipped, Api 137, Cli 11, Integration
+  40 + 1 skipped; web shared 18 and app 22, lint and both builds; four orchestrator mutations, each caught.
+- **No round 3.** The follow-ups are listed in `docs/review/007` under "Fixes".

@@ -9,6 +9,23 @@ import { Library } from "./Library";
 describe("Library", () => {
   beforeEach(() => get.mockReset());
 
+  it("renders presentations from the paged success envelope", async () => {
+    get.mockResolvedValue({
+      data: {
+        items: [
+          { id: "one", title: "First presentation", slideCount: 2, deck: "sample", driver: "auto" },
+          { id: "two", title: "Second presentation", slideCount: 3, deck: "sample", driver: "auto" },
+        ],
+        page: 1,
+        pageSize: 25,
+        total: 2,
+      },
+    });
+    render(<Library />, { wrapper: MemoryRouter });
+    expect(await screen.findByText("First presentation")).toBeTruthy();
+    expect(screen.getByText("Second presentation")).toBeTruthy();
+  });
+
   it("uses stable mapped copy for Problem Details", async () => {
     get.mockResolvedValue({
       error: {

@@ -9,36 +9,45 @@ public sealed class PresentationEndpointTests(ApiFactory factory, WebRootFixture
     IClassFixture<ApiFactory>, IClassFixture<WebRootFixture>
 {
     [Theory]
-    [InlineData("/api/presentations", "presentations.json")]
-    [InlineData("/api/presentations/sample", "presentation-sample.json")]
-    [InlineData("/api/presentations/ricoh-delivery-overview", "presentation-ricoh.json")]
-    [InlineData("/api/config", "config.json")]
+    [InlineData("/v1/presentations", "presentations.json")]
+    [InlineData("/v1/presentations/sample", "presentation-sample.json")]
+    [InlineData("/v1/presentations/ricoh-delivery-overview", "presentation-ricoh.json")]
+    [InlineData("/v1/config", "config.json")]
     public async Task Json_matches_node_golden(string endpoint, string golden)
     {
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         var response = await client.GetAsync(endpoint);
         response.EnsureSuccessStatusCode();
         var expected = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Golden", golden)));
         var actual = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+        if (endpoint == "/v1/presentations")
+        {
+            actual!["page"]!.GetValue<int>().Should().Be(1);
+            actual["pageSize"]!.GetValue<int>().Should().Be(25);
+            actual["total"]!.GetValue<int>().Should().Be(actual["items"]!.AsArray().Count);
+            actual = actual["items"];
+        }
+
         JsonNode.DeepEquals(actual, expected).Should().BeTrue();
     }
 
     [Fact]
     public async Task Missing_id_is_404_with_error_body()
     {
-        using var client = factory.CreateClient();
-        var response = await client.GetAsync("/api/presentations/nope");
+        using var client = factory.CreateAuthenticatedClient();
+        var response = await client.GetAsync("/v1/presentations/nope");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.NotFound);
-        (await response.Content.ReadAsStringAsync()).Should().Be("{\"error\":\"presentation \\\"nope\\\" not found\"}");
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("presentation.not_found");
     }
 
     [Fact]
     public async Task Invalid_id_is_400_with_error_body()
     {
-        using var client = factory.CreateClient();
-        var response = await client.GetAsync("/api/presentations/nope%40bad");
+        using var client = factory.CreateAuthenticatedClient();
+        var response = await client.GetAsync("/v1/presentations/nope%40bad");
         response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
-        (await response.Content.ReadAsStringAsync()).Should().Contain("invalid presentation id");
+        (await response.Content.ReadAsStringAsync()).Should().Contain("validation.failed");
     }
 
     [Fact]

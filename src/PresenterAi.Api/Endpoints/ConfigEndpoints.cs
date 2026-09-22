@@ -8,9 +8,10 @@ public static class ConfigEndpoints
 {
     public static IEndpointRouteBuilder MapConfigEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/api/config", (UpstreamRoutes routes, IOptions<PresenterOptions> presenter) =>
+        endpoints.MapGet("/v1/config", (UpstreamRoutes routes, IOptions<PresenterOptions> presenter) =>
                 Results.Ok(new ConfigDto(routes.Upstreams[0].Model, routes.Voice, presenter.Value.AdvanceSilenceMs)))
             .RequireAuthorization()
+            .RequireCors("Default")
             .WithName("GetConfig")
             .Produces<ConfigDto>();
         return endpoints;

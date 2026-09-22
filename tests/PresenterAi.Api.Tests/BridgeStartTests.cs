@@ -3,7 +3,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using PresenterAi.Api.Tests.Infrastructure;
+using PresenterAi.Application.Auth;
 using PresenterAi.Infrastructure.Tests.Live;
 
 namespace PresenterAi.Api.Tests;
@@ -22,13 +24,37 @@ public sealed class BridgeStartTests
                 ["Presenter:AdvanceSilenceMs"] = "200"
             }
         };
-        var client = factory.Server.CreateWebSocketClient();
-        using var socket = await client.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
-        _ = await ReceiveTextAsync(socket);
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
         await socket.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"start\",\"presentation\":\"ricoh-delivery-overview\",\"fromIndex\":0}"), WebSocketMessageType.Text, true, CancellationToken.None);
         await WaitUntilAsync(() => fake.ReceivedSnapshot().Any(message =>
             message["type"]?.GetValue<string>() == "session.instructions.append"
             && message["content"]?.GetValue<string>().Contains("Good morning everyone", StringComparison.Ordinal) == true));
+    }
+
+    [Fact]
+    public async Task Ticket_owner_is_passed_to_the_presentation_loader()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Upstream:Endpoint"] = fake.Url,
+                ["Presenter:AdvanceSilenceMs"] = "200"
+            }
+        };
+        var ticket = Guid.NewGuid().ToString("N");
+        await factory.Services.GetRequiredService<ITicketStore>().IssueAsync(ticket, "someone-else");
+        using var socket = await factory.Server.CreateWebSocketClient()
+            .ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        await BridgeTestSupport.SendAsync(socket, $"{{\"type\":\"auth\",\"ticket\":\"{ticket}\"}}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "state");
+
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        var error = await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "error");
+
+        error["code"]?.GetValue<string>().Should().Be("presentation");
+        error["message"]?.GetValue<string>().Should().Contain("cannot load presentation");
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

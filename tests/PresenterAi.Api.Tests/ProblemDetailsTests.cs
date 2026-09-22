@@ -117,7 +117,7 @@ public sealed partial class ProblemDetailsTests(ApiFactory factory) : IClassFixt
                 .AddProblemDetails(ProblemTrace.Configure)
                 .BuildServiceProvider()
         };
-        context.Request.Path = "/api/presentations/missing";
+        context.Request.Path = "/v1/presentations/missing";
         context.Response.Body = new MemoryStream();
         return context;
     }

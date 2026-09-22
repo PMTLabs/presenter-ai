@@ -61,9 +61,9 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
         new Dictionary<string, RequiredOperation>(StringComparer.Ordinal)
         {
             ["/health"] = new(["200"], RequiresJson200: true, RequiresArray200: false),
-            ["/api/presentations"] = new(["200"], RequiresJson200: false, RequiresArray200: true),
-            ["/api/presentations/{id}"] = new(["200", "400", "404"], RequiresJson200: false, RequiresArray200: false),
-            ["/api/config"] = new(["200"], RequiresJson200: true, RequiresArray200: false),
+            ["/v1/presentations"] = new(["200"], RequiresJson200: true, RequiresArray200: false),
+            ["/v1/presentations/{id}"] = new(["200", "400", "404"], RequiresJson200: true, RequiresArray200: false),
+            ["/v1/config"] = new(["200"], RequiresJson200: true, RequiresArray200: false),
         };
 
     [Fact]

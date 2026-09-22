@@ -1,7 +1,10 @@
+using System.Data.Common;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using PresenterAi.Infrastructure;
 
 namespace PresenterAi.Cli;
@@ -40,6 +43,7 @@ public static class Program
             {
                 SmokeArguments smoke => await SmokeCommand.RunAsync(smoke, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 RunArguments run => await RunCommand.RunAsync(run, configuration, output, error, cancellationToken).ConfigureAwait(false),
+                ImportArguments import => await ImportCommand.RunAsync(import, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 _ => 2
             };
         }
@@ -53,11 +57,91 @@ public static class Program
             await error.WriteLineAsync($"Configuration invalid: {exception.Message}").ConfigureAwait(false);
             return 2;
         }
+        catch (Exception exception) when (FindPostgresException(exception) is { } postgres)
+        {
+            await error.WriteLineAsync($"Database error: {postgres.MessageText}").ConfigureAwait(false);
+            return 1;
+        }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             await error.WriteLineAsync("Cancelled.").ConfigureAwait(false);
             return 1;
         }
+        catch (Exception exception) when (IsDatabaseConnectivityFailure(exception))
+        {
+            await error.WriteLineAsync("Database unavailable.").ConfigureAwait(false);
+            return 1;
+        }
+    }
+
+    internal static bool IsDatabaseFailure(Exception exception) =>
+        FindPostgresException(exception) is not null || IsDatabaseConnectivityFailure(exception);
+
+    internal static bool IsDatabaseConnectivityFailure(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is NpgsqlException or DbException or RetryLimitExceededException)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static PostgresException? FindPostgresException(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException postgres)
+            {
+                return postgres;
+            }
+        }
+
+        return null;
+    }
+
+    internal static ServiceProvider BuildImportServices(IConfiguration configuration, string contentRoot)
+    {
+        if (string.IsNullOrWhiteSpace(configuration.GetConnectionString("Postgres")))
+        {
+            throw new InvalidOperationException("Missing required setting: ConnectionStrings:Postgres");
+        }
+
+        var effectiveConfiguration = configuration;
+        if (configuration["Content:RootDir"] is null)
+        {
+            effectiveConfiguration = new ConfigurationBuilder()
+                .AddConfiguration(configuration)
+                .AddInMemoryCollection(new Dictionary<string, string?> { ["Content:RootDir"] = "." })
+                .Build();
+        }
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton(TimeProvider.System);
+        services.AddPersistence(effectiveConfiguration);
+        services.AddFileContent(effectiveConfiguration, contentRoot);
+        services.AddFileImportSource();
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+    }
+
+    internal static ServiceProvider BuildRunServices(IConfiguration configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration.GetConnectionString("Postgres")))
+        {
+            throw new InvalidOperationException("Missing required setting: ConnectionStrings:Postgres");
+        }
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddUpstreamOptions(configuration);
+        services.AddPersistence(configuration);
+        services.AddLiveSessions();
+        services.AddPresenter();
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
     }
 
     internal static ServiceProvider BuildServices(IConfiguration configuration, string contentRoot)
@@ -75,9 +159,10 @@ public static class Program
         services.AddLogging();
         services.AddUpstreamOptions(effectiveConfiguration);
         services.AddFileContent(effectiveConfiguration, contentRoot);
+        services.AddFileImportSource();
         services.AddLiveSessions();
-        services.AddPresenter();
-        return services.BuildServiceProvider();
+        services.AddPresenter(fileBacked: true);
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
     }
 
     private static IConfiguration BuildConfiguration(string[] args)
@@ -112,7 +197,8 @@ public static class Program
     {
         output.WriteLine("Usage:");
         output.WriteLine("  presenter-cli smoke --provider azure|openai");
-        output.WriteLine("  presenter-cli run <id> [--max-seconds N] [--stop-after-slide N] [--content-root DIR]");
+        output.WriteLine("  presenter-cli run <id> [--owner <email>] [--max-seconds N] [--stop-after-slide N] [--content-root DIR]");
+        output.WriteLine("  presenter-cli import <path-or-pattern>... --owner <email> [--content-root DIR]");
         output.WriteLine("  presenter-cli --help");
         output.WriteLine();
         output.WriteLine("Exit codes: 0 success, 1 upstream/run failure, 2 usage or configuration error.");
@@ -132,6 +218,7 @@ internal static class CliParser
         {
             "smoke" => ParseSmoke(args[1..], error),
             "run" => ParseRun(args[1..], error),
+            "import" => ParseImport(args[1..], error),
             _ => null
         };
     }
@@ -172,11 +259,65 @@ internal static class CliParser
         return new SmokeArguments(provider);
     }
 
+    private static ImportArguments? ParseImport(string[] args, TextWriter error)
+    {
+        var paths = new List<string>();
+        string? owner = null;
+        string? contentRoot = null;
+
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (IsConfigurationArgument(argument))
+            {
+                index += argument.Contains('=') || index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal) ? 0 : 1;
+                continue;
+            }
+
+            if (argument is "--owner" or "--content-root")
+            {
+                if (index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal))
+                {
+                    error.WriteLine($"{argument} requires a value");
+                    return null;
+                }
+
+                var value = args[++index];
+                if (argument == "--owner") owner = value;
+                else contentRoot = value;
+                continue;
+            }
+
+            if (argument.StartsWith("-", StringComparison.Ordinal))
+            {
+                error.WriteLine($"Unknown import option: {argument}");
+                return null;
+            }
+
+            paths.Add(argument);
+        }
+
+        if (paths.Count == 0)
+        {
+            error.WriteLine("import requires at least one path or pattern");
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(owner))
+        {
+            error.WriteLine("import requires --owner <email>");
+            return null;
+        }
+
+        return new ImportArguments(paths, owner, contentRoot);
+    }
+
     private static RunArguments? ParseRun(string[] args, TextWriter error)
     {
         string? id = null;
         var maxSeconds = 300;
         var stopAfterSlide = 0;
+        string? owner = null;
         string? contentRoot = null;
 
         for (var index = 0; index < args.Length; index++)
@@ -194,16 +335,20 @@ internal static class CliParser
                 continue;
             }
 
-            if (argument is "--max-seconds" or "--stop-after-slide" or "--content-root")
+            if (argument is "--owner" or "--max-seconds" or "--stop-after-slide" or "--content-root")
             {
-                if (index + 1 >= args.Length)
+                if (index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal))
                 {
                     error.WriteLine($"{argument} requires a value");
                     return null;
                 }
 
                 var value = args[++index];
-                if (argument == "--content-root")
+                if (argument == "--owner")
+                {
+                    owner = value;
+                }
+                else if (argument == "--content-root")
                 {
                     contentRoot = value;
                 }
@@ -234,10 +379,11 @@ internal static class CliParser
             return null;
         }
 
-        return new RunArguments(id, maxSeconds, stopAfterSlide, contentRoot);
+        return new RunArguments(id, maxSeconds, stopAfterSlide, contentRoot, owner);
     }
 }
 
 public abstract record CliArguments;
 internal sealed record SmokeArguments(string Provider) : CliArguments;
-public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot) : CliArguments;
+public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot, string? Owner = null) : CliArguments;
+public sealed record ImportArguments(IReadOnlyList<string> Paths, string Owner, string? ContentRoot) : CliArguments;

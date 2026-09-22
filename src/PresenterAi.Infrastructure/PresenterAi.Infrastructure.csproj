@@ -2,7 +2,30 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.31" />
     <ProjectReference Include="../PresenterAi.Application/PresenterAi.Application.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Microsoft.EntityFrameworkCore.Design pulls System.Security.Cryptography.Xml transitively. Every published
+         stable version carries these advisories (only 11.0.0 previews exist), and the package is design-time only
+         (PrivateAssets=all on the Design reference), so it never reaches a shipped runtime asset. Suppress these
+         eight advisories by id rather than lowering NuGetAuditMode, so any other transitive advisory - now or
+         later, including a runtime one from Npgsql or StackExchange.Redis - still fails the build. Revisit when
+         System.Security.Cryptography.Xml 11.0.0 ships stable. -->
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-23rf-6693-g89p" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-37gx-xxp4-5rgx" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-6588-8gv4-xfgh" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-8q5v-6pqq-x66h" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-cvvh-rhrc-wg4q" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-g8r8-53c2-pm3f" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-mmjf-rqrv-855v" />
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-w3x6-4m5h-cxqf" />
   </ItemGroup>
 </Project>

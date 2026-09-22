@@ -1,8 +1,8 @@
 # 001 — API and code conventions (frontend ↔ backend contract)
 
 **Status:** adopted 2026-09-21 (decisions confirmed with the owner; see §11). Applies to every endpoint written
-from plan 002 onward. The three Node-parity endpoints (`/api/presentations`, `/api/presentations/{id}`,
-`/api/config`) are **frozen exceptions** until plan 004 removes them — see §10.
+from plan 002 onward. The three Node-parity endpoints under `/api` were frozen exceptions until plan 004 removed
+them; §10 keeps the record.
 **Enforced by:** `PresenterAi.Contracts` (DTOs, `ErrorCodes`), the API's exception handler, `OpenApiTests`,
 the generated TypeScript client in `web/shared`, and code review.
 
@@ -15,13 +15,13 @@ the generated TypeScript client in `web/shared`, and code review.
    never on `detail` text.
 3. **Bare resources, standard errors.** Success bodies are the resource itself (no envelope); every error is
    RFC 9457 Problem Details with a stable `code`.
-4. **Frozen wire formats are tested, not remembered.** Golden JSON tests pin the parity endpoints and the
+4. **Frozen wire formats are tested, not remembered.** Golden JSON tests pin the presentation payloads and the
    WebSocket frames; a changed field is a red test.
 
 ## 2. URLs and versioning
 
-- Base path `/v1`. Breaking changes → `/v2` alongside, never in place. The parity trio under `/api` is the only
-  unversioned surface (§10).
+- Base path `/v1`. Breaking changes → `/v2` alongside, never in place. Since plan 004 there is no unversioned
+  API surface (§10); only static assets (`/decks/**`), `/health` and `/openapi/v1.json` sit outside `/v1`.
 - Resources are plural nouns in kebab-case: `/v1/presentations`, `/v1/decks`, `/v1/admin/provider-models`.
   Sub-resources nest one level: `/v1/presentations/{id}/versions`. Actions that are not CRUD are verbs as a
   final POST segment: `/v1/presentations/{id}/generate`, `/v1/admin/providers/{id}/test-connection`,
@@ -163,7 +163,9 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   Node parity page never sends it; the React client sends it from day one with a dummy ticket); plan 003 makes
   it mandatory when real tickets exist.
 - Text frames are JSON `{type, …}` both ways; binary frames are PCM16 mono 24 kHz, 20 ms = 960 bytes.
-  The frozen command/message set is in plan 002 §4.3; new message types are added, never renamed.
+  Auth and text-command frames are limited to 4 KiB and binary audio frames to 4 KiB while fragments accumulate;
+  an authenticated oversized frame closes 1009 (Message Too Big). The frozen command/message set is in plan 002
+  §4.3; new message types are added, never renamed.
 - Error frames: `{"type":"error","code":"<catalogue code>","message":"…"}` — the same `code` values as HTTP.
   Close codes: `1000` normal, `1013` busy (second client), `1011` server cannot keep up, `4401` auth,
   `4409` `session.already_running`, `4429` `session.slots_busy`.
@@ -174,26 +176,32 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
 - `Authorization: Bearer <jwt>` for users; `X-Api-Key: <key>` for CLI/API keys (never both). Tokens are never
   in query strings or cookies for the API; the SPA keeps the access token in memory and the refresh token via
   `POST /v1/auth/refresh` (httpOnly cookie, `SameSite=Strict`).
-- Responses: `traceparent`, `X-Request-Id` (echoed if sent), `RateLimit-Limit` / `RateLimit-Remaining` /
-  `RateLimit-Reset` (IETF draft names) on rate-limited routes, `Retry-After` on 429/503, `Cache-Control:
-  no-store` on everything under `/v1` except explicitly cacheable static assets, `ETag` where §4 says.
-- CORS: only the SPA origins from configuration; credentials allowed only for the refresh endpoint.
+- Responses: `traceparent`, `X-Request-Id` (echoed if well-formed, otherwise generated), and `Cache-Control:
+  no-store` on everything under `/v1` except explicitly cacheable static assets. When rate limiting is enabled,
+  successful rate-limited routes emit `RateLimit-Limit` only. A 429 additionally emits
+  `RateLimit-Remaining: 0`, `RateLimit-Reset`, and an equal whole-second `Retry-After`, derived from the limiter
+  lease (or the configured window when metadata is unavailable). They are absent when rate limiting is disabled.
+  `ETag` appears where §4 says.
+- CORS: only the SPA origins from configuration; credentialed CORS is restricted to the cookie-authenticated
+  refresh and logout endpoints.
 - Uploads: multipart, field name `file`, size limit per route (decks 100 MB, documents 50 MB), MIME sniffed
   server-side, filename sanitised, stored under an opaque key — the original name is metadata only.
 - Never log request bodies of uploads, scripts, prompts, transcripts or keys; log ids and sizes.
 
-## 10. Frozen parity endpoints (plan 002 only)
+## 10. Removed parity endpoints (history)
 
-| Endpoint | Shape (Node, unchanged) | Removed in |
-|---|---|---|
-| `GET /api/presentations` | `[{id,title,slideCount,deck,driver}]` or `{id,title,error}` rows | plan 004 |
-| `GET /api/presentations/{id}` | `{id, meta, slides, hasContext}`; errors `{error: message}` with 404/400 | plan 004 |
-| `GET /api/config` | `{model, voice, advanceSilenceMs}` | plan 004 |
-| `GET /decks/**` | static; 404 plain text | stays (deck assets), moves under `/v1/decks/{id}/assets/**` in 003 |
+Plan 002 kept three Node-parity endpoints frozen under `/api` so the old page could be the .NET API's first
+client. **Plan 004 deleted them.** Their replacements follow §2–§9: they are owner-scoped, use the list envelope,
+and return Problem Details errors.
 
-These keep their exact Node shapes and error bodies so the old page can be the .NET API's first client
-(plan 002 AC4). The React app (plan 002 T14) may call them through the generated client, but every endpoint
-added from plan 003 on is `/v1/...` and follows §2–§9; `/api/*` is deleted with the Node page.
+| Removed | Replaced by |
+|---|---|
+| `GET /api/presentations` | `GET /v1/presentations` (paged `{items,page,pageSize,total}`) |
+| `GET /api/presentations/{id}` | `GET /v1/presentations/{id}` (404 `presentation.not_found` for a missing id or another user's id) |
+| `GET /api/config` | `GET /v1/config` |
+
+`GET /decks/**` (static deck assets, anonymous, 404 as plain text) was not part of the trio. Plan 004 left it
+unchanged.
 
 ## 11. Decisions and rationale
 
@@ -202,7 +210,7 @@ added from plan 003 on is `/v1/...` and follows §2–§9; `/api/*` is deleted w
 | Error format | RFC 9457 Problem Details + `code` | InkSpoke `{error, message}` (inconsistent in practice); `{success,data,error}` envelope (non-standard, hides status) |
 | Success/list | bare resource; `{items,page,pageSize,total}` | cursor pagination (diverges from InkSpoke admin pages to be copied); `{data,meta}` envelope |
 | Codes | `area.reason` snake_case, generated TS union | flat strings; numeric codes |
-| Parity trio | frozen as-is until 004 | migrate now (breaks AC4); serve both (extra surface) |
+| Parity trio | frozen as-is until 004, then deleted (§10) | migrate now (breaks AC4); serve both (extra surface) |
 
 ## 12. Code conventions (the parts that touch the contract)
 

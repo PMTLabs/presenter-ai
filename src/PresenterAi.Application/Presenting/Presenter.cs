@@ -24,7 +24,7 @@ public sealed class Presenter : IPresenter
     public const int PartGapMs = 2_500;
 
     private readonly Func<SessionRequest, int, ILiveSession?> _createSession;
-    private readonly Func<string, CancellationToken, Task<LoadedPresentation>> _loadPresentation;
+    private readonly Func<string, string, CancellationToken, Task<LoadedPresentation>> _loadPresentation;
     private readonly PresenterSettings _settings;
     private readonly TimeProvider _timeProvider;
     private readonly Channel<PresenterEvent> _events = Channel.CreateBounded<PresenterEvent>(
@@ -62,7 +62,7 @@ public sealed class Presenter : IPresenter
 
     public Presenter(
         Func<SessionRequest, int, ILiveSession?> createSession,
-        Func<string, CancellationToken, Task<LoadedPresentation>> loadPresentation,
+        Func<string, string, CancellationToken, Task<LoadedPresentation>> loadPresentation,
         PresenterSettings? settings = null,
         TimeProvider? timeProvider = null)
     {
@@ -89,8 +89,17 @@ public sealed class Presenter : IPresenter
 
     public PresenterSnapshot Snapshot() => Volatile.Read(ref _snapshot);
 
-    public Task<bool> StartAsync(string id, int? fromIndex = null, CancellationToken cancellationToken = default) =>
-        EnqueueCommandAsync(new StartCommand(id, fromIndex), cancellationToken);
+    public async Task<PresenterStartResult> StartAsync(
+        string id,
+        int? fromIndex,
+        string ownerId,
+        CancellationToken cancellationToken = default)
+    {
+        var command = new StartCommand(ownerId, id, fromIndex);
+        ThrowIfDisposed();
+        await WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     public Task<bool> NextAsync(CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new NextCommand(), cancellationToken);
@@ -224,6 +233,9 @@ public sealed class Presenter : IPresenter
             {
                 switch (presenterEvent)
                 {
+                    case StartCommand start:
+                        await ProcessStartAsync(start).ConfigureAwait(false);
+                        break;
                     case Command command:
                         await ProcessCommandAsync(command).ConfigureAwait(false);
                         break;
@@ -294,13 +306,24 @@ public sealed class Presenter : IPresenter
         }
     }
 
+    private async Task ProcessStartAsync(StartCommand command)
+    {
+        try
+        {
+            command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex).ConfigureAwait(false));
+        }
+        catch (Exception exception)
+        {
+            command.Completion.TrySetException(exception);
+        }
+    }
+
     private async Task ProcessCommandAsync(Command command)
     {
         try
         {
             var result = command switch
             {
-                StartCommand start => await StartAsyncCore(start.Id, start.FromIndex).ConfigureAwait(false),
                 NextCommand => NextCore(),
                 PrevCommand => PrevCore(),
                 GotoCommand goTo => GotoCore(goTo.Index),
@@ -320,25 +343,25 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private async Task<bool> StartAsyncCore(string id, int? fromIndex)
+    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex)
     {
         if (_state != PresenterState.Idle)
         {
             LogMessage("warn", $"start ignored: state is {StateName(_state)}");
-            return false;
+            return new PresenterStartResult(false, id, null, null, null);
         }
 
         SetState(PresenterState.Connecting);
         try
         {
-            _presentation = await _loadPresentation(id, _lifetime.Token).ConfigureAwait(false);
+            _presentation = await _loadPresentation(ownerId, id, _lifetime.Token).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             LogMessage("error", $"cannot load presentation \"{id}\": {exception.Message}");
             UpstreamError?.Invoke(new PresenterUpstreamError($"cannot load presentation: {exception.Message}", "presentation"));
             SetState(PresenterState.Idle);
-            return false;
+            return new PresenterStartResult(false, id, null, null, null);
         }
 
         var presentation = _presentation;
@@ -349,6 +372,7 @@ public sealed class Presenter : IPresenter
             onWarn: message => LogMessage("warn", message));
         ILiveSession? session = null;
         LiveSessionInfo? sessionInfo = null;
+        string? upstream = null;
         for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
         {
             var candidate = _createSession(new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice), attempt);
@@ -362,6 +386,7 @@ public sealed class Presenter : IPresenter
             {
                 sessionInfo = await candidate.ConnectAsync(_lifetime.Token).ConfigureAwait(false);
                 session = candidate;
+                upstream = label;
                 // Node logged this only for a fallback; the .NET host always says which upstream answered
                 // (info for the primary, warn when a fallback took over) so a live run shows Azure vs OpenAI.
                 LogMessage(attempt > 0 ? "warn" : "info", $"connected via {label}");
@@ -380,7 +405,7 @@ public sealed class Presenter : IPresenter
         {
             LogMessage("error", "no upstream could start a session");
             SetState(PresenterState.Idle);
-            return false;
+            return new PresenterStartResult(false, id, null, null, null);
         }
 
         _session = session;
@@ -394,7 +419,7 @@ public sealed class Presenter : IPresenter
         _usageRatio = null;
         SetState(PresenterState.Presenting);
         PresentSlide(startAt, interrupt: false);
-        return true;
+        return new PresenterStartResult(true, id, upstream, sessionInfo.Id, sessionInfo.Model);
     }
 
     private void WireSession(ILiveSession session)
@@ -971,7 +996,10 @@ public sealed class Presenter : IPresenter
         public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private sealed record StartCommand(string Id, int? FromIndex) : Command;
+    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex) : PresenterEvent
+    {
+        public TaskCompletionSource<PresenterStartResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
     private sealed record NextCommand : Command;
     private sealed record PrevCommand : Command;
     private sealed record GotoCommand(int Index) : Command;

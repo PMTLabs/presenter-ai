@@ -47,6 +47,9 @@ services:
       Presenter__AdvanceSilenceMs: "${ADVANCE_SILENCE_MS:-3000}"
       Presenter__LogEvents: "${LOG_EVENTS:-false}"
       Content__RootDir: /app/content
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=presenter_ai;Username=presenter;Password=dev_password_change_me
+      ConnectionStrings__Redis: redis:6379
+      Jwt__SecretKey: "${JWT_SECRET_KEY:-}"
     volumes:
       - ./presentations:/app/content/presentations:ro
       - ./decks:/app/content/decks:ro

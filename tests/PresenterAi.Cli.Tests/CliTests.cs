@@ -103,6 +103,78 @@ public sealed class CliTests
             .Should().Equal("Configuration invalid: Missing required setting: Upstream:Key");
     }
 
+    [Theory]
+    [InlineData("Npgsql")]
+    [InlineData("retry")]
+    public void Database_connectivity_failures_are_classified_for_the_command_boundary(string kind)
+    {
+        Exception exception = kind == "Npgsql"
+            ? new Npgsql.NpgsqlException("unreachable")
+            : new Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException("retry limit", new Npgsql.NpgsqlException("unreachable"));
+
+        Program.IsDatabaseConnectivityFailure(exception).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Import_without_owner_exits_2()
+    {
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["import", "presentations/sample.md"],
+            new ConfigurationBuilder().Build(),
+            new StringWriter(),
+            error,
+            CancellationToken.None);
+
+        exit.Should().Be(2);
+        error.ToString().Should().Contain("import requires --owner");
+    }
+
+    [Fact]
+    public async Task Import_without_paths_exits_2()
+    {
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["import", "--owner", "owner@example.test"],
+            new ConfigurationBuilder().Build(),
+            new StringWriter(),
+            error,
+            CancellationToken.None);
+
+        exit.Should().Be(2);
+        error.ToString().Should().Contain("import requires at least one path");
+    }
+
+    [Fact]
+    public async Task Run_without_owner_value_exits_2()
+    {
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["run", "sample", "--owner"],
+            new ConfigurationBuilder().Build(),
+            new StringWriter(),
+            error,
+            CancellationToken.None);
+
+        exit.Should().Be(2);
+        error.ToString().Should().Contain("--owner requires a value");
+    }
+
+    [Fact]
+    public async Task Usage_lists_import_and_optional_run_owner()
+    {
+        var output = new StringWriter();
+        var exit = await Program.RunAsync(
+            ["--help"],
+            new ConfigurationBuilder().Build(),
+            output,
+            new StringWriter(),
+            CancellationToken.None);
+
+        exit.Should().Be(0);
+        output.ToString().Should().Contain("presenter-cli import").And.Contain("--owner");
+    }
+
     [Fact]
     public async Task Unknown_provider_exits_2()
     {
@@ -130,11 +202,11 @@ public sealed class CliTests
 
         public PresenterSnapshot Snapshot() => new("presenting", "sample", "sample", 0, 3, false, false, "test", null, 0, 200);
 
-        public Task<bool> StartAsync(string id, int? fromIndex = null, CancellationToken cancellationToken = default)
+        public Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default)
         {
             State?.Invoke(Snapshot());
             Slide?.Invoke(1);
-            return Task.FromResult(true);
+            return Task.FromResult(new PresenterStartResult(true, id, "test", "test", "test-model"));
         }
 
         public Task<bool> NextAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);

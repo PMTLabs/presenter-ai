@@ -45,7 +45,7 @@ public sealed class BridgeTests
         await using var fake = await FakeLiveServer.StartAsync();
         using var factory = BridgeTestSupport.Factory(fake);
         using var first = await BridgeTestSupport.ConnectAsync(factory);
-        using var second = await factory.Server.CreateWebSocketClient().ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory);
         var error = (await BridgeTestSupport.ReceiveAsync(second)).Text!;
         JsonNode.Parse(error)!["code"]!.GetValue<string>().Should().Be("busy");
         var close = await second.ReceiveAsync(new byte[32], CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
@@ -82,8 +82,7 @@ public sealed class BridgeTests
     {
         await using var fake = await FakeLiveServer.StartAsync();
         using var factory = BridgeTestSupport.Factory(fake);
-        var client = factory.Server.CreateWebSocketClient();
-        var pair = await Task.WhenAll(client.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None), client.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None));
+        var pair = await Task.WhenAll(BridgeTestSupport.ConnectWithTicketAsync(factory), BridgeTestSupport.ConnectWithTicketAsync(factory));
         using var a = pair[0]; using var b = pair[1];
         var first = await BridgeTestSupport.ReceiveAsync(a); var second = await BridgeTestSupport.ReceiveAsync(b);
         new[] { first.Text, second.Text }.Count(text => text is not null && JsonNode.Parse(text)!["type"]?.GetValue<string>() == "state").Should().Be(1);
@@ -114,6 +113,27 @@ public sealed class BridgeTests
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
         var pong = await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong");
         pong["type"]!.GetValue<string>().Should().Be("pong");
+    }
+
+    [Fact]
+    public async Task Backpressure_against_a_silent_peer_releases_the_slot_after_the_bounded_close()
+    {
+        await using var fake = await FakeLiveServer.StartAsync(audioDeltasPerAppend: 50);
+        using var factory = BridgeTestSupport.Factory(fake);
+        var sendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sends = 0;
+        factory.Services.GetRequiredService<PresenterBridge>().ConfigureOutboundForTest(
+            2,
+            () => Interlocked.Increment(ref sends) == 1 ? Task.CompletedTask : sendGate.Task);
+        using var silent = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendAsync(silent, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await BridgeTestSupport.WaitForAsync(() => fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.instructions.append"));
+        sendGate.TrySetResult();
+
+        // Do not receive the 1011 frame or acknowledge it. Abort after one second must wake the receive owner.
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
+        next.State.Should().Be(WebSocketState.Open);
     }
 
     [Fact]

@@ -1,5 +1,3 @@
-import { DEV_TICKET } from "@presenter/shared";
-
 export interface Snapshot {
   state: string;
   slideIndex: number;
@@ -32,6 +30,8 @@ export class BridgeClient {
   private ws: WebSocket | null = null;
   private retry = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private connecting = false;
+  private connectGeneration = 0;
   private listeners = new Map<
     keyof BridgeEventMap,
     Set<(...args: unknown[]) => void>
@@ -45,6 +45,9 @@ export class BridgeClient {
   constructor(
     private readonly url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
     private readonly WebSocketImpl: typeof WebSocket = WebSocket,
+    private readonly ticketProvider: () => string | Promise<string> = () => {
+      throw new Error("A session ticket provider is required.");
+    },
   ) {}
   on<T extends keyof BridgeEventMap>(event: T, listener: Handler<T>) {
     const set = this.listeners.get(event) ?? new Set();
@@ -62,14 +65,38 @@ export class BridgeClient {
       ?.forEach((fn) => (fn as unknown as Handler<T>)(...args));
   }
   connect() {
-    if (this.ws) return;
+    if (this.ws || this.connecting) return;
+    this.connecting = true;
+    const generation = this.connectGeneration;
+    let ticket: string | Promise<string>;
+    try {
+      ticket = this.ticketProvider();
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    if (typeof ticket === "string") {
+      this.openSocket(ticket, generation);
+      return;
+    }
+    void ticket.then(
+      (value) => this.openSocket(value, generation),
+      () => {
+        if (generation === this.connectGeneration) this.scheduleReconnect();
+      },
+    );
+  }
+
+  private openSocket(ticket: string, generation: number) {
+    if (generation !== this.connectGeneration || this.ws) return;
+    this.connecting = false;
     const ws = new this.WebSocketImpl(this.url);
     this.ws = ws;
     ws.binaryType = "arraybuffer";
     ws.addEventListener("open", () => {
       if (this.ws !== ws) return;
       this.retry = 0;
-      ws.send(JSON.stringify({ type: "auth", ticket: DEV_TICKET }));
+      ws.send(JSON.stringify({ type: "auth", ticket }));
       this.emit("open");
     });
     ws.addEventListener("message", (event) => {
@@ -82,13 +109,21 @@ export class BridgeClient {
       this.snapshot = { ...this.snapshot, state: "idle" };
       this.emit("state", this.snapshot);
       this.emit("close");
-      const delay = Math.min(10_000, 500 * 2 ** this.retry++);
-      this.reconnectTimer = setTimeout(() => this.connect(), delay);
+      this.scheduleReconnect();
     });
   }
+
+  private scheduleReconnect() {
+    this.connecting = false;
+    const delay = Math.min(10_000, 500 * 2 ** this.retry++);
+    this.reconnectTimer = setTimeout(() => this.connect(), delay);
+  }
+
   disconnect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+    this.connectGeneration++;
+    this.connecting = false;
     const ws = this.ws;
     this.ws = null;
     ws?.close();
