@@ -1,7 +1,7 @@
 # 004 — Identity, persistence and auth-state Redis
 
 **Date:** 2026-09-22
-**Status:** Implemented (2026-09-22), not yet pushed — revision 2, after external review `pr004-rev-1`. The manual runbook (§7) and the T13 Serilog live cycle are still to be run by the user.
+**Status:** Implemented (2026-09-22) and open as PR #3 into `develop` — revision 2, after external review `pr004-rev-1`. The external implementation review, round 1 (`docs/review/006`), found gaps that are being fixed, including T12's `/v1` headers and CORS half, which had not landed. The manual runbook (§7) and the T13 Serilog live cycle are still to be run by the user.
 **Size:** L
 **Area:** `src/PresenterAi.Api` (Auth, Endpoints, Realtime, Program), `src/PresenterAi.Application`, `src/PresenterAi.Infrastructure`, `src/PresenterAi.Contracts`, `src/PresenterAi.Cli`, `web/shared`, `web/app`, `web/admin`, `tests/*`, compose/CI/docs
 **Requirement brief confirmed:** 2026-09-22 (G1)
@@ -682,7 +682,8 @@ None blocking. Deferred, with reason:
 | 2026-09-22 | Requirement brief confirmed (G1) | 2 rounds, 8 questions; discovery by two scout agents (inkspoke inventory, presenter as-built) |
 | 2026-09-22 | External plan review `pr004-rev-1` (codex, gpt-5.6-sol medium) | 9 blockers + 2 improvements; all folded into revision 2 — see below |
 | 2026-09-22 | Plan approved (G2) | revision 2; implementation not started — awaits an explicit instruction |
-| 2026-09-22 | Implementation complete (T1–T13) | branch `feature/004-identity-persistence`, not pushed. Build 0/0; 207 tests pass. Manual runbook §7 and the T13 Serilog live cycle are left to the user. Deviations D1–D7 are below. |
+| 2026-09-22 | Implementation complete (T1–T13), with one exception | Branch `feature/004-identity-persistence`, PR #3. Build 0/0; 207 tests pass. **The exception, corrected after review round 1:** T12's `/v1` `Cache-Control: no-store`, `X-Request-Id` and CORS half had not landed (`docs/review/006`, I-01 and I-02). Manual runbook §7 and the T13 Serilog live cycle are left to the user. Deviations D1–D9 are below. |
+| 2026-09-22 | External implementation review, round 1 (two `pi` reviewers, gpt-5.6-sol medium) | 20 findings (A 3 · B 6 · C 2 · D 9). 11 were claimed as blockers; the orchestrator re-traced every one: 9 stay blockers, P-02 is lowered to an improvement, and P-03 is disputed as design (D8). I-10 is deferred to the deployment plan. Fixes are in progress; see `docs/review/006`. |
 
 **Review findings and disposition (revision 2):**
 
@@ -711,3 +712,5 @@ None blocking. Deferred, with reason:
 | D5 | `presenter-cli run` **without** `--owner` stays file-backed and records no session. With `--owner` it loads the imported presentation from Postgres and records exactly as `/ws` does (T9/T10 as written). | `sessions.user_id` and `sessions.presentation_id` are required foreign keys, and a local-file run has neither row. Keeping the no-owner path file-backed also keeps `Cli.Tests` container-free (PR-C1 seam 2). User decision, 2026-09-22. |
 | D6 | A failed start writes **no** `sessions` row; the recorder's `EndAsync` barrier still completes. | `sessions.upstream` is NOT NULL and a failed start has no upstream. §7's "failed start" recorder test asserts exactly this. |
 | D7 | `OAuth:Microsoft:TenantId` is **dropped** from §4.3, the option classes and `appsettings.Example.json`. | The T13 audit found that nothing read it. The tenant is part of the configured Microsoft endpoint URLs (`/common/`, `/organizations/` or a tenant id), so a separate key would only have looked meaningful. |
+| D8 | Session recording is **best-effort**. If Postgres fails on the begin insert or the final update, the error is logged at Error level and the presentation continues. The recorder's begin/end barrier is an *attempt* barrier: it completes once the write has been attempted. It does not guarantee the write is durable, so a row can be left without `ended_at`. | A recording outage must not stop a presentation that is live in front of an audience. §2 and §9 already exclude "sweeping stale session rows", which anticipates such rows. Review round 1 P-03 asked for failure to stop the run; disputed. The user can overturn this. |
+| D9 | The CLI import refuses a script or context file that is itself a symbolic link, and compares paths case-sensitively on Linux. A directory junction or link *inside* the content root is **not** resolved. | The CLI runs with the operator's own rights on the operator's own content, and no remote input reaches these paths: the API no longer reads presentation files. Confinement guards against mistakes, not an attacker (review round 1 P-02). |
