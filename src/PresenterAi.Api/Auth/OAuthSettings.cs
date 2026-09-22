@@ -40,10 +40,50 @@ public static class OAuthSettingsValidator
             return "OAuth.StateEncryptionKey must be valid base64.";
         }
 
-        return decoded.Length is 16 or 24 or 32
-            ? null
-            : $"OAuth.StateEncryptionKey must decode to 16, 24, or 32 bytes for AES; got {decoded.Length}.";
+        if (decoded.Length is not (16 or 24 or 32))
+            return $"OAuth.StateEncryptionKey must decode to 16, 24, or 32 bytes for AES; got {decoded.Length}.";
+
+        if (!settings.AllowedRedirectUris.Any(IsAbsoluteUri))
+            return "OAuth.AllowedRedirectUris must contain at least one absolute URI when any provider is enabled.";
+
+        foreach (var (name, provider) in Providers(settings))
+        {
+            if (!provider.Enabled)
+                continue;
+
+            if (string.IsNullOrWhiteSpace(provider.ClientId))
+                return $"OAuth.{name}.ClientId is required when the provider is enabled.";
+            if (string.IsNullOrWhiteSpace(provider.ClientSecret))
+                return $"OAuth.{name}.ClientSecret is required when the provider is enabled.";
+
+            foreach (var (endpointName, endpoint) in Endpoints(provider))
+            {
+                if (!IsSecureEndpoint(endpoint))
+                    return $"OAuth.{name}.{endpointName} must be an absolute HTTPS URI (or HTTP loopback URI) when the provider is enabled.";
+            }
+        }
+
+        return null;
     }
+
+    private static IEnumerable<(string Name, OAuthProviderSettings Provider)> Providers(OAuthSettings settings)
+    {
+        yield return ("Google", settings.Google);
+        yield return ("Microsoft", settings.Microsoft);
+    }
+
+    private static IEnumerable<(string Name, string Value)> Endpoints(OAuthProviderSettings provider)
+    {
+        yield return ("AuthorizationEndpoint", provider.AuthorizationEndpoint);
+        yield return ("TokenEndpoint", provider.TokenEndpoint);
+        yield return ("UserInfoEndpoint", provider.UserInfoEndpoint);
+    }
+
+    private static bool IsAbsoluteUri(string value) => Uri.TryCreate(value, UriKind.Absolute, out _);
+
+    private static bool IsSecureEndpoint(string value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri)
+        && (uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback));
 }
 
 public sealed class OAuthProviderSettings

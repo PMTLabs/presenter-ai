@@ -30,12 +30,20 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         return client;
     }
 
-    public static string CreateTestToken(string userId, string email, string role = "user")
+    public static string CreateTestToken(
+        string userId,
+        string email,
+        string role = "user",
+        string issuer = "https://test.presenter-ai.local",
+        string audience = "presenter-ai-tests",
+        string signingKey = "test-only-jwt-secret-key-not-a-credential-123456",
+        DateTime? notBefore = null,
+        DateTime? expires = null)
     {
         var now = DateTime.UtcNow;
         var token = new JwtSecurityToken(
-            issuer: "https://test.presenter-ai.local",
-            audience: "presenter-ai-tests",
+            issuer: issuer,
+            audience: audience,
             claims:
             [
                 new Claim(JwtRegisteredClaimNames.Sub, userId),
@@ -43,10 +51,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 new Claim("role", role),
                 new Claim(ClaimTypes.Role, role)
             ],
-            notBefore: now,
-            expires: now.AddMinutes(10),
+            notBefore: notBefore ?? now,
+            expires: expires ?? now.AddMinutes(10),
             signingCredentials: new SigningCredentials(
-                new SymmetricSecurityKey(Encoding.UTF8.GetBytes("test-only-jwt-secret-key-not-a-credential-123456")),
+                new SymmetricSecurityKey(Encoding.UTF8.GetBytes(signingKey)),
                 SecurityAlgorithms.HmacSha256));
         return new JwtSecurityTokenHandler().WriteToken(token);
     }
