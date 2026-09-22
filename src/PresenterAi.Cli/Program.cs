@@ -238,6 +238,6 @@ internal static class CliParser
     }
 }
 
-internal abstract record CliArguments;
+public abstract record CliArguments;
 internal sealed record SmokeArguments(string Provider) : CliArguments;
-internal sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot) : CliArguments;
+public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot) : CliArguments;

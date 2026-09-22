@@ -187,8 +187,19 @@ public sealed class Presenter : IPresenter
 
         if (!_events.Writer.TryWrite(presenterEvent))
         {
-            _ = QueueFromProducerAsync(presenterEvent);
+            ObserveBackground(QueueFromProducerAsync(presenterEvent), "queue producer event");
         }
+    }
+
+    private void ObserveBackground(Task task, string operation)
+    {
+        _ = task.ContinueWith(completed =>
+        {
+            if (completed.Exception is not null)
+            {
+                LogMessage("error", $"{operation} failed: {completed.Exception.GetBaseException().Message}");
+            }
+        }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private async Task QueueFromProducerAsync(PresenterEvent presenterEvent)
@@ -237,7 +248,7 @@ public sealed class Presenter : IPresenter
                     case SessionClosed closed:
                         if (ReferenceEquals(closed.Session, _session))
                         {
-                            OnClosed(closed.Reason, closed.Seconds);
+                            await OnSessionClosedAsync(closed.Session, closed.Reason, closed.Seconds).ConfigureAwait(false);
                         }
 
                         break;
@@ -266,7 +277,13 @@ public sealed class Presenter : IPresenter
                         break;
                     case Shutdown shutdown:
                         ClearTimers();
-                        _session?.Terminate();
+                        var session = _session;
+                        _session = null;
+                        if (session is not null)
+                        {
+                            await DisposeSessionAsync(session, "shutdown").ConfigureAwait(false);
+                        }
+
                         shutdown.Completion.TrySetResult();
                         return;
                 }
@@ -357,6 +374,7 @@ public sealed class Presenter : IPresenter
                 LogMessage("error", $"session start via {label} failed: {exception.Message}");
                 var startup = exception as LiveStartupException;
                 UpstreamError?.Invoke(new PresenterUpstreamError($"{label}: {exception.Message}", startup?.Code ?? "connect"));
+                await DisposeSessionAsync(candidate, $"failed start via {label}").ConfigureAwait(false);
             }
         }
 
@@ -549,7 +567,7 @@ public sealed class Presenter : IPresenter
         if (_wrappingUp)
         {
             LogMessage("info", "wrap-up finished; ending session");
-            _ = EndAsyncCore();
+            ObserveBackground(EndAsync(), "wrap-up end");
             return;
         }
 
@@ -584,7 +602,7 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting && _wrappingUp && !_heardOutput)
         {
             LogMessage("warn", "no wrap-up audio; ending session");
-            _ = EndAsyncCore();
+            ObserveBackground(EndAsync(), "wrap-up fallback end");
         }
     }
 
@@ -745,8 +763,36 @@ public sealed class Presenter : IPresenter
             return true;
         }
 
-        await session.CloseAsync().ConfigureAwait(false);
-        return true;
+        try
+        {
+            await session.CloseAsync().ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            LogMessage("error", $"session close failed: {exception.Message}");
+            OnClosed("connection_lost", null);
+            await DisposeSessionAsync(session, "failed close").ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task OnSessionClosedAsync(ILiveSession session, string reason, double? seconds)
+    {
+        OnClosed(reason, seconds);
+        await DisposeSessionAsync(session, "session close").ConfigureAwait(false);
+    }
+
+    private async Task DisposeSessionAsync(ILiveSession session, string operation)
+    {
+        try
+        {
+            await session.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            LogMessage("error", $"session dispose after {operation} failed: {exception.Message}");
+        }
     }
 
     private void OnClosed(string reason, double? seconds)

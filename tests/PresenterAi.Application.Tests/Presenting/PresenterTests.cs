@@ -306,10 +306,57 @@ public sealed class PresenterTests
         Assert.Empty(harness.Sessions[0].Sent);
         Assert.Equal(["thinking", "instructions"], harness.Sessions[1].Sent.Select(item => item.Type));
         Assert.Single(harness.Errors);
+        Assert.Equal(1, harness.Sessions[0].DisposeCount);
+    }
 
-        await using var both = Create(upstreams: 2, failAttempts: [0, 1]);
-        Assert.False(await both.Presenter.StartAsync("p"));
-        Assert.Equal("idle", both.Presenter.Snapshot().State);
+    [Fact]
+    public async Task All_failed_upstream_candidates_are_disposed()
+    {
+        await using var harness = Create(upstreams: 2, failAttempts: [0, 1]);
+
+        Assert.False(await harness.Presenter.StartAsync("p"));
+        Assert.Equal("idle", harness.Presenter.Snapshot().State);
+        Assert.All(harness.Sessions, session => Assert.Equal(1, session.DisposeCount));
+    }
+
+    [Fact]
+    public async Task Normal_end_disposes_session_after_closed()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+
+        Assert.True(await harness.Presenter.EndAsync());
+        await harness.Flush();
+
+        Assert.Equal(1, session.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Dispose_with_open_session_disposes_session()
+    {
+        var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+
+        await harness.Presenter.DisposeAsync();
+
+        Assert.Equal(1, session.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Throwing_close_logs_error_reaches_idle_and_faults_end()
+    {
+        await using var harness = Create(throwOnClose: true);
+        await harness.Presenter.StartAsync("p");
+
+        var end = harness.Presenter.EndAsync();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => end);
+        Assert.Equal("close failed", exception.Message);
+        await harness.Flush();
+        Assert.Equal("idle", harness.Presenter.Snapshot().State);
+        Assert.Contains(harness.Logs, log => log.Level == "error" && log.Message.Contains("session close failed"));
     }
 
     [Fact]
@@ -397,7 +444,8 @@ public sealed class PresenterTests
         int chunkChars = 1400,
         int advanceSilenceMs = 2000,
         int upstreams = 1,
-        int[]? failAttempts = null)
+        int[]? failAttempts = null,
+        bool throwOnClose = false)
     {
         var clock = new FakeTimeProvider();
         var sessions = new List<FakeSession>();
@@ -412,7 +460,8 @@ public sealed class PresenterTests
                 var session = new FakeSession
                 {
                     Name = attempt == 0 ? "primary" : "fallback",
-                    FailConnect = failAttempts?.Contains(attempt) is true
+                    FailConnect = failAttempts?.Contains(attempt) is true,
+                    ThrowOnClose = throwOnClose
                 };
                 sessions.Add(session);
                 return session;
@@ -451,6 +500,7 @@ public sealed class PresenterTests
             Sessions = sessions;
             presenter.Slide += Slides.Add;
             presenter.UpstreamError += Errors.Add;
+            presenter.Log += Logs.Add;
         }
 
         public Presenter Presenter { get; }
@@ -458,6 +508,7 @@ public sealed class PresenterTests
         public List<FakeSession> Sessions { get; }
         public List<int> Slides { get; } = [];
         public List<PresenterUpstreamError> Errors { get; } = [];
+        public List<PresenterLog> Logs { get; } = [];
 
         public FakeSession Session() => Sessions[^1];
 

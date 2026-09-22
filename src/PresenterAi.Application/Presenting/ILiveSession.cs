@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace PresenterAi.Application.Presenting;
 
-public interface ILiveSession
+public interface ILiveSession : IAsyncDisposable
 {
     event Action<LiveSessionInfo>? Started;
     event Action<ReadOnlyMemory<byte>, long?, long?>? Audio;

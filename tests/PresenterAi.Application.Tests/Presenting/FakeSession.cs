@@ -9,6 +9,10 @@ internal sealed class FakeSession : ILiveSession
 
     public bool FailConnect { get; set; }
 
+    public bool ThrowOnClose { get; set; }
+
+    public int DisposeCount { get; private set; }
+
     public LiveSessionState State { get; private set; } = LiveSessionState.Idle;
 
     public string? Id => "sess_test";
@@ -66,9 +70,21 @@ internal sealed class FakeSession : ILiveSession
     public Task<LiveCloseResult> CloseAsync()
     {
         Sent.Add(("close", null, null));
+        if (ThrowOnClose)
+        {
+            throw new InvalidOperationException("close failed");
+        }
+
         State = LiveSessionState.Closed;
         Closed?.Invoke("close_requested", 7);
         return Task.FromResult(new LiveCloseResult("close_requested", 7));
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        DisposeCount++;
+        State = LiveSessionState.Closed;
+        return ValueTask.CompletedTask;
     }
 
     public void Terminate()

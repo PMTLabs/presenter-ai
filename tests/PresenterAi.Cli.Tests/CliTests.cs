@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
 using PresenterAi.Cli;
+using PresenterAi.Application.Presenting;
 using PresenterAi.Infrastructure.Tests.Live;
 using Xunit;
 
@@ -71,6 +72,20 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Run_with_throwing_close_exits_1_and_writes_error()
+    {
+        await using var presenter = new ThrowingClosePresenter();
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await RunCommand.RunWithPresenterAsync(
+            new RunArguments("sample", 60, 1, null), presenter, output, error, CancellationToken.None);
+
+        exit.Should().Be(1);
+        error.ToString().Should().Contain("Run failed: close failed");
+    }
+
+    [Fact]
     public async Task Missing_key_exits_2_with_one_line()
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -100,6 +115,38 @@ public sealed class CliTests
 
         exit.Should().Be(2);
         error.ToString().Should().Contain("smoke requires --provider azure|openai");
+    }
+
+    private sealed class ThrowingClosePresenter : IPresenter
+    {
+        public event Action<PresenterSnapshot>? State;
+        public event Action<int>? Slide;
+        public event Action<PresenterAudio>? Audio { add { } remove { } }
+        public event Action<PresenterTranscript>? Transcript { add { } remove { } }
+        public event Action<PresenterUsage>? Usage { add { } remove { } }
+        public event Action<PresenterClosed>? Closed { add { } remove { } }
+        public event Action<PresenterLog>? Log { add { } remove { } }
+        public event Action<PresenterUpstreamError>? UpstreamError { add { } remove { } }
+
+        public PresenterSnapshot Snapshot() => new("presenting", "sample", "sample", 0, 3, false, false, "test", null, 0, 200);
+
+        public Task<bool> StartAsync(string id, int? fromIndex = null, CancellationToken cancellationToken = default)
+        {
+            State?.Invoke(Snapshot());
+            Slide?.Invoke(1);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> NextAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> PrevAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> GotoAsync(int index, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> PauseAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> ResumeAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> MuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> UnmuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> EndAsync(CancellationToken cancellationToken = default) => Task.FromException<bool>(new InvalidOperationException("close failed"));
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static IConfiguration Configuration(FakeLiveServer fake, Dictionary<string, string?> overrides)

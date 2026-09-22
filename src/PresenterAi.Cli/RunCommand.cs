@@ -7,7 +7,7 @@ using PresenterAi.Application.Presenting;
 
 namespace PresenterAi.Cli;
 
-internal static class RunCommand
+public static class RunCommand
 {
     public static async Task<int> RunAsync(
         RunArguments arguments,
@@ -16,13 +16,22 @@ internal static class RunCommand
         TextWriter error,
         CancellationToken cancellationToken)
     {
-        var stopwatch = Stopwatch.StartNew();
         var contentRoot = arguments.ContentRoot is null
             ? FindRepositoryRoot(Directory.GetCurrentDirectory())
             : Path.GetFullPath(arguments.ContentRoot, Directory.GetCurrentDirectory());
 
         await using var services = Program.BuildServices(configuration, contentRoot);
-        var presenter = services.GetRequiredService<IPresenter>();
+        return await RunWithPresenterAsync(arguments, services.GetRequiredService<IPresenter>(), output, error, cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<int> RunWithPresenterAsync(
+        RunArguments arguments,
+        IPresenter presenter,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var stopwatch = Stopwatch.StartNew();
         var closed = new TaskCompletionSource<PresenterClosed>(TaskCreationOptions.RunContinuationsAsynchronously);
         var lastRole = string.Empty;
         var line = new StringBuilder();
@@ -30,6 +39,7 @@ internal static class RunCommand
         var barMilliseconds = 0d;
         var voicedMilliseconds = 0d;
         var endRequested = 0;
+        Task? endTask = null;
 
         string At() => $"+{stopwatch.Elapsed.TotalSeconds:0.0}s";
 
@@ -70,15 +80,23 @@ internal static class RunCommand
 
         presenter.State += snapshot =>
             output.WriteLine($"{At()} state={snapshot.State} slide={snapshot.SlideIndex + 1}/{snapshot.SlideCount}{(snapshot.SessionId is null ? string.Empty : $" session={snapshot.SessionId}")}");
+        Task RequestEndAsync()
+        {
+            var task = presenter.EndAsync(CancellationToken.None);
+            Interlocked.CompareExchange(ref endTask, task, null);
+            return task;
+        }
+
         presenter.Slide += index =>
         {
             FlushLine();
             FlushBar();
             output.WriteLine($"{At()} ===== SLIDE {index + 1} =====");
+            // Same semantics as scripts/headless-run.mjs: the stop fires when slide N+1 is announced, so N slides are narrated.
             if (arguments.StopAfterSlide > 0 && index + 1 > arguments.StopAfterSlide && Interlocked.Exchange(ref endRequested, 1) == 0)
             {
                 output.WriteLine($"{At()} stop-after-slide reached; ending");
-                _ = presenter.EndAsync(CancellationToken.None);
+                RequestEndAsync();
             }
         };
         presenter.Transcript += transcript =>
@@ -135,11 +153,18 @@ internal static class RunCommand
             }
 
             var timeout = Task.Delay(TimeSpan.FromSeconds(arguments.MaxSeconds), cancellationToken);
-            var completed = await Task.WhenAny(closed.Task, timeout).ConfigureAwait(false);
+            var completed = endTask is null
+                ? await Task.WhenAny(closed.Task, timeout).ConfigureAwait(false)
+                : await Task.WhenAny(closed.Task, timeout, endTask).ConfigureAwait(false);
             if (completed == timeout && !closed.Task.IsCompleted && Interlocked.Exchange(ref endRequested, 1) == 0)
             {
                 output.WriteLine($"{At()} max-seconds reached; ending");
-                await presenter.EndAsync(CancellationToken.None).ConfigureAwait(false);
+                await RequestEndAsync().ConfigureAwait(false);
+            }
+
+            if (endTask is not null)
+            {
+                await endTask.ConfigureAwait(false);
             }
 
             PresenterClosed result;

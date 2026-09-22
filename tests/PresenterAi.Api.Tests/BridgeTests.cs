@@ -117,13 +117,23 @@ public sealed class BridgeTests
     }
 
     [Fact]
-    public async Task Client_that_cannot_drain_is_closed_1011()
+    public async Task Client_that_cannot_drain_fills_outbound_queue_and_is_closed_1011()
     {
-        await using var fake = await FakeLiveServer.StartAsync();
+        await using var fake = await FakeLiveServer.StartAsync(audioDeltasPerAppend: 50);
         using var factory = BridgeTestSupport.Factory(fake);
+        var sendGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sends = 0;
+        factory.Services.GetRequiredService<PresenterBridge>().ConfigureOutboundForTest(
+            2,
+            () => Interlocked.Increment(ref sends) == 1 ? Task.CompletedTask : sendGate.Task);
         using var socket = await BridgeTestSupport.ConnectAsync(factory);
-        // Test seam drives exactly the same full-channel failure path without relying on TestServer transport buffers.
-        factory.Services.GetRequiredService<PresenterBridge>().ForceBackpressureForTest();
+
+        // TestServer buffers socket writes, so block the real writer before SendAsync. The live server then emits
+        // enough audio/transcript frames to make ClientConnection.Enqueue observe TryWrite == false.
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await BridgeTestSupport.WaitForAsync(() => fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.instructions.append"));
+        sendGate.TrySetResult();
+
         WebSocketReceiveResult close;
         do
         {

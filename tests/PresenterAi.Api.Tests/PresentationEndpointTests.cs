@@ -49,6 +49,16 @@ public sealed class PresentationEndpointTests(ApiFactory factory) : IClassFixtur
     }
 
     [Fact]
+    public async Task Deck_file_is_served_from_the_content_root()
+    {
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/decks/sample/index.html");
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.OK);
+        response.Content.Headers.ContentType!.MediaType.Should().Be("text/html");
+        (await response.Content.ReadAsStringAsync()).Should().Contain("<html");
+    }
+
+    [Fact]
     public async Task Static_ui_has_no_cache_header()
     {
         using var client = factory.CreateClient();

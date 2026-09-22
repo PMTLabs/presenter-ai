@@ -55,9 +55,6 @@ builder.Services.AddOpenApi(options => options.AddDocumentTransformer((document,
 
 var app = builder.Build();
 app.UseExceptionHandler();
-app.UseWebSockets();
-app.UseAuthentication();
-app.UseAuthorization();
 
 var contentOptions = app.Services.GetRequiredService<IOptions<ContentOptions>>().Value;
 var rootDir = Path.GetFullPath(contentOptions.RootDir, app.Environment.ContentRootPath);
@@ -73,6 +70,13 @@ app.UseStaticFiles(new StaticFileOptions
     FileProvider = new PhysicalFileProvider(webRoot),
     OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache"
 });
+// Routing must come AFTER the static file middleware: with the implicit UseRouting at the top of the
+// pipeline the "/decks/{**path}" 404 endpoint is selected first and StaticFileMiddleware then skips
+// every deck file (found by the T11 Chrome run: "Deck not found: /ricoh/index.html").
+app.UseRouting();
+app.UseWebSockets();
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapHealthEndpoints();
 app.MapPresentationEndpoints();

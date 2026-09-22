@@ -16,6 +16,8 @@ public sealed class PresenterBridge : IAsyncDisposable
     private readonly IPresenter _presenter;
     private readonly ILogger<PresenterBridge> _logger;
     private ClientConnection? _client;
+    private int _outboundCapacity = 500;
+    private Func<Task>? _beforeSocketSendAsync;
 
     public PresenterBridge(IPresenter presenter, ILogger<PresenterBridge> logger)
     {
@@ -44,7 +46,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
 
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-        var connection = new ClientConnection(socket, _logger);
+        var connection = new ClientConnection(socket, _logger, Volatile.Read(ref _outboundCapacity), Volatile.Read(ref _beforeSocketSendAsync));
         if (Interlocked.CompareExchange(ref _client, connection, null) is not null)
         {
             await SendBusyAsync(socket, context.RequestAborted).ConfigureAwait(false);
@@ -186,7 +188,17 @@ public sealed class PresenterBridge : IAsyncDisposable
         catch (Exception exception) { _logger.LogError(exception, "Presenter end after browser disconnect failed"); }
     }
 
-    internal void ForceBackpressureForTest() => Current?.FailForBackpressure();
+    internal void ConfigureOutboundForTest(int capacity, Func<Task>? beforeSocketSendAsync)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
+        if (Current is not null)
+        {
+            throw new InvalidOperationException("Configure the outbound test seam before connecting a browser.");
+        }
+
+        _outboundCapacity = capacity;
+        _beforeSocketSendAsync = beforeSocketSendAsync;
+    }
 
     internal Task StopCurrentWriterForTestAsync() => Current?.StopWriterForTestAsync() ?? Task.CompletedTask;
 
@@ -218,19 +230,22 @@ public sealed class PresenterBridge : IAsyncDisposable
         private readonly WebSocket _socket;
         private readonly ILogger _logger;
         private readonly CancellationTokenSource _lifetime = new();
-        private readonly Channel<OutboundMessage> _outbound = Channel.CreateBounded<OutboundMessage>(new BoundedChannelOptions(500)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false
-        });
+        private readonly Channel<OutboundMessage> _outbound;
+        private readonly Func<Task>? _beforeSocketSendAsync;
         private readonly Task _writer;
         private int _failed;
 
-        public ClientConnection(WebSocket socket, ILogger logger)
+        public ClientConnection(WebSocket socket, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
         {
             _socket = socket;
             _logger = logger;
+            _beforeSocketSendAsync = beforeSocketSendAsync;
+            _outbound = Channel.CreateBounded<OutboundMessage>(new BoundedChannelOptions(outboundCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false
+            });
             _writer = Task.Run(WriteLoopAsync);
         }
 
@@ -240,6 +255,11 @@ public sealed class PresenterBridge : IAsyncDisposable
             {
                 await foreach (var message in _outbound.Reader.ReadAllAsync(_lifetime.Token).ConfigureAwait(false))
                 {
+                    if (_beforeSocketSendAsync is not null)
+                    {
+                        await _beforeSocketSendAsync().WaitAsync(_lifetime.Token).ConfigureAwait(false);
+                    }
+
                     await _socket.SendAsync(message.Bytes, message.Binary ? WebSocketMessageType.Binary : WebSocketMessageType.Text, true, _lifetime.Token).ConfigureAwait(false);
                 }
             }

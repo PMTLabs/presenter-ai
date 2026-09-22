@@ -23,7 +23,10 @@
 #   - a bare code identifier name (`ItemKey = "PresenterAi.ProblemTrace"`, `var apiKey = "…"`) is a
 #     program constant, not configuration: its quoted value is reported only with the `sk-` prefix.
 #   Not covered (outside this guard's class): values split across lines, encoded blobs, secrets stored
-#   under names that end in another word, and the guard's own fixture file
+#   under names that end in another word, names or values written with JSON/YAML escape sequences
+#   (`"Key"` decodes to `Key` but the guard matches the source spelling only — an escaped name is
+#   deliberate evasion, not the accidental commit this guard exists for; review round 2, F3), and the
+#   guard's own fixture file
 #   `scripts/secrets-guard.selftest.sh` (excluded from the scan; it holds the must-fail examples that
 #   pin every bullet above).
 #
