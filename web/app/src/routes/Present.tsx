@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { Link, useParams } from "react-router-dom";
 import apiClient, { type components } from "@presenter/shared/api";
 import { errorMessages, isProblem } from "@presenter/shared";
@@ -11,6 +12,59 @@ import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
 import { LogPanel } from "../components/LogPanel";
 type Detail = components["schemas"]["PresentationDetail"];
+
+const startButtonClassName = [
+  "rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white",
+  "hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40",
+].join(" ");
+const actionButtonClassName = [
+  "rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900",
+  "hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40",
+  "dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700",
+].join(" ");
+const endButtonClassName = [
+  "rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white",
+  "hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40",
+].join(" ");
+const presenterStorage = {
+  getItem(key: string) {
+    try {
+      const storageKey = key.replace("react-resizable-panels:", "");
+      return window.localStorage.getItem(storageKey);
+    } catch {
+      return null;
+    }
+  },
+  setItem(key: string, value: string) {
+    try {
+      const storageKey = key.replace("react-resizable-panels:", "");
+      window.localStorage.setItem(storageKey, value);
+    } catch {
+      // Private browsing can reject localStorage writes; use the in-memory layout instead.
+    }
+  },
+};
+
+function useDesktopLayout() {
+  const query = "(min-width: 1024px)";
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(query).matches
+      : false,
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia(query);
+    const update = () => setIsDesktop(mediaQuery.matches);
+    update();
+    mediaQuery.addEventListener("change", update);
+    return () => mediaQuery.removeEventListener("change", update);
+  }, []);
+
+  return isDesktop;
+}
+
 export function Present() {
   const { id = "" } = useParams();
   const frame = useRef<HTMLIFrameElement>(null);
@@ -193,17 +247,28 @@ export function Present() {
       });
   }, [presentation, snapshot, transcript, logs]);
   const live = snapshot.state === "presenting" || snapshot.state === "paused";
+  const isDesktop = useDesktopLayout();
+  const { defaultLayout, onLayoutChanged } = useDefaultLayout({
+    id: "presenter-split",
+    storage: presenterStorage,
+    onlySaveAfterUserInteractions: true,
+  });
   return (
-    <section>
-      <Link className="text-sm text-blue-600" to="/">
+    <section
+      className={[
+        "flex h-[calc(100vh-4rem)] min-h-0 min-w-0 flex-col overflow-hidden px-4",
+        "text-gray-900 dark:text-gray-100",
+      ].join(" ")}
+    >
+      <Link className="flex-none text-sm text-blue-600" to="/">
         ← Library
       </Link>
       {error && (
-        <p className="mt-4 rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
+        <p className="mt-4 flex-none rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
           {error}
         </p>
       )}
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="mt-3 flex flex-none flex-wrap gap-2">
         <span className="rounded-full bg-blue-100 px-3 py-1 text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
           {snapshot.state}
         </span>
@@ -213,62 +278,113 @@ export function Present() {
           buf {bufferedMs} ms
         </span>
       </div>
-      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(20rem,1fr)]">
-        <div>
-          <iframe
-            ref={frame}
-            title="Presentation deck"
-            className="h-[70vh] w-full rounded-xl border bg-white"
-          />
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => void begin()}
-              disabled={snapshot.state !== "idle"}
-            >
-              Start
-            </button>
-            <button
-              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
-              onClick={() =>
-                snapshot.state === "paused"
-                  ? client.current?.resume()
-                  : client.current?.pause()
-              }
-              disabled={!live}
-            >
-              {snapshot.state === "paused" ? "Resume" : "Pause"}
-            </button>
-            <button className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700" onClick={() => client.current?.prev()} disabled={!live}>
-              Prev
-            </button>
-            <button className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700" onClick={() => client.current?.next()} disabled={!live}>
-              Next
-            </button>
-            <button
-              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:hover:bg-gray-700"
-              onClick={() => {
-                if (snapshot.muted) client.current?.unmute();
-                else client.current?.mute();
-              }}
-              disabled={!live}
-            >
-              {snapshot.muted ? "Unmute" : "Mute"}
-            </button>
-            <button
-              className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
-              onClick={() => client.current?.end()}
-              disabled={snapshot.state === "idle"}
-            >
-              End
-            </button>
+      <Group
+        orientation={isDesktop ? "horizontal" : "vertical"}
+        id="presenter-split"
+        defaultLayout={defaultLayout}
+        onLayoutChanged={onLayoutChanged}
+        className="mt-4 min-h-0 min-w-0 flex-1 overflow-hidden"
+      >
+        <Panel
+          id="deck"
+          defaultSize="70%"
+          minSize={isDesktop ? 480 : "35%"}
+          className="min-h-0 min-w-0 overflow-hidden"
+        >
+          <div
+            className={[
+              "flex h-full min-h-0 min-w-0 flex-col bg-gray-100",
+              "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
+            ].join(" ")}
+          >
+            <div className="min-h-0 min-w-0 flex-1 p-1">
+              <iframe
+                ref={frame}
+                title="Presentation deck"
+                className={[
+                  "h-full w-full rounded-xl border border-gray-200 bg-white text-gray-900",
+                  "dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100",
+                ].join(" ")}
+              />
+            </div>
+            <div className="flex flex-none flex-wrap gap-2 p-3">
+              <button
+                className={startButtonClassName}
+                onClick={() => void begin()}
+                disabled={snapshot.state !== "idle"}
+              >
+                Start
+              </button>
+              <button
+                className={actionButtonClassName}
+                onClick={() =>
+                  snapshot.state === "paused"
+                    ? client.current?.resume()
+                    : client.current?.pause()
+                }
+                disabled={!live}
+              >
+                {snapshot.state === "paused" ? "Resume" : "Pause"}
+              </button>
+              <button
+                className={actionButtonClassName}
+                onClick={() => client.current?.prev()}
+                disabled={!live}
+              >
+                Prev
+              </button>
+              <button
+                className={actionButtonClassName}
+                onClick={() => client.current?.next()}
+                disabled={!live}
+              >
+                Next
+              </button>
+              <button
+                className={actionButtonClassName}
+                onClick={() => {
+                  if (snapshot.muted) client.current?.unmute();
+                  else client.current?.mute();
+                }}
+                disabled={!live}
+              >
+                {snapshot.muted ? "Unmute" : "Mute"}
+              </button>
+              <button
+                className={endButtonClassName}
+                onClick={() => client.current?.end()}
+                disabled={snapshot.state === "idle"}
+              >
+                End
+              </button>
+            </div>
           </div>
-        </div>
-        <aside className="space-y-4">
-          <Transcript />
-          <LogPanel />
-        </aside>
-      </div>
+        </Panel>
+
+        <Separator
+          className={
+            isDesktop
+              ? "w-2 cursor-col-resize bg-gray-200 hover:bg-blue-500 dark:bg-gray-800"
+              : "h-2 w-full cursor-row-resize bg-gray-200 hover:bg-blue-500 dark:bg-gray-800"
+          }
+        />
+        <Panel
+          id="side"
+          defaultSize="30%"
+          minSize={isDesktop ? 320 : "20%"}
+          className="min-h-0 min-w-0 overflow-hidden"
+        >
+          <aside
+            className={[
+              "flex h-full min-h-0 flex-col gap-4 overflow-auto bg-gray-50 p-3",
+              "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
+            ].join(" ")}
+          >
+            <Transcript />
+            <LogPanel />
+          </aside>
+        </Panel>
+      </Group>
     </section>
   );
 }

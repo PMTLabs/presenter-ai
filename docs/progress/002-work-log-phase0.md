@@ -295,3 +295,32 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   reported the control bar was invisible — plain buttons on the dark theme — styled in the same commit), End →
   `closed usage=29.6 s` → `idle` with the audio context released (`__presenterDebug().audio === null`). During that run
   the user spoke to the presenter (`You: Can you speak Vietnamese` → answered) — the AC5 spoken-question check is done.
+
+### Dark-theme text colour (Claude, user report "the transcript is dim") — done
+
+- Root cause: neither app root nor any `dark:bg-*` surface set a dark text colour, so the transcript inherited the
+  light-theme grey on a near-black card. Fixed as a class: base text on both app roots and on every surface with its
+  own background (transcript, pills, cards, admin layout); verified by computed styles in Chrome. Commit `9a7b0ee`.
+
+### T17 — fluid presenter layout + resizable split (user-added; pi gpt-5.6-luna:high) — done
+
+- User survey decisions: `react-resizable-panels` v4 (`Group`/`Panel`/`Separator`, `useDefaultLayout`), horizontal
+  split only (deck | transcript-over-log), full viewport height below the header, split remembered per browser.
+- Implementation: `App.tsx` drops the `max-w-7xl` main (Library keeps its own `max-w-7xl p-6`); `Present.tsx` is
+  `h-[calc(100vh-4rem)]` with 16 px gutters, `Group id="presenter-split"` (horizontal at `lg`, vertical below via a
+  `matchMedia` hook), deck `70%` / side `30%`, pixel minimums on desktop (480 / 320) and percentage minimums when
+  stacked (35 % / 20 %, so a phone-height viewport can still satisfy both), `Separator` focusable and keyboard
+  resizable, `useDefaultLayout({ id: "presenter-split", onlySaveAfterUserInteractions: true })` behind a try/catch
+  storage adapter that stores under the plain `presenter-split` key; Transcript and Log are `flex-1 min-h-0` regions.
+  New dep `react-resizable-panels@4.13.2`; `vitest` gets `testSetup.ts` (jsdom `ResizeObserver` shim).
+- Tests: `Present.layout.spec.tsx` (group id + two panels + `role="separator"`, deck in the first panel and transcript
+  in the second, `presenter-split` read from localStorage). Mutation: removing `<Separator/>` fails the first test
+  (`expected null not to be null`). App vitest 21, lint clean, both builds, `generate:api` no drift.
+- Chrome check on `/present/sample` (viewport 1707×842, dark): section spans the full width with 16 px gutters
+  (deck 1289 | separator 8 | side 379 px), section bottom = viewport bottom (no page scroll), deck iframe fills the
+  pane height with the control bar below it, heading colour `rgb(243,244,246)`. Keyboard resize (ArrowLeft/Right on
+  the separator) and a pointer drag both move the split and persist it (`{"deck":58.8,"side":41.2}`); reload restores
+  it. Start → `presenting` (transcript + log flowing in the side pane) → End → `closed: reason=client_request
+  usage=25.8 s` → `idle`. Not verified in a browser: the stacked layout below `lg` (the window resize was ignored by
+  the maximised Chrome window); the Claude-in-Chrome `left_click_drag` does not emit pointer events, so the drag was
+  driven with synthetic `PointerEvent`s.
