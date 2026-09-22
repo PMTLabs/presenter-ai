@@ -241,3 +241,32 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   transcript grouped by turn. AC4 met.
 - Operational: Ctrl-C in the termflow terminal did not stop the API process (it kept 47913, the new instance queued);
   stop it by PID (`Stop-Process -Id <pid>` after `netstat -ano | findstr :47913`).
+
+### T14 — React presenter page (pi gpt-5.6-terra:medium, 2 rounds) — done
+
+- 1:1 port of `src/web/*`: `ws/bridgeClient.ts` (auth-first `{"type":"auth","ticket":"dev"}`, frozen commands, 500 ms ×2ⁿ
+  reconnect capped at 10 s, idle snapshot on close), `audio/{capture,playback}.ts` + worklets (listen-only when the
+  mic is denied), `deck/deckDriver.ts` (showFn / Reveal / sections / none), `store/presenterStore.ts`, four components,
+  `routes/Present.tsx` with the same keys and `__presenterDebug`; `web/shared/src/auth/devSignIn.ts` is the single
+  source of the Dev user and ticket. vitest: app 11 (mandatory `detects showFn deck`, `start sends presentation id`,
+  `sends auth frame first`, `reconnects with backoff`, `continues listen-only when mic denied`, + `SlidePill.spec`).
+- First round skipped the manual run; Claude's Chrome run hit "Maximum update depth exceeded" in `<SlidePill>`
+  (zustand selector returning a fresh object under React 19). Continuation fixed the class (every selector returns a
+  stored reference; `Present` no longer subscribes to the whole store), added `SlidePill.spec.tsx` (fails on the old
+  selector with the max-depth error) and reformatted the one-line files. The generated client lacked the `{id}` path
+  parameter — an API defect: `[FromRoute]` on `LoadAsync`, snapshot + `generated.d.ts` refreshed (`a4d84a7`), casts
+  removed. Commit `d5bbc56`.
+
+### T15 — Chrome run on the React app (Claude, Claude-in-Chrome) — done
+
+- Vite on 47914 proxying to the API on 47913 (published copy incl. the review-2 fixes): Library lists both decks via
+  the generated client; Sign in (Dev) shows "Dev user"; `/present/ricoh-delivery-overview` loads the deck (`showFn`,
+  11 slides), `connected to server`; `S` → `connecting` → `presenting` at +1 s, transcript turns grouped, audio
+  buffered (`bufferedMs` 161–227) with the mic **denied on this origin** (`micReady=false`, listen-only path exercised
+  for real); auto-advance 1 → 2; `→` → slide 3 (deck followed); Space → `paused`, Space → `presenting`; Esc →
+  `closed: reason=client_request usage=98.4 s` → `idle`; **usage pill `98.4 s`**. AC5 met except the spoken-question
+  check, which needs a human voice (the mic was denied for 47914; Chrome automation cannot speak).
+- Observations for review round 3 (not fixed): server `log` events appear twice in the React Log panel (`appended
+  thinking slide-2-notes` ×2) while the headless client and the Node page receive them once; `deck adapter` logged
+  twice (StrictMode double effect); `__presenterDebug().wsOpen` is derived from the presenter state, not the socket;
+  the upstream transcribed a spurious `You: a dark` user turn from the server-side silence pump (no mic).
