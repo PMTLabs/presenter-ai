@@ -1,6 +1,6 @@
 # 013 — Handoff: plan 004 review round 2 fixes committed, not pushed
 
-**Written:** 2026-09-22 18:40. This supersedes `012-handoff-plan-004-review-fixes.md`.
+**Written:** 2026-09-22 18:26. This supersedes `012-handoff-plan-004-review-fixes.md`.
 
 ## Goal
 
