@@ -44,7 +44,11 @@ open the PR (needs the user's explicit OK — outward-facing action).
 
 ## In progress
 
-1. **T17 — fluid layout + resizable split** — `pi luna:high`, terminal **`tm-cb77306ae`**, report `T17-report.md`
+> **Update 20:30 CDT:** T17 landed in `2d4af67` (verified in Chrome, final gate green: `-warnaserror` clean, .NET tests
+> 51/46/30/5, web shared 3 / app 21, no OpenAPI drift, secrets guard + self-test OK). The terminal is closed. Only the
+> "Next steps" below remain — step 4 needs the user's OK.
+
+1. **T17 — fluid layout + resizable split** (done, see update above) — `pi luna:high`, terminal **`tm-cb77306ae`**, report `T17-report.md`
    (monitor `blv00kiht`, health cron `ddc4c066` at 20:26 — both die with the session; re-arm). Decisions (user
    survey): `react-resizable-panels` **v4** (`Group`/`Panel`/`Separator`, `useDefaultLayout` id `presenter-split`,
    `onlySaveAfterUserInteractions`), horizontal split only (deck | transcript-over-log), deck pane fills the viewport
