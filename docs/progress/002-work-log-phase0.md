@@ -406,3 +406,29 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   owner-scoped contract plus an ownerless `IPresentationImportSource` for the importer.
 - G2 2026-09-22: plan approved at `docs/plan/004-identity-persistence-auth-state.md`, 14 tasks in three PRs.
   Implementation not started — it awaits an explicit instruction.
+
+### PR-A (T1, T2, T3, T12-config) — `7be5bd4`, `1164c7d`, `b9cd186`
+
+- Implemented by an external `pi` agent (`openai-codex/gpt-5.6-luna:high`); orchestrator reviewed the diff and
+  verified every claim rather than accepting the report.
+- Green at `b9cd186`: `dotnet build -warnaserror` 0/0; `dotnet test` 140 passed across five projects
+  (Application 52, Api 48, Infrastructure 30, Integration 5, Cli 5); `secrets-guard: clean`.
+- **Testcontainers needs `DOCKER_HOST=tcp://localhost:2375` on this Windows host** even though the `docker` CLI
+  works unaided — the daemon is in WSL and Testcontainers does not discover it. With it unset all 5 integration
+  tests fail, so the documented `dotnet test PresenterAi.slnx` breaks on a clean Windows checkout without it.
+  `AGENTS.md` and the fixture failure message now name that exact value; the agent's original `npipe:` suggestion
+  does not work here.
+- Orchestrator fixes on top of the agent's work: the agent had silenced the whole transitive NuGet audit
+  (`NuGetAuditMode=direct`) to get EF design-time tooling to restore. The real finding is
+  `System.Security.Cryptography.Xml` — every stable version carries eight advisories and only 11.0.0 previews
+  exist. Replaced with eight `NuGetAuditSuppress` entries by advisory id, so any *other* transitive advisory
+  (including a runtime one from Npgsql or StackExchange.Redis) still fails the build; mutation-tested by removing
+  one suppression and confirming the restore breaks. Also deduplicated the Docker help message into
+  `Support/DockerHelp.cs` and added the admin origin (47915) to the CORS example.
+- Verified rather than assumed: the Testcontainers fixtures are load-bearing (a dead `DOCKER_HOST` fails them with
+  the intended guidance), the Redis claims are genuinely atomic (`StringGetDeleteAsync` = `GETDEL`,
+  `When.NotExists` = `SET NX`), every column of plan §4.3 is mapped including `presentations.context` and
+  `external_logins.provider_email_verified`, and ids are `prefix_` + 16 hex chars per conventions §3.
+- Known forward risk handed to PR-B: `AddPersistence`/`AddRedis` connect and throw at *registration* time, so
+  calling them from `Program.cs` would make all 48 `Api.Tests` need live Postgres and Redis. PR-B's brief
+  therefore specifies eager config validation with a lazy connection, plus reachability on `/health`.
