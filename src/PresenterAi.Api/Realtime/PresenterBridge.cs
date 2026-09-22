@@ -19,9 +19,10 @@ public sealed class PresenterBridge : IAsyncDisposable
     private const string BusyMessage = "Another presenter page is already connected. Close it first.";
     // LiveSession.CloseAsync is itself bounded, so only a wedged presenter loop reaches this.
     private static readonly TimeSpan EndToIdleBound = TimeSpan.FromSeconds(5);
-    // LiveSession spends up to two 10-second handshakes per attempt (connect and session-start), and Presenter
-    // tries at most four routes. Leave ten seconds for the repository load: 10 + (4 * 2 * 10) = 90 seconds.
-    // This observes the real queued start before cleanup without allowing a wedged load to retain the slot forever.
+    // There are at most two routes (primary and an optional fallback), each with two 10-second handshakes
+    // (LiveSessionOptions.HandshakeTimeout). Repository load is bounded only by Npgsql's retry strategy.
+    // Beyond this 90-second observation bound cleanup proceeds; a run lost in that window is best-effort
+    // recording (D8).
     private static readonly TimeSpan StartObservationBound = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ServerCloseBound = TimeSpan.FromSeconds(1);
     private const int MaxAuthenticationFrameBytes = 4 * 1024;

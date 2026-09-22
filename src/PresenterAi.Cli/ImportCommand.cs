@@ -109,6 +109,8 @@ public static class ImportCommand
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 db.ChangeTracker.Clear();
+                if (Program.IsDatabaseFailure(exception))
+                    throw;
                 await output.WriteLineAsync($"{path}: failed: {exception.Message}").ConfigureAwait(false);
                 failed++;
             }

@@ -79,6 +79,34 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task Per_file_database_failure_stops_import_at_the_command_boundary()
+    {
+        var owner = await SeedUserAsync();
+        await using (var context = CreateContext())
+            await context.Database.ExecuteSqlRawAsync("ALTER TABLE presentations RENAME TO presentations_import_failure");
+
+        try
+        {
+            var root = FindRepositoryRoot();
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await PresenterAi.Cli.Program.RunAsync(
+                ["import", Path.Combine(root, "presentations", "sample.md"), "--owner", owner.Email, "--content-root", root],
+                Configuration(), output, error, CancellationToken.None);
+
+            exit.Should().Be(1);
+            error.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                .Should().ContainSingle().Which.Should().StartWith("Database error: ");
+            output.ToString().Should().NotContain("failed:");
+        }
+        finally
+        {
+            await using var context = CreateContext();
+            await context.Database.ExecuteSqlRawAsync("ALTER TABLE presentations_import_failure RENAME TO presentations");
+        }
+    }
+
+    [Fact]
     public async Task A_disabled_owner_exits_non_zero_and_writes_no_rows()
     {
         var owner = await SeedUserAsync(disabled: true);

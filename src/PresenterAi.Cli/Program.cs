@@ -74,6 +74,9 @@ public static class Program
         }
     }
 
+    internal static bool IsDatabaseFailure(Exception exception) =>
+        FindPostgresException(exception) is not null || IsDatabaseConnectivityFailure(exception);
+
     internal static bool IsDatabaseConnectivityFailure(Exception exception)
     {
         for (Exception? current = exception; current is not null; current = current.InnerException)
