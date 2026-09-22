@@ -151,6 +151,7 @@ app.MapHealthEndpoints();
 app.MapPresentationEndpoints();
 app.MapConfigEndpoints();
 app.MapAuthEndpoints(builder.Configuration, app.Environment);
+app.MapSessionEndpoints();
 app.MapPresenterBridge();
 app.MapOpenApi("/openapi/v1.json");
 app.MapGet("/decks/{**path}", async (HttpContext context) =>

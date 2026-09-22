@@ -93,7 +93,11 @@ export function Present() {
     setMicReady(false);
   }, [setMicReady]);
   useEffect(() => {
-    const bridge = new BridgeClient();
+    const bridge = new BridgeClient(undefined, undefined, async () => {
+      const { data, error: requestError } = await apiClient.POST("/v1/sessions/ticket");
+      if (requestError || !data) throw new Error("Unable to obtain a session ticket.");
+      return data.ticket;
+    });
     client.current = bridge;
     bridge.on("state", applySnapshot);
     bridge.on("slide", (index) => {

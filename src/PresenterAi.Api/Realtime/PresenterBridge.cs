@@ -3,9 +3,12 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using PresenterAi.Api.Errors;
+using Microsoft.Extensions.Options;
+using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
 using PresenterAi.Contracts;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Infrastructure.Redis;
 
 namespace PresenterAi.Api.Realtime;
 
@@ -15,14 +18,24 @@ public sealed class PresenterBridge : IAsyncDisposable
     private const string BusyMessage = "Another presenter page is already connected. Close it first.";
     private readonly IPresenter _presenter;
     private readonly ILogger<PresenterBridge> _logger;
+    private readonly ITicketStore _ticketStore;
+    private readonly TimeSpan _authFrameTimeout;
+    private readonly SemaphoreSlim _pendingAuth;
     private ClientConnection? _client;
     private int _outboundCapacity = 500;
     private Func<Task>? _beforeSocketSendAsync;
 
-    public PresenterBridge(IPresenter presenter, ILogger<PresenterBridge> logger)
+    public PresenterBridge(
+        IPresenter presenter,
+        ILogger<PresenterBridge> logger,
+        ITicketStore ticketStore,
+        IOptions<SessionRedisOptions> sessionOptions)
     {
         _presenter = presenter;
         _logger = logger;
+        _ticketStore = ticketStore;
+        _authFrameTimeout = TimeSpan.FromSeconds(sessionOptions.Value.AuthFrameTimeoutSeconds);
+        _pendingAuth = new SemaphoreSlim(sessionOptions.Value.MaxPendingAuthConnections, sessionOptions.Value.MaxPendingAuthConnections);
         // One process-wide subscription: handlers never block the Presenter loop and only route to its owner.
         presenter.State += state => Current?.EnqueueText(StateFrame(state));
         presenter.Slide += index => Current?.EnqueueText(new { type = "slide", index });
@@ -46,7 +59,11 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
 
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-        var connection = new ClientConnection(socket, _logger, Volatile.Read(ref _outboundCapacity), Volatile.Read(ref _beforeSocketSendAsync));
+        var userId = await AuthenticateAsync(socket, context.RequestAborted).ConfigureAwait(false);
+        if (userId is null)
+            return;
+
+        var connection = new ClientConnection(socket, userId, _logger, Volatile.Read(ref _outboundCapacity), Volatile.Read(ref _beforeSocketSendAsync));
         if (Interlocked.CompareExchange(ref _client, connection, null) is not null)
         {
             await SendBusyAsync(socket, context.RequestAborted).ConfigureAwait(false);
@@ -54,6 +71,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             return;
         }
 
+        _logger.LogDebug("Presenter WebSocket authenticated for user {UserId}", connection.UserId);
         try
         {
             connection.EnqueueText(StateFrame(_presenter.Snapshot()));
@@ -74,6 +92,89 @@ public sealed class PresenterBridge : IAsyncDisposable
             {
                 await ObserveEndAsync().ConfigureAwait(false);
             }
+        }
+    }
+
+    private async Task<string?> AuthenticateAsync(WebSocket socket, CancellationToken requestCancellation)
+    {
+        if (!_pendingAuth.Wait(0))
+        {
+            await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+            return null;
+        }
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(requestCancellation);
+            timeout.CancelAfter(_authFrameTimeout);
+            var buffer = new byte[16 * 1024];
+            using var frame = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(buffer, timeout.Token).ConfigureAwait(false);
+                if (result.MessageType != WebSocketMessageType.Text)
+                {
+                    await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                    return null;
+                }
+
+                frame.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+
+            using var document = JsonDocument.Parse(frame.ToArray());
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var type)
+                || type.ValueKind != JsonValueKind.String
+                || !string.Equals(type.GetString(), "auth", StringComparison.Ordinal)
+                || !root.TryGetProperty("ticket", out var ticket)
+                || ticket.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(ticket.GetString()))
+            {
+                await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                return null;
+            }
+
+            var userId = await _ticketStore.ClaimAsync(ticket.GetString()!, timeout.Token).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+                return null;
+            }
+
+            return userId;
+        }
+        catch (OperationCanceledException)
+        {
+            if (!requestCancellation.IsCancellationRequested)
+                await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogDebug(exception, "WebSocket ticket authentication failed");
+            await CloseInvalidTicketAsync(socket).ConfigureAwait(false);
+            return null;
+        }
+        finally
+        {
+            _pendingAuth.Release();
+        }
+    }
+
+    private static async Task CloseInvalidTicketAsync(WebSocket socket)
+    {
+        if (socket.State is not (WebSocketState.Open or WebSocketState.CloseReceived))
+            return;
+
+        try
+        {
+            await socket.CloseAsync((WebSocketCloseStatus)4401, "session.ticket_invalid", CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (WebSocketException)
+        {
         }
     }
 
@@ -131,7 +232,9 @@ public sealed class PresenterBridge : IAsyncDisposable
             switch (type)
             {
                 case "auth":
-                    _logger.LogDebug("WebSocket auth frame accepted and ignored during Dev auth transition");
+                    // The first auth frame is consumed by AuthenticateAsync. Keep later auth frames
+                    // harmless for clients that retry their handshake after connecting.
+                    _logger.LogDebug("WebSocket auth frame received for user {UserId}", connection.UserId);
                     return;
                 case "start":
                     if (!document.RootElement.TryGetProperty("presentation", out var presentation) || presentation.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(presentation.GetString()))
@@ -141,6 +244,7 @@ public sealed class PresenterBridge : IAsyncDisposable
                     }
 
                     int? fromIndex = document.RootElement.TryGetProperty("fromIndex", out var from) && from.TryGetInt32(out var value) ? value : null;
+                    _logger.LogDebug("Starting presentation {PresentationId} for user {UserId}", presentation.GetString(), connection.UserId);
                     ObserveCommand(_presenter.StartAsync(presentation.GetString()!, fromIndex, cancellationToken), connection, "start", true);
                     return;
                 case "next": ObserveCommand(_presenter.NextAsync(cancellationToken), connection, type, false); return;
@@ -229,15 +333,17 @@ public sealed class PresenterBridge : IAsyncDisposable
     {
         private readonly WebSocket _socket;
         private readonly ILogger _logger;
+        public string UserId { get; }
         private readonly CancellationTokenSource _lifetime = new();
         private readonly Channel<OutboundMessage> _outbound;
         private readonly Func<Task>? _beforeSocketSendAsync;
         private readonly Task _writer;
         private int _failed;
 
-        public ClientConnection(WebSocket socket, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
+        public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
         {
             _socket = socket;
+            UserId = userId;
             _logger = logger;
             _beforeSocketSendAsync = beforeSocketSendAsync;
             _outbound = Channel.CreateBounded<OutboundMessage>(new BoundedChannelOptions(outboundCapacity)
@@ -326,7 +432,6 @@ public static class PresenterBridgeEndpoints
     public static IEndpointRouteBuilder MapPresenterBridge(this IEndpointRouteBuilder endpoints)
     {
         endpoints.Map("/ws", (HttpContext context, PresenterBridge bridge) => bridge.HandleAsync(context))
-            .RequireAuthorization()
             .WithName("PresenterBridge")
             .ExcludeFromDescription();
         return endpoints;

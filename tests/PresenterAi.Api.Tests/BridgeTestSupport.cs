@@ -2,7 +2,9 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.DependencyInjection;
 using PresenterAi.Api.Tests.Infrastructure;
+using PresenterAi.Application.Auth;
 using PresenterAi.Infrastructure.Tests.Live;
 
 namespace PresenterAi.Api.Tests;
@@ -19,20 +21,26 @@ internal static class BridgeTestSupport
         }
     };
 
-    public static Microsoft.AspNetCore.TestHost.WebSocketClient AuthenticatedWebSocketClient(ApiFactory factory)
-    {
-        var client = factory.Server.CreateWebSocketClient();
-        client.ConfigureRequest = request => request.Headers.Authorization =
-            $"Bearer {ApiFactory.CreateTestToken("test-user", "test@presenter-ai.local")}";
-        return client;
-    }
-
     public static async Task<WebSocket> ConnectAsync(ApiFactory factory)
     {
-        var socket = await AuthenticatedWebSocketClient(factory).ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        var socket = await ConnectWithTicketAsync(factory);
         _ = await ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "state");
         return socket;
     }
+
+    public static async Task<WebSocket> ConnectWithTicketAsync(ApiFactory factory)
+    {
+        var ticket = Guid.NewGuid().ToString("N");
+        await factory.Services.GetRequiredService<ITicketStore>().IssueAsync(ticket, "test-user");
+        var socket = await factory.Server.CreateWebSocketClient()
+            .ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
+        await SendAsync(socket, $"{{\"type\":\"auth\",\"ticket\":\"{ticket}\"}}");
+        return socket;
+    }
+
+    public static async Task<WebSocket> ConnectAnonymousAsync(ApiFactory factory) =>
+        await factory.Server.CreateWebSocketClient()
+            .ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
 
     public static async Task SendAsync(WebSocket socket, string text) =>
         await socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, CancellationToken.None);
@@ -80,6 +88,12 @@ internal static class BridgeTestSupport
         return result.MessageType == WebSocketMessageType.Binary
             ? (null, stream.ToArray())
             : (Encoding.UTF8.GetString(stream.ToArray()), null);
+    }
+
+    public static async Task<WebSocketReceiveResult> ReceiveCloseAsync(WebSocket socket)
+    {
+        var result = await socket.ReceiveAsync(new byte[1024], CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        return result;
     }
 
     public static async Task WaitForAsync(Func<bool> condition)

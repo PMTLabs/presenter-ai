@@ -22,9 +22,7 @@ public sealed class BridgeStartTests
                 ["Presenter:AdvanceSilenceMs"] = "200"
             }
         };
-        var client = BridgeTestSupport.AuthenticatedWebSocketClient(factory);
-        using var socket = await client.ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
-        _ = await ReceiveTextAsync(socket);
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
         await socket.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"start\",\"presentation\":\"ricoh-delivery-overview\",\"fromIndex\":0}"), WebSocketMessageType.Text, true, CancellationToken.None);
         await WaitUntilAsync(() => fake.ReceivedSnapshot().Any(message =>
             message["type"]?.GetValue<string>() == "session.instructions.append"

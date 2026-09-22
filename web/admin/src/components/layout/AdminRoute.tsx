@@ -5,6 +5,6 @@ import { useAuthStore } from '@presenter/shared';
 
 export function AdminRoute({ children }: { children: ReactNode }) {
   const user = useAuthStore((state) => state.user);
-  if (user === null) return <Navigate to="/login" replace />;
+  if (user?.role !== "admin") return <Navigate to="/login" replace />;
   return <>{children}</>;
 }

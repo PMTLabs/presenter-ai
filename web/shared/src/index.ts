@@ -5,8 +5,15 @@ export type { ProblemDetails } from "./api/problem";
 export { ERROR_CODES } from "./api/errorCodes";
 export type { ErrorCode } from "./api/errorCodes";
 export { errorMessages } from "./api/errorMessages";
-export { useAuthStore } from "./auth/authStore";
-export type { AuthUser } from "./auth/authStore";
-export { DEV_TICKET, devUser, signInDev } from "./auth/devSignIn";
+export {
+  clearAuthSession,
+  getAccessToken,
+  hasAccessToken,
+  refreshAuth,
+  setAuthSession,
+  useAuthStore,
+} from "./auth/authStore";
+export type { AuthState, AuthTokenResponse, AuthUser } from "./auth/authStore";
+export { devUser } from "./auth/devSignIn";
 export { cn } from "./ui/cn";
 export { ThemeToggle } from "./ui/ThemeToggle";

@@ -1,8 +1,12 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using PresenterAi.Application.Auth;
 using Microsoft.IdentityModel.Tokens;
 
 namespace PresenterAi.Api.Tests.Infrastructure;
@@ -72,6 +76,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 builder.UseSetting(setting.Key, setting.Value);
             }
         }
+
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<ITicketStore>();
+            services.AddSingleton<ITicketStore, TestTicketStore>();
+        });
     }
 
     private static string FindRepositoryRoot()
@@ -88,5 +98,31 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         }
 
         throw new DirectoryNotFoundException("PresenterAi.slnx was not found above the test assembly.");
+    }
+}
+
+internal sealed class TestTicketStore : ITicketStore
+{
+    private readonly ConcurrentDictionary<string, (string UserId, DateTimeOffset ExpiresAt)> _tickets = new();
+
+    public Task IssueAsync(string ticketId, string userId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _tickets[ticketId] = (userId, DateTimeOffset.UtcNow.AddMinutes(1));
+        return Task.CompletedTask;
+    }
+
+    public Task<string?> ClaimAsync(string ticketId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!_tickets.TryRemove(ticketId, out var ticket) || ticket.ExpiresAt <= DateTimeOffset.UtcNow)
+            return Task.FromResult<string?>(null);
+        return Task.FromResult<string?>(ticket.UserId);
+    }
+
+    public void Expire(string ticketId)
+    {
+        if (_tickets.TryGetValue(ticketId, out var ticket))
+            _tickets[ticketId] = (ticket.UserId, DateTimeOffset.UtcNow.AddSeconds(-1));
     }
 }

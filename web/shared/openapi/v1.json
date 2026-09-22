@@ -21,7 +21,7 @@
             "description": "OK",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": { }
               }
             }
           },
@@ -29,7 +29,7 @@
             "description": "Service Unavailable",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": { }
               }
             }
           }
@@ -49,6 +49,46 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ConfigDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sessions/ticket": {
+      "post": {
+        "tags": [
+          "PresenterAi.Api"
+        ],
+        "operationId": "CreateSessionTicket",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTicketResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
                 }
               }
             }
@@ -728,6 +768,26 @@
               "null",
               "string"
             ]
+          }
+        }
+      },
+      "SessionTicketResponse": {
+        "required": [
+          "ticket",
+          "expiresInSeconds"
+        ],
+        "type": "object",
+        "properties": {
+          "ticket": {
+            "type": "string"
+          },
+          "expiresInSeconds": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
           }
         }
       },
