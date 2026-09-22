@@ -79,10 +79,12 @@ public sealed class AuthTests
     [Fact]
     public async Task Jwt_rejects_a_token_not_yet_valid_beyond_the_clock_skew()
     {
+        // nbf is written in whole seconds (truncated) and the host takes a moment to start, so a one-second margin
+        // lands inside the 30 s skew. 45 s stays well below the 5-minute default, so a dropped ClockSkew still fails.
         var now = DateTime.UtcNow;
         using var factory = new ApiFactory();
         using var client = ClientWith(factory, ApiFactory.CreateTestToken(
-            "test-user", "test@presenter-ai.local", notBefore: now.AddSeconds(31), expires: now.AddMinutes(10)));
+            "test-user", "test@presenter-ai.local", notBefore: now.AddSeconds(45), expires: now.AddMinutes(10)));
         (await client.GetAsync("/v1/config")).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
     }
 
