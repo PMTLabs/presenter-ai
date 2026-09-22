@@ -465,3 +465,32 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
 - Green at `0717d29`: build 0/0; **183 passed** (Application 52, Infrastructure 30, Api 75, Integration 21, Cli 5);
   Api and Cli pass with no container; web lint/build/test (shared 5, app 22); OpenAPI drift green with no `/api`
   paths left; `secrets-guard: clean`.
+
+### PR-C part 2 (T9, T10, T12-docs) — `e63a393`, `7332e81`, `4ac958d`
+
+- **User decision (D5):** `presenter-cli run --owner <email>` records exactly like `/ws`. Without `--owner`, `run`
+  stays file-backed and unrecorded. A local-file run has neither a user row nor a presentation row, and both are
+  required foreign keys on `sessions`. **D6:** a failed start writes no row, because `sessions.upstream` is NOT NULL.
+- Round 1 (fresh `pi` agent) reproduced 199 passing, but review found two recorder defects:
+  - the worker could finalise a row twice. When `Closed` and disconnect cleanup were both queued, the second write
+    replaced the upstream's close reason and billed seconds after the slot had been released;
+  - an end that arrived between a queued and a processed begin dropped the row of a run that had really started.
+
+  It also found four oracle gaps: waits that were satisfied at begin rather than at finalisation, the real
+  `Detach` untested, a fallback test that could not tell session ids apart, and a sleep before a negative
+  assertion. The first agent's context was 61% full, so round 2 went to a fresh agent together with `run --owner`.
+- Found by the orchestrator while doing T12-docs: both Vite dev proxies still forwarded `/api` rather than `/v1`,
+  so `bun run dev:app` could not reach sign-in or any `/v1` call. The gap dated from PR-B. Fixed in `7332e81`.
+- Mutations the orchestrator re-ran itself (each file backed up and restored byte for byte by md5); all five fail
+  a test:
+  - finalise-once removed;
+  - the bridge not awaiting the recorder barrier;
+  - `run --owner` not awaiting `EndAsync`;
+  - the importer never matching an existing row;
+  - a disabled owner accepted.
+
+  The agents reported a further nine (fallback label and session id, real and bridge detach, the begin/end race,
+  context path stored instead of text, and others).
+- Green at `4ac958d` (tree clean after commit): build 0/0; **206 passed** (Application 52, Infrastructure 31,
+  Api 78, Integration 36, Cli 9). Api and Cli pass with no container. Web lint/build/test (shared 5, app 22).
+  `secrets-guard: clean`.
