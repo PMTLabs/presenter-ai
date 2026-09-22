@@ -63,6 +63,10 @@ open the PR (needs the user's explicit OK — outward-facing action).
 
 ## Next steps
 
+> **Update 20:50 CDT:** steps 2–4 are done — `connected via` logged on every start (`38f41c3`), branch pushed, PR #1
+> https://github.com/PMTLabs/presenter-ai/pull/1 open against `develop`, CI green at `51e18d4` after one Linux-only
+> test fix. Remaining: step 5 (stop the API/Vite processes) and whatever review comments arrive on the PR.
+
 2. Optional (offered to the user, not yet accepted): log `[info] connected via <label>` on every successful start
    (today only for attempt > 0, `Presenter.cs:367`).
 3. Final gate again after T17: `dotnet build -warnaserror`, `dotnet test PresenterAi.slnx`, web CI chain, secrets guard.

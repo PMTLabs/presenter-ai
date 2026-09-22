@@ -332,3 +332,12 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   `[info] connected via primary` on the first attempt and keeps `[warn] connected via fallback` for later attempts.
   Oracles: `Successful_primary_start_logs_which_upstream_answered` (fails with the old `attempt > 0` guard — verified
   by mutation) and the fallback test asserts the `warn` line. Application tests 52.
+
+### Push + PR #1 (Claude, after the user's "go ahead") — CI green
+
+- `feature/002-dotnet-core-port` pushed; PR https://github.com/PMTLabs/presenter-ai/pull/1 → `develop`.
+- First CI runs: `web` green, `dotnet` red on one test —
+  `Loads_context_whether_or_not_the_root_has_a_trailing_separator("\\")`: on the Linux runner a literal `\` is a
+  file-name character, so the root became a missing directory. The theory now takes its suffixes from
+  `Path.DirectorySeparatorChar` / `Path.AltDirectorySeparatorChar` (still `\` + `/` on Windows); it was the only
+  hard-coded backslash separator in the test projects. `51e18d4`: `dotnet` and `web` green on both workflow runs.
