@@ -206,3 +206,38 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
 - Note: `--content-root` is the *repository* root for the file store (`Content:RootDir` defaults to `.` in the CLI,
   unlike the API's `../../` relative to its content root) — passing `src/PresenterAi.Api` fails to find
   `presentations/`.
+
+### T13 — `web/` workspaces (pi gpt-5.6-luna:high) — done
+
+- Bun workspaces `shared`/`app`/`admin` (React 19, Vite 6, TS strict, Tailwind 3.4 shared preset, ESLint flat, vitest);
+  generated `openapi-typescript` types + `openapi-fetch` client, `errorCodes.ts` from `x-error-codes`, `problem.ts`
+  `isProblem`, `errorMessages.ts`; Dev-only zustand auth store `presenter-auth`; InkSpoke kit (`AdminLayout`,
+  `AdminRoute`, `ThemeToggle`, `cn`, Tailwind tokens) with `Copied from InkSpoke … @ b83e691f` headers, no branding;
+  admin = ComingSoon. Two-hop drift chain: checked-in `web/shared/openapi/v1.json` + `OpenApiTests.Checked_in_document_matches_live_document`
+  + `generate:api` reading the snapshot (CI `git diff --exit-code -- web/shared/src/api`). Verified by Claude:
+  `bun install --frozen-lockfile`, lint ×3, shared tests 3/3, both builds, `generate:api` with zero drift. Commit `cd93010`.
+
+### Review round 2 (pi gpt-5.6-terra:medium, `2f22c58..906af83`) — folded in
+
+- `docs/review/003-plan-002-impl-review-round-2.md`: F1/F2 D (session disposal class, unobserved shutdown), F3 D minor
+  (guard boundary vs escaped JSON names — documented as outside the class), F4 B (stop-after-slide = Node parity, plan
+  claim corrected), F5 B (backpressure oracle now fills the real channel). Round-1 classes verified at every site.
+  Ledger row added. Fixes by pi gpt-5.6-terra:medium with mutation evidence; commit `795132f`. Solution after the fix:
+  Application 51 / Infrastructure 30 / Api 46 / Cli 5, `-warnaserror` clean; Azure `smoke` re-run on the new
+  lifecycle: `usage.seconds=9.2`, exit 0.
+
+### T11 — Chrome run on the .NET API (Claude, Claude-in-Chrome) — done
+
+- **Bug found on first load:** `Deck not found: /ricoh/index.html` for every deck — the `/decks/{**path}` 404 endpoint
+  was matched by the implicit `UseRouting` at the top of the pipeline, so `StaticFileMiddleware` skipped the file
+  ("Static files was skipped as the request already matched an endpoint"). `UseRouting()` now follows the static
+  middleware; `PresentationEndpointTests.Deck_file_is_served_from_the_content_root` pins it (`795132f`). The headless
+  client never fetched a deck, which is why T11's server run missed it.
+- Run (API from a published copy on 47913, real Azure upstream): page loads, `server: connected`, deck adapter
+  `showFn` 11 slides; Start → `connecting` → `presenting` at +1 s, microphone ready, 44.1 kHz context; slide 1 → 2
+  auto-advanced at +39 s (deck followed, `deckIndex` 1); `→` → slide 3 + deck 3; Space → `paused` (+`pause-3`
+  instruction), Space → `presenting` (`resume-3`); usage pill `59.6 s` at the 60 s tick; auto-advance to 4/11;
+  Esc → `ending` → `closed: reason=client_request usage=98.6 s` → `idle`; **usage pill `98.6 s`**, 4,490 mic frames sent,
+  transcript grouped by turn. AC4 met.
+- Operational: Ctrl-C in the termflow terminal did not stop the API process (it kept 47913, the new instance queued);
+  stop it by PID (`Stop-Process -Id <pid>` after `netstat -ano | findstr :47913`).

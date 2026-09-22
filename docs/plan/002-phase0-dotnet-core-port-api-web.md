@@ -471,7 +471,8 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
   speech/silence bar), sharing `Application` + `Infrastructure` via the same DI registrations as the API.
 - **Verify:** against the fake: `smoke --provider azure` and `--provider openai` each pick the right upstream
   (asserted by the fake's received `session.start` host/headers), receive voiced audio, print `usage.seconds`, exit 0;
-  `run sample --stop-after-slide 2` shows two slides, parts, transcript and the speech/silence bar. Live: both real
+  `run sample --stop-after-slide 2` narrates slides 1–2 and sends `end` when slide 3 is announced (Node
+  `headless-run.mjs` semantics: the stop fires on the *next* slide event), printing parts, transcript and the speech/silence bar. Live: both real
   providers speak and close (AC3 evidence).
 - **Test that dies if this breaks:** `CliTests.Smoke_selects_provider_and_reports_usage_seconds`,
   `CliTests.Run_sample_against_fake_server_stops_after_slide_2`.
@@ -551,7 +552,7 @@ manual goto is queued; pause during a part gap; end while a part is in flight; u
 | 7 | while it narrates, ask a question aloud | model answers, then bridges back to the script; slide does not advance during the exchange |
 | 8 | open a second tab and press Start | second tab shows "Another presenter page is already connected" |
 | 9 | kill the API mid-session; restart | browser shows disconnected → reconnects → idle; no orphan upstream session (usage stops) |
-| 10 | `presenter-cli run ricoh-delivery-overview --stop-after-slide 3` | three slides, speech/silence bars, `session.closed` |
+| 10 | `presenter-cli run ricoh-delivery-overview --stop-after-slide 3` | three slides narrated, `end` sent when slide 4 is announced, speech/silence bars, `closed reason=client_request` |
 
 ## 8. Rollout / phasing
 
