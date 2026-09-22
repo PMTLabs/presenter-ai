@@ -8,14 +8,15 @@
 
 | Finding | Class | Fix applied |
 |---|---|---|
-| F1 route teardown leaks mic/audio context | D | _pending_ |
-| F2 StrictMode double deck load | D | _pending_ |
-| F3 presenter detail request ignores errors | D | _pending_ |
-| F4 Library shows `detail` before `errorMessages[code]` | D | _pending_ |
-| F5 reconnect test proves two delays, not the schedule/cap | B | _pending_ |
-| F6 "parses every message" asserts only binary | B | _pending_ |
-| F7 listen-only test does not prove playback started | B | _pending_ |
-
+| F1 route teardown leaks mic/audio context | D | Teardown stops tracks, closes the `AudioContext`, cancels a pending `startAudio()` (a stream resolving after unmount is stopped at once) and disposes the deck driver; mutation (drop `track.stop()`) → `expected "spy" to be called once, but got 0 times`. `f434b47` |
+| F2 StrictMode double deck load | D | Active-flag guard + previous-driver disposal; StrictMode render test asserts one `deck adapter` log; mutation → `expected "spy" to be called 1 times, but got 2 times`. Chrome re-check: one `deck adapter` line. `f434b47` |
+| F3 presenter detail request ignores errors | D | `{ error }` narrowed with `isProblem` → `errorMessages[code] ?? detail ?? title`, transport rejection caught, error state rendered; tests with a 404 Problem Details body and a rejected fetch. `f434b47` |
+| F4 Library shows `detail` before `errorMessages[code]` | D | Order fixed at every `isProblem` site (`Library.tsx`, `Present.tsx`); map-before-detail test. `f434b47` |
+| F5 reconnect test proves two delays | B | Whole schedule 500 → 10 000 ms + cap asserted; the linear mutant fails (`expected […] to have a length of 3 but got 4`). `f434b47` |
+| F6 "parses every message" asserts only binary | B | Listeners + payload assertions for every text event; `switch ("ignored")` mutant fails. `f434b47` |
+| F7 listen-only test does not prove playback | B | Asserts `playback.start()`/resume; mutant fails. `f434b47` |
+| duplicate server `log` lines (work-log observation) | — | Stale-socket guard on `open`/`message`/`close` + test; Chrome re-run on `/present/sample` showed every server log once and a clean teardown (`audio: null`, `usage 29.6 s`) — the earlier duplicate was not reproduced. `f434b47` |
+| unstyled control bar (user report) | D | Plain `<button>`s were invisible on the dark theme; Tailwind classes added (Start primary, End danger). `f434b47` |
 ---
 
 ## Summary

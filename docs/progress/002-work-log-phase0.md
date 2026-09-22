@@ -271,7 +271,7 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   twice (StrictMode double effect); `__presenterDebug().wsOpen` is derived from the presenter state, not the socket;
   the upstream transcribed a spurious `You: a dark` user turn from the server-side silence pump (no mic).
 
-### Review round 3 (pi gpt-5.6-terra:medium, `906af83..41d093a`, new web scope) — in progress
+### Review round 3 (pi gpt-5.6-terra:medium, `906af83..41d093a`, new web scope) — folded in
 
 - `docs/review/004-plan-002-impl-review-round-3.md`: F1 D major (route teardown leaves mic/AudioContext alive),
   F2–F4 D minor (StrictMode double deck load = the duplicated `deck adapter` log; detail request ignores errors;
@@ -290,3 +290,8 @@ agents (plan §8); Claude orchestrates and does T1, T11, T15, T16.
   `true/false` for the .NET host). False positives: `Auth:Dev:*` is read by `DevAuthHandler`; `upstream-error` is an
   internal event (wire frame = `error{code}`); `busy` is `error{code:"busy"}` + 1013 by design. `/api/config` and
   `pong` are Node-parity shapes without app callers.
+- Fixes landed in `f434b47` (pi gpt-5.6-terra:medium, mutation evidence per finding, app vitest 18). Chrome re-check on
+  `/present/sample`: every server log once, `deck adapter` once, Start/Pause/Prev/Next/Mute/End visible (the user
+  reported the control bar was invisible — plain buttons on the dark theme — styled in the same commit), End →
+  `closed usage=29.6 s` → `idle` with the audio context released (`__presenterDebug().audio === null`). During that run
+  the user spoke to the presenter (`You: Can you speak Vietnamese` → answered) — the AC5 spoken-question check is done.
