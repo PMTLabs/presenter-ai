@@ -1,7 +1,7 @@
 # 005 — Echo protection and stall recovery
 
 **Date:** 2026-09-22
-**Status:** Approved (2026-09-22); amendment A1 (audience questions, §4.5) — Draft, awaiting approval
+**Status:** Approved (2026-09-22); amendment A1 (audience questions, §4.5) approved 2026-09-22
 **Size:** M
 **Area:** `web/app/src/audio/*`, `web/app/src/routes/Present.tsx`, `src/PresenterAi.Application/Presenting/Presenter.cs`,
 their tests
@@ -262,3 +262,4 @@ None. The barge-in flush is set to 300 ms and the stall response to pause-and-wa
 | 2026-09-22 | Requirement brief confirmed (G1) | Layered echo fix, flush after 300 ms of barge-in, pause and warn after two failed nudges |
 | 2026-09-22 | Plan approved (G2) | The user chose "Approve and implement"; implementation starts after the web-fix branch lands |
 | 2026-09-22 | A1 decisions | Deck first + backend; hold until answered (15 s); GPT-Live-managed Responses delegation; `gpt-5.6-luna`; low effort, priority, low verbosity; research 005 by `agy` and `pi` sol |
+| 2026-09-22 | A1 approved | The user chose "Approve and implement" for T8–T10 |
