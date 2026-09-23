@@ -14,6 +14,7 @@ public interface ILiveSession : IAsyncDisposable
     event Action<string>? Warning;
     event Action<string, string>? DelegatedResponseFinished;
     event Action<string, string, string, string>? ToolCallRequested;
+    event Action<string, string, string>? HostedToolActivity;
     event Action<string, double?>? Closed;
 
     LiveSessionState State { get; }

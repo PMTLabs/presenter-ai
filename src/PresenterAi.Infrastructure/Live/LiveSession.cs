@@ -69,6 +69,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<string>? Warning;
     public event Action<string, string>? DelegatedResponseFinished;
     public event Action<string, string, string, string>? ToolCallRequested;
+    public event Action<string, string, string>? HostedToolActivity;
     public event Action<string, double?>? Closed;
 
     public LiveSessionState State => (LiveSessionState)Volatile.Read(ref _state);
@@ -596,6 +597,10 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         {
             var item = responseEvent is { } resEv ? GetProperty(resEv, "item") : null;
             var itemType = item is { } it ? GetString(it, "type") : null;
+            if (itemType == "web_search_call")
+            {
+                HostedToolActivity?.Invoke(delegationId, "web_search", item is { } searchItem ? GetString(searchItem, "status") ?? "done" : "done");
+            }
             if (itemType == "function_call" && item is { } fnItem)
             {
                 var callId = GetString(fnItem, "call_id") ?? string.Empty;
@@ -604,6 +609,12 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 _logger.LogInformation("Tool call requested: delegation={DelegationId} call={CallId} name={ToolName}", delegationId, callId, name);
                 ToolCallRequested?.Invoke(delegationId, callId, name, arguments);
             }
+        }
+        else if (type == "response.output_item.added")
+        {
+            var item = responseEvent is { } resEv ? GetProperty(resEv, "item") : null;
+            if (item is { } searchItem && GetString(searchItem, "type") == "web_search_call")
+                HostedToolActivity?.Invoke(delegationId, "web_search", GetString(searchItem, "status") ?? "started");
         }
         else if (type == "response.completed")
         {
@@ -696,9 +707,9 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
             ["text"] = new JsonObject { ["verbosity"] = "low" }
         };
 
-        if (_config.Tools is { Count: > 0 } tools)
+        if (_config.Tools is { Count: > 0 } || _config.HostedTools is { Count: > 0 })
         {
-            responses["tools"] = new JsonArray(tools.Select(t => (JsonNode)t.DeepClone()).ToArray());
+            responses["tools"] = new JsonArray((_config.Tools ?? []).Concat(_config.HostedTools ?? []).Select(t => (JsonNode)t.DeepClone()).ToArray());
             responses["tool_choice"] = "auto";
             responses["parallel_tool_calls"] = false;
         }

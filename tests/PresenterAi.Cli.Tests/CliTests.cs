@@ -1,5 +1,7 @@
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using PresenterAi.Application.Tools.External;
 using PresenterAi.Cli;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Infrastructure.Tests.Live;
@@ -39,6 +41,26 @@ public sealed class CliTests
         starts[0]["session"]!["model"]!.GetValue<string>().Should().Be("azure-model");
         starts[1]["session"]!["model"]!.GetValue<string>().Should().Be("openai-model");
         fake.Headers.Should().ContainKey("Authorization").And.NotContainKey("api-key");
+    }
+
+    [Fact]
+    public async Task Cli_has_no_session_tool_source_and_its_talk_has_no_external_tools()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        var configuration = Configuration(fake, new Dictionary<string, string?> { ["Upstream:DelegationModel"] = "managed" });
+        using (var services = Program.BuildServices(configuration, FindRepositoryRoot()))
+            services.GetService<ISessionToolSource>().Should().BeNull();
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = await Program.RunAsync(["run", "sample", "--stop-after-slide", "1", "--content-root", FindRepositoryRoot()], configuration, output, error, CancellationToken.None);
+        exit.Should().Be(0, error.ToString());
+        var starts = fake.ReceivedSnapshot().Where(message => message["type"]?.GetValue<string>() == "session.start").ToArray();
+        starts.Should().NotBeEmpty();
+        foreach (var start in starts)
+        {
+            var tools = start["session"]?["delegation"]?["responses"]?["tools"]?.AsArray();
+            (tools?.Any(t => t?["type"]?.ToString() == "web_search" || t?["name"]?.ToString() == "external_action") ?? false).Should().BeFalse();
+        }
     }
 
     [Fact]
