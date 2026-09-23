@@ -14,7 +14,25 @@ public static class Program
     public static async Task<int> Main(string[] args)
     {
         var configuration = BuildConfiguration(args);
-        return await RunAsync(args, configuration, Console.Out, Console.Error, CancellationToken.None).ConfigureAwait(false);
+        using var cancellation = new CancellationTokenSource();
+        var cancelCount = 0;
+        ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+        {
+            if (Interlocked.Increment(ref cancelCount) == 1)
+            {
+                eventArgs.Cancel = true;
+                cancellation.Cancel();
+            }
+        };
+        Console.CancelKeyPress += cancelHandler;
+        try
+        {
+            return await RunAsync(args, configuration, Console.Out, Console.Error, cancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            Console.CancelKeyPress -= cancelHandler;
+        }
     }
 
     public static async Task<int> RunAsync(

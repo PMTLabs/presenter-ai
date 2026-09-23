@@ -89,8 +89,73 @@ public sealed class CliTests
             .And.Contain("stop-after-slide reached; ending")
             .And.Contain("MODEL:")
             .And.Contain("audio bar (100 ms/char): #")
-            .And.Contain("closed reason=client_request seconds=7");
+            .And.Contain("closed reason=client_request end=stop_after_slide seconds=7");
         text.Should().NotContain("===== SLIDE 4 =====");
+    }
+
+    [Fact]
+    public async Task Cancel_mid_talk_closes_the_upstream_before_max_seconds()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        var configuration = Configuration(fake, new Dictionary<string, string?> { ["Presenter:AdvanceSilenceMs"] = "10000" });
+        using var cancellation = new CancellationTokenSource();
+        var output = new StringWriter();
+        var run = Program.RunAsync(
+            ["run", "sample", "--max-seconds", "300", "--content-root", FindRepositoryRoot()],
+            configuration, output, new StringWriter(), cancellation.Token);
+
+        await WaitUntilAsync(() => output.ToString().Contains("===== SLIDE 1 =====", StringComparison.Ordinal));
+        cancellation.Cancel();
+        var exit = await run.WaitAsync(TimeSpan.FromSeconds(10));
+
+        exit.Should().Be(1);
+        output.ToString().Should().Contain("closed reason=client_request end=cli_cancelled");
+        await WaitUntilAsync(() => fake.ConnectionCount == 0);
+        fake.ReceivedSnapshot().Where(message => message["type"]?.GetValue<string>() == "session.close").Should().NotBeEmpty();
+    }
+
+    [Fact]
+    public async Task Cancel_during_startup_leaves_no_upstream()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        fake.StartDelayMs = 30_000;
+        var configuration = Configuration(fake, new Dictionary<string, string?>());
+        using var cancellation = new CancellationTokenSource();
+        var output = new StringWriter();
+        var run = Program.RunAsync(
+            ["run", "sample", "--max-seconds", "300", "--content-root", FindRepositoryRoot()],
+            configuration, output, new StringWriter(), cancellation.Token);
+
+        await WaitUntilAsync(() => fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.start"));
+        cancellation.Cancel();
+        var exit = await run.WaitAsync(TimeSpan.FromSeconds(10));
+
+        exit.Should().Be(1);
+        output.ToString().Should().Contain("end=cli_cancelled");
+        await WaitUntilAsync(() => fake.ConnectionCount == 0);
+    }
+
+    [Fact]
+    public async Task Max_seconds_above_the_ceiling_is_clamped_with_a_warning()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        var configuration = Configuration(fake, new Dictionary<string, string?>
+        {
+            ["Presenter:MaxTalkCeilingMinutes"] = "5",
+            ["Presenter:MaxTalkMinutes"] = "5",
+            ["Presenter:AdvanceSilenceMs"] = "100"
+        });
+        var output = new StringWriter();
+        var error = new StringWriter();
+
+        var exit = await Program.RunAsync(
+            ["run", "sample", "--max-seconds", "600", "--stop-after-slide", "1", "--content-root", FindRepositoryRoot()],
+            configuration, output, error, CancellationToken.None);
+
+        exit.Should().Be(0, error.ToString());
+        output.ToString().Should().Contain("Warning: --max-seconds 600 clamped to 300")
+            .And.Contain("end=stop_after_slide");
+        await WaitUntilAsync(() => fake.ConnectionCount == 0);
     }
 
     [Fact]
@@ -241,6 +306,20 @@ public sealed class CliTests
         public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) => Task.FromException<bool>(new InvalidOperationException("close failed"));
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!condition())
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException("Timed out waiting for the expected CLI state.");
+            }
+
+            await Task.Delay(20);
+        }
     }
 
     private static IConfiguration Configuration(FakeLiveServer fake, Dictionary<string, string?> overrides)
