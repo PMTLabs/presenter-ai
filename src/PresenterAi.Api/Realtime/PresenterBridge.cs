@@ -25,6 +25,7 @@ public sealed class PresenterBridge : IAsyncDisposable
     // recording (D8).
     private static readonly TimeSpan StartObservationBound = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ServerCloseBound = TimeSpan.FromSeconds(1);
+    private TimeSpan _takeOverBound = TimeSpan.FromSeconds(15);
     private const int MaxAuthenticationFrameBytes = 4 * 1024;
     // Browser commands contain only a type, opaque presentation id and small numeric fields; 4 KiB is generous.
     private const int MaxTextCommandBytes = 4 * 1024;
@@ -76,15 +77,48 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
 
         using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-        var userId = await AuthenticateAsync(socket, context.RequestAborted).ConfigureAwait(false);
-        if (userId is null)
+        var authentication = await AuthenticateAsync(socket, context.RequestAborted).ConfigureAwait(false);
+        if (authentication is null)
             return;
 
-        var connection = new ClientConnection(socket, userId, _logger, Volatile.Read(ref _outboundCapacity), Volatile.Read(ref _beforeSocketSendAsync));
-        if (Interlocked.CompareExchange(ref _client, connection, null) is not null)
+        var connection = new ClientConnection(socket, authentication.Value.UserId, _logger, Volatile.Read(ref _outboundCapacity), Volatile.Read(ref _beforeSocketSendAsync));
+        var holder = Interlocked.CompareExchange(ref _client, connection, null);
+        if (holder is not null && authentication.Value.TakeOver && string.Equals(holder.UserId, connection.UserId, StringComparison.Ordinal))
         {
-            await SendBusyAsync(socket, context.RequestAborted).ConfigureAwait(false);
-            await connection.DisposeAsync().ConfigureAwait(false);
+            holder.RequestTakeOver();
+            try
+            {
+                await holder.Released.Task.WaitAsync(_takeOverBound, context.RequestAborted).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+            }
+
+            holder = Interlocked.CompareExchange(ref _client, connection, null);
+        }
+
+        if (holder is not null)
+        {
+            try
+            {
+                var canTakeOver = string.Equals(holder.UserId, connection.UserId, StringComparison.Ordinal);
+                await SendBusyAsync(socket, canTakeOver, context.RequestAborted).ConfigureAwait(false);
+            }
+            finally
+            {
+                try
+                {
+                    await connection.DisposeAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    connection.Released.TrySetResult();
+                }
+            }
+
             return;
         }
 
@@ -105,29 +139,42 @@ public sealed class PresenterBridge : IAsyncDisposable
             // A writer fault must not relinquish ownership. Only the receive owner can perform cleanup, and the
             // slot stays held until presenter shutdown and the recorder attempt barrier have both completed.
             var owned = ReferenceEquals(Volatile.Read(ref _client), connection);
-            if (owned)
+            try
             {
-                // StartAsync only means the command was queued until its task completes. In particular, do not
-                // inspect idle or retire the recorder until ObserveStartAsync has also attempted BeginAsync.
-                await connection.WaitForStartObservationAsync(_logger, StartObservationBound).ConfigureAwait(false);
-                if (_presenter.Snapshot().State != "idle")
+                if (owned)
                 {
-                    await ObserveEndAsync().ConfigureAwait(false);
+                    // StartAsync only means the command was queued until its task completes. In particular, do not
+                    // inspect idle or retire the recorder until ObserveStartAsync has also attempted BeginAsync.
+                    await connection.WaitForStartObservationAsync(_logger, StartObservationBound).ConfigureAwait(false);
+                    if (_presenter.Snapshot().State != "idle")
+                    {
+                        await ObserveEndAsync(connection.TakeOverRequested).ConfigureAwait(false);
+                    }
+
+                    await connection.EndRecorderAsync().ConfigureAwait(false);
+                    await connection.DetachAndDisposeRecorderAsync().ConfigureAwait(false);
                 }
-
-                await connection.EndRecorderAsync().ConfigureAwait(false);
-                await connection.DetachAndDisposeRecorderAsync().ConfigureAwait(false);
             }
-
-            await connection.DisposeAsync().ConfigureAwait(false);
-            if (owned)
+            finally
             {
-                Interlocked.CompareExchange(ref _client, null, connection);
+                try
+                {
+                    await connection.DisposeAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (owned)
+                    {
+                        Interlocked.CompareExchange(ref _client, null, connection);
+                    }
+
+                    connection.Released.TrySetResult();
+                }
             }
         }
     }
 
-    private async Task<string?> AuthenticateAsync(WebSocket socket, CancellationToken requestCancellation)
+    private async Task<(string UserId, bool TakeOver)?> AuthenticateAsync(WebSocket socket, CancellationToken requestCancellation)
     {
         if (!_pendingAuth.Wait(0))
         {
@@ -188,7 +235,9 @@ public sealed class PresenterBridge : IAsyncDisposable
                 return null;
             }
 
-            return userId;
+            var takeOver = root.TryGetProperty("takeOver", out var takeOverProperty)
+                && takeOverProperty.ValueKind == JsonValueKind.True;
+            return (userId, takeOver);
         }
         catch (OperationCanceledException)
         {
@@ -328,7 +377,7 @@ public sealed class PresenterBridge : IAsyncDisposable
                 case "resume": ObserveCommand(_presenter.ResumeAsync(cancellationToken), connection, type, false); return;
                 case "mute": ObserveCommand(_presenter.MuteAsync(cancellationToken), connection, type, false); return;
                 case "unmute": ObserveCommand(_presenter.UnmuteAsync(cancellationToken), connection, type, false); return;
-                case "end": ObserveCommand(_presenter.EndAsync(cancellationToken), connection, type, false); return;
+                case "end": ObserveCommand(_presenter.EndAsync(cancellationToken: cancellationToken), connection, type, false); return;
                 case "ping": connection.EnqueueText(new { type = "pong" }); return;
                 default: connection.EnqueueText(new { type = "error", message = $"unknown command: {type}", code = "protocol" }); return;
             }
@@ -386,7 +435,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
     }
 
-    private async Task ObserveEndAsync()
+    private async Task ObserveEndAsync(bool resumable = false)
     {
         // EndAsync returns once the close is requested, with the presenter still "ending"; it turns idle only when
         // the loop handles the upstream close queued behind that command. Releasing the slot before then lets the
@@ -401,7 +450,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         _presenter.State += OnState;
         try
         {
-            await _presenter.EndAsync().ConfigureAwait(false);
+            await _presenter.EndAsync(resumable).ConfigureAwait(false);
             if (_presenter.Snapshot().State != "idle")
             {
                 await idle.Task.WaitAsync(EndToIdleBound).ConfigureAwait(false);
@@ -429,15 +478,21 @@ public sealed class PresenterBridge : IAsyncDisposable
 
     internal Task StopCurrentWriterForTestAsync() => Current?.StopWriterForTestAsync() ?? Task.CompletedTask;
 
+    internal void ConfigureTakeOverBoundForTest(TimeSpan bound)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(bound, TimeSpan.Zero);
+        _takeOverBound = bound;
+    }
+
     private static object StateFrame(PresenterSnapshot snapshot) => new
     {
         type = "state", snapshot.State, snapshot.PresentationId, snapshot.Title, snapshot.SlideIndex, snapshot.SlideCount,
         snapshot.Paused, snapshot.Muted, snapshot.SessionId, snapshot.ExpiresAt, snapshot.UsageSeconds, snapshot.AdvanceSilenceMs
     };
 
-    private static async Task SendBusyAsync(WebSocket socket, CancellationToken cancellationToken)
+    private static async Task SendBusyAsync(WebSocket socket, bool canTakeOver, CancellationToken cancellationToken)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "error", message = BusyMessage, code = "busy" }, JsonOptions);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "error", message = BusyMessage, code = "busy", canTakeOver }, JsonOptions);
         await socket.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
         await CloseServerInitiatedAsync(socket, (WebSocketCloseStatus)1013, "busy").ConfigureAwait(false);
     }
@@ -461,7 +516,9 @@ public sealed class PresenterBridge : IAsyncDisposable
         private readonly Channel<OutboundMessage> _outbound;
         private readonly Func<Task>? _beforeSocketSendAsync;
         private readonly Task _writer;
+        private readonly CancellationTokenSource _takeOverAbort = new();
         private int _failed;
+        private int _takeOverRequested;
         private readonly object _recorderLock = new();
         private IPresenter? _recorderPresenter;
         private Action<PresenterClosed>? _runClosedHandler;
@@ -469,6 +526,8 @@ public sealed class PresenterBridge : IAsyncDisposable
         private bool _recorderActive;
         private readonly object _startLock = new();
         private Task? _startObservation;
+        internal TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal bool TakeOverRequested => Volatile.Read(ref _takeOverRequested) != 0;
 
         public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
         {
@@ -497,6 +556,11 @@ public sealed class PresenterBridge : IAsyncDisposable
                     }
 
                     await _socket.SendAsync(message.Bytes, message.Binary ? WebSocketMessageType.Binary : WebSocketMessageType.Text, true, _lifetime.Token).ConfigureAwait(false);
+                    if (message.CloseStatus is { } closeStatus)
+                    {
+                        await _socket.CloseOutputAsync(closeStatus, message.CloseReason!, _lifetime.Token).ConfigureAwait(false);
+                        return;
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -508,7 +572,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             }
             finally
             {
-                if (Volatile.Read(ref _failed) != 0 && _socket.State == WebSocketState.Open)
+                if (Volatile.Read(ref _failed) != 0 && !TakeOverRequested && _socket.State == WebSocketState.Open)
                 {
                     await CloseServerInitiatedAsync(_socket, (WebSocketCloseStatus)1011, "server cannot keep up").ConfigureAwait(false);
                 }
@@ -518,6 +582,40 @@ public sealed class PresenterBridge : IAsyncDisposable
         public void EnqueueText(object frame) => Enqueue(new OutboundMessage(JsonSerializer.SerializeToUtf8Bytes(frame, JsonOptions), false));
 
         public void EnqueueBinary(byte[] bytes) => Enqueue(new OutboundMessage(bytes, true));
+
+        internal void RequestTakeOver()
+        {
+            if (Interlocked.CompareExchange(ref _takeOverRequested, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Enqueue(new OutboundMessage(
+                JsonSerializer.SerializeToUtf8Bytes(new { type = "error", message = "This presenter was taken over by another tab.", code = "taken_over" }, JsonOptions),
+                false,
+                (WebSocketCloseStatus)4409,
+                "taken_over"));
+            _ = AbortAfterTakeOverCloseAsync();
+        }
+
+        private async Task AbortAfterTakeOverCloseAsync()
+        {
+            try
+            {
+                await Task.Delay(ServerCloseBound, _takeOverAbort.Token).ConfigureAwait(false);
+                if (_socket.State is WebSocketState.Open or WebSocketState.CloseSent or WebSocketState.CloseReceived)
+                {
+                    _socket.Abort();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+                // The holder was already disposing when the take-over arrived; its cleanup releases the slot.
+            }
+        }
 
         private void Enqueue(OutboundMessage message)
         {
@@ -711,10 +809,12 @@ public sealed class PresenterBridge : IAsyncDisposable
             _outbound.Writer.TryComplete();
             _lifetime.Cancel();
             try { await _writer.ConfigureAwait(false); } catch (OperationCanceledException) { }
+            _takeOverAbort.Cancel();
+            _takeOverAbort.Dispose();
             _lifetime.Dispose();
         }
 
-        private sealed record OutboundMessage(byte[] Bytes, bool Binary);
+        private sealed record OutboundMessage(byte[] Bytes, bool Binary, WebSocketCloseStatus? CloseStatus = null, string? CloseReason = null);
     }
 }
 

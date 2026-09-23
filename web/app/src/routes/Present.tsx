@@ -81,6 +81,7 @@ export function Present() {
   const [presentation, setPresentation] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
+  const [canTakeOver, setCanTakeOver] = useState(false);
   const ready = useAuthStore((state) => state.ready);
   const userId = useAuthStore((state) => state.user?.id ?? null);
   const snapshot = usePresenterStore((state) => state.snapshot);
@@ -117,7 +118,10 @@ export function Present() {
     });
     client.current = bridge;
     bridge.on("state", applySnapshot);
-    bridge.on("accepted", () => setBusyMessage(null));
+    bridge.on("accepted", () => {
+      setBusyMessage(null);
+      setCanTakeOver(false);
+    });
     bridge.on("slide", (index) => {
       driver.current?.goto(index);
       message({ type: "slide", index });
@@ -136,8 +140,15 @@ export function Present() {
     bridge.on("audio", (buffer) => audio.current?.playback.enqueue(buffer));
     bridge.on("open", () => log("info", "connected to server"));
     bridge.on("close", () => log("warn", "server connection closed"));
-    bridge.on("busy", () => {
-      setBusyMessage((current) => current ?? "The presenter is in use in another tab.");
+    bridge.on("busy", (busy) => {
+      const allowed = busy.canTakeOver === true;
+      setCanTakeOver(allowed);
+      setBusyMessage(busy.canTakeOver === false ? "The presenter is in use by another account." : "The presenter is in use in another tab.");
+    });
+    bridge.on("taken-over", () => {
+      setCanTakeOver(false);
+      setBusyMessage("This presenter was taken over by another tab. Reload to use it here.");
+      stopAudio();
     });
     bridge.connect();
     return () => {
@@ -241,7 +252,7 @@ export function Present() {
       return;
     }
     audio.current = started;
-    client.current?.start(presentation.id, 0);
+    client.current?.start(presentation.id);
   };
   useEffect(() => {
     const keys = (e: KeyboardEvent) => {
@@ -322,9 +333,14 @@ export function Present() {
         </p>
       )}
       {busyMessage && (
-        <p className="mt-4 flex-none rounded-lg bg-amber-50 p-4 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          {busyMessage}
-        </p>
+        <div className="mt-4 flex flex-none items-center justify-between gap-3 rounded-lg bg-amber-50 p-4 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <p>{busyMessage}</p>
+          {canTakeOver && (
+            <button className={actionButtonClassName} onClick={() => client.current?.takeOver()}>
+              Take over
+            </button>
+          )}
+        </div>
       )}
       {error && (
         <p className="mt-4 flex-none rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">

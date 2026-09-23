@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAuthSession, setAuthSession, useAuthStore } from "@presenter/shared";
 import { usePresenterStore } from "../store/presenterStore";
 
-const { bridgeConnect, bridgeDisconnect, bridgeHandlers, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
+const { bridgeConnect, bridgeDisconnect, bridgeHandlers, bridgeStart, bridgeTakeOver, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   load: vi.fn().mockResolvedValue({ adapter: "sections", count: 1 }),
@@ -18,6 +18,8 @@ const { bridgeConnect, bridgeDisconnect, bridgeHandlers, captureStop, close, dec
   startAudio: vi.fn(),
   bridgeConnect: vi.fn(),
   bridgeDisconnect: vi.fn(),
+  bridgeStart: vi.fn(),
+  bridgeTakeOver: vi.fn(),
   bridgeHandlers: new Map<string, ((...args: unknown[]) => void)[]>(),
 }));
 vi.mock("@presenter/shared/api", () => ({ default: { GET: get, POST: post } }));
@@ -48,7 +50,8 @@ vi.mock("../ws/bridgeClient", () => ({
       void this.ticketProvider();
     }
     disconnect() { bridgeDisconnect(); }
-    start() {}
+    start(...args: unknown[]) { bridgeStart(...args); }
+    takeOver() { bridgeTakeOver(); }
     sendAudio() {}
   },
 }));
@@ -86,6 +89,8 @@ describe("Present", () => {
     startAudio.mockClear();
     bridgeConnect.mockClear();
     bridgeDisconnect.mockClear();
+    bridgeStart.mockClear();
+    bridgeTakeOver.mockClear();
     bridgeHandlers.clear();
     clearAuthSession();
     window.history.replaceState({}, "", "/");
@@ -290,6 +295,46 @@ describe("Present", () => {
     expect(dispose).toHaveBeenCalled();
     expect(await screen.findByText("Please sign in to continue.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+  });
+
+  it("shows Take over only when the busy slot belongs to this user and calls takeOver", async () => {
+    signIn();
+    get.mockResolvedValue({ data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } } });
+    renderPresent();
+    emitBridge("busy", { type: "error", code: "busy", canTakeOver: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Take over" }));
+    expect(bridgeTakeOver).toHaveBeenCalledOnce();
+  });
+
+  it("shows the other-account notice without a Take over button", async () => {
+    signIn();
+    get.mockResolvedValue({ data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } } });
+    renderPresent();
+    emitBridge("busy", { type: "error", code: "busy", canTakeOver: false });
+    expect(await screen.findByText("The presenter is in use by another account.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Take over" })).toBeNull();
+  });
+
+  it("taken-over stops audio and keeps Start disabled", async () => {
+    signIn();
+    get.mockResolvedValue({ data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } } });
+    renderPresent();
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await vi.waitFor(() => expect(startAudio).toHaveBeenCalledOnce());
+    emitBridge("taken-over");
+    expect(captureStop).toHaveBeenCalledOnce();
+    expect(playbackStop).toHaveBeenCalledOnce();
+    expect(screen.getByText("This presenter was taken over by another tab. Reload to use it here.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+  });
+
+  it("Start sends no fromIndex", async () => {
+    signIn();
+    get.mockResolvedValue({ data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } } });
+    renderPresent();
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await vi.waitFor(() => expect(bridgeStart).toHaveBeenCalledWith("demo"));
+    expect(bridgeStart.mock.calls[0]).toEqual(["demo"]);
   });
 
   it("keeps the busy notice through the close until a server state frame is accepted", async () => {

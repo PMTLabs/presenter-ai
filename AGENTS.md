@@ -72,7 +72,8 @@ the default socket is found without it.
 - **Tests.** Never change a test to make it green; fix the cause. A new oracle must come with mutation evidence
   (the wrong implementation it catches). Reviewers do not run tests; implementers do.
 - **Parity semantics are deliberate.** `stop-after-slide N` ends when slide N+1 is announced (Node parity).
-  `busy` is `error{code:"busy"}` + close 1013; backpressure closes with 1011. The `/ws` frames and `/api` trio
+  `busy` is `error{code:"busy",canTakeOver}` + close 1013; auth may request `takeOver:true`, which closes the
+  same user's holder with `taken_over` + 4409; backpressure closes with 1011. The `/ws` frames and `/api` trio
   are frozen until the admin plan — see `docs/reference/001-api-and-code-conventions.md` §8 and §10.
 
 ## Conventions

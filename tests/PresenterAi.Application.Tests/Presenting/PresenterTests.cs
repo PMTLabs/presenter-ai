@@ -320,12 +320,40 @@ public sealed class PresenterTests
     }
 
     [Fact]
-    public async Task Normal_end_starts_next_run_at_zero()
+    public async Task Resumable_end_lets_start_resume_at_the_slide()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        await harness.Presenter.GotoAsync(1);
+        await harness.Presenter.EndAsync(resumable: true);
+        await harness.Flush();
+        await harness.Presenter.StartAsync("p");
+        Assert.Equal(1, harness.Presenter.Snapshot().SlideIndex);
+    }
+
+    [Fact]
+    public async Task Normal_end_starts_again_at_slide_one()
     {
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
         await harness.Presenter.GotoAsync(2);
         await harness.Presenter.EndAsync();
+        await harness.Flush();
+        await harness.Presenter.StartAsync("p");
+        Assert.Equal(0, harness.Presenter.Snapshot().SlideIndex);
+    }
+
+    [Fact]
+    public async Task Resumable_flag_does_not_leak_into_the_next_run()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        await harness.Presenter.GotoAsync(2);
+        await harness.Presenter.EndAsync(resumable: true);
+        await harness.Flush();
+        await harness.Presenter.StartAsync("p", 0);
+        await harness.Presenter.GotoAsync(1);
+        harness.Session().Close();
         await harness.Flush();
         await harness.Presenter.StartAsync("p");
         Assert.Equal(0, harness.Presenter.Snapshot().SlideIndex);

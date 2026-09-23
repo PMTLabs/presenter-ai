@@ -163,7 +163,7 @@ internal sealed class TestQueuedPresenter : IPresenter
         return new PresenterStartResult(true, id, "test", "queued", "test-model");
     }
 
-    public Task<bool> EndAsync(CancellationToken cancellationToken = default)
+    public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default)
     {
         _snapshot = new("idle", null, null, 0, 0, false, false, null, null, 0, 200);
         Closed?.Invoke(new PresenterClosed("disconnect", 0));

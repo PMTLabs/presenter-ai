@@ -64,7 +64,7 @@ public sealed class SessionRecorderTests
         public Task<bool> MuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> UnmuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) => Task.FromResult(false);
-        public Task<bool> EndAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
