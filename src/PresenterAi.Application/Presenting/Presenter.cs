@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Threading.Channels;
 using PresenterAi.Application.Scripts;
+using PresenterAi.Application.Tools;
+using PresenterToolsRegistration = PresenterAi.Application.Presenting.Tools.PresenterToolsRegistration;
 
 namespace PresenterAi.Application.Presenting;
 
@@ -8,7 +10,8 @@ public sealed record SessionRequest(
     string Instructions,
     string Voice,
     string Title,
-    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null);
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null,
+    string? DelegationInstructions = null);
 
 public sealed record LoadedPresentation(
     string Id,
@@ -74,7 +77,13 @@ public sealed class Presenter : IPresenter
     private bool _answerVoiced;
     private long _questionOpenedAt;
     private long? _latestQuestionEndMs;
-    private string? _pendingBackendDelegation;
+    private readonly ToolRegistry _toolRegistry;
+    private readonly Func<int, bool>? _hasDelegationModel;
+    private readonly ToolRoundTracker _toolRoundTracker = new();
+    private static readonly AsyncLocal<string?> ActiveToolCallId = new();
+    private ToolSessionCatalogue? _catalogue;
+    private long _runGeneration;
+    private string? _navigatingCallId;
     private int _resumeSequence;
     private PresenterSnapshot _snapshot;
     private int _disposed;
@@ -83,15 +92,24 @@ public sealed class Presenter : IPresenter
         Func<SessionRequest, int, ILiveSession?> createSession,
         Func<string, string, CancellationToken, Task<LoadedPresentation>> loadPresentation,
         PresenterSettings? settings = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ToolRegistry? toolRegistry = null,
+        Func<int, bool>? hasDelegationModel = null)
     {
         _createSession = createSession ?? throw new ArgumentNullException(nameof(createSession));
         _loadPresentation = loadPresentation ?? throw new ArgumentNullException(nameof(loadPresentation));
         _settings = settings ?? new PresenterSettings();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _toolRegistry = toolRegistry ?? new ToolRegistry();
+        _hasDelegationModel = hasDelegationModel;
+        PresenterToolsRegistration.RegisterAll(_toolRegistry, this);
         _snapshot = BuildSnapshot();
         _loop = Task.Run(RunLoopAsync);
     }
+
+    public ToolRegistry ToolRegistry => _toolRegistry;
+    public ToolSessionCatalogue? Catalogue => _catalogue;
+    public ToolRoundTracker ToolRoundTracker => _toolRoundTracker;
 
     public event Action<PresenterSnapshot>? State;
     public event Action<int>? Slide;
@@ -190,6 +208,7 @@ public sealed class Presenter : IPresenter
     private async Task<bool> EnqueueCommandAsync(Command command, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
+        command.InvocationCallId = ActiveToolCallId.Value;
         await WriteAsync(command, cancellationToken).ConfigureAwait(false);
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -310,6 +329,12 @@ public sealed class Presenter : IPresenter
                     case DelegatedResponseReceived response:
                         OnDelegatedResponse(response);
                         break;
+                    case ToolCallReceived toolCall:
+                        OnToolCall(toolCall);
+                        break;
+                    case ToolInvocationCompleted completed:
+                        OnToolInvocationCompleted(completed);
+                        break;
                     case SessionWarning warning:
                         if (ReferenceEquals(warning.Session, _session))
                         {
@@ -322,6 +347,9 @@ public sealed class Presenter : IPresenter
                         break;
                     case Shutdown shutdown:
                         ClearTimers();
+                        _navigatingCallId = null;
+                        _runGeneration++;
+                        _toolRoundTracker.Clear();
                         var session = _session;
                         _session = null;
                         if (session is not null)
@@ -357,9 +385,9 @@ public sealed class Presenter : IPresenter
         {
             var result = command switch
             {
-                NextCommand => NextCore(),
-                PrevCommand => PrevCore(),
-                GotoCommand goTo => GotoCore(goTo.Index),
+                NextCommand next => NextCore(next.InvocationCallId),
+                PrevCommand prev => PrevCore(prev.InvocationCallId),
+                GotoCommand goTo => GotoCore(goTo.Index, goTo.InvocationCallId),
                 PauseCommand => PauseCore(),
                 ResumeCommand => ResumeCore(),
                 MuteCommand => MuteCore(),
@@ -385,6 +413,10 @@ public sealed class Presenter : IPresenter
         }
 
         _endResumable = false;
+        _navigatingCallId = null;
+        _runGeneration++;
+        _toolRoundTracker.Clear();
+        _catalogue = _toolRegistry.CreateCatalogue(_settings.MaxInlineTools);
         SetState(PresenterState.Connecting);
         try
         {
@@ -399,17 +431,32 @@ public sealed class Presenter : IPresenter
         }
 
         var presentation = _presentation;
-        var instructions = PromptBuilder.SystemInstructions(
-            presentation.Meta.Title,
-            presentation.Slides,
-            presentation.Context,
-            onWarn: message => LogMessage("warn", message));
         ILiveSession? session = null;
         LiveSessionInfo? sessionInfo = null;
         string? upstream = null;
         for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
         {
-            var candidate = _createSession(new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice, presentation.Meta.Title), attempt);
+            var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
+            var instructions = PromptBuilder.SystemInstructions(
+                presentation.Meta.Title,
+                presentation.Slides,
+                presentation.Context,
+                onWarn: message => LogMessage("warn", message),
+                managedMode: isManaged);
+
+            var inlineTools = isManaged ? _catalogue.GetInlineToolDefinitions() : null;
+            var delegationInstructions = isManaged
+                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides)
+                : null;
+
+            var request = new SessionRequest(
+                instructions,
+                presentation.Meta.Voice ?? _settings.Voice,
+                presentation.Meta.Title,
+                inlineTools,
+                delegationInstructions);
+
+            var candidate = _createSession(request, attempt);
             if (candidate is null)
             {
                 break;
@@ -466,6 +513,7 @@ public sealed class Presenter : IPresenter
         session.UpstreamError += raw => QueueFromProducer(new UpstreamErrorReceived(session, raw.Clone()));
         session.Warning += message => QueueFromProducer(new SessionWarning(session, message));
         session.DelegatedResponseFinished += (id, type) => QueueFromProducer(new DelegatedResponseReceived(session, id, type));
+        session.ToolCallRequested += (delegationId, callId, name, arguments) => QueueFromProducer(new ToolCallReceived(session, delegationId, callId, name, arguments));
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
     }
 
@@ -567,7 +615,7 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting)
         {
             // While a backend answer is pending, speech is filler ("One moment."), not the answer.
-            if (_questionHoldOpen && _pendingBackendDelegation is null && IsAfterLatestQuestion(audio))
+            if (_questionHoldOpen && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
             {
                 if (!_answerVoiced)
                 {
@@ -650,7 +698,7 @@ public sealed class Presenter : IPresenter
         OpenOrExtendQuestionHold(null);
         if (target == "responses")
         {
-            _pendingBackendDelegation = id ?? string.Empty;
+            _toolRoundTracker.OpenDelegation(id ?? string.Empty);
         }
         else if (target == "client")
         {
@@ -663,19 +711,39 @@ public sealed class Presenter : IPresenter
 
     private void OnDelegatedResponse(DelegatedResponseReceived response)
     {
-        if (!ReferenceEquals(response.Session, _session)
-            || _pendingBackendDelegation is null
-            || (_pendingBackendDelegation.Length > 0 && _pendingBackendDelegation != response.DelegationId))
+        if (!ReferenceEquals(response.Session, _session))
         {
             return;
         }
 
-        FinishBackendDelegation(response.Type);
+        var result = _toolRoundTracker.OnDelegatedResponseFinished(response.DelegationId, response.Type);
+        switch (result)
+        {
+            case ToolRoundTracker.ResponseFinishedResult.ToolRound:
+                LogMessage("info", $"question: backend tool round completed for {response.DelegationId}");
+                if (_toolRoundTracker.ShouldSendContinueResponses())
+                {
+                    _session?.ContinueResponses();
+                    _toolRoundTracker.OnResponsesContinued();
+                }
+
+                break;
+
+            case ToolRoundTracker.ResponseFinishedResult.FinalAnswer:
+                FinishBackendDelegation("response.completed");
+                break;
+
+            case ToolRoundTracker.ResponseFinishedResult.Failed:
+                FinishBackendDelegation(response.Type);
+                break;
+
+            case ToolRoundTracker.ResponseFinishedResult.Ignored:
+                break;
+        }
     }
 
     private void FinishBackendDelegation(string type)
     {
-        _pendingBackendDelegation = null;
         if (type == "response.completed")
         {
             LogMessage("info", "question: backend answer ready");
@@ -703,9 +771,144 @@ public sealed class Presenter : IPresenter
         UpstreamError?.Invoke(new PresenterUpstreamError(message, code, clientEventId));
 
         // A delegated backend can also fail with a top-level error that names no delegation; it ends the pending one.
-        if (code == "backend_error" && _pendingBackendDelegation is not null)
+        if (code == "backend_error" && _toolRoundTracker.HasPendingBackendDelegation)
         {
+            _toolRoundTracker.CloseAllDelegations();
             FinishBackendDelegation(code);
+        }
+    }
+
+    private void OnToolCall(ToolCallReceived call)
+    {
+        if (!ReferenceEquals(call.Session, _session))
+        {
+            LogMessage("info", $"tool call for {call.CallId} dropped: session replaced");
+            return;
+        }
+
+        if (_toolRoundTracker.IsCallDuplicate(call.CallId))
+        {
+            LogMessage("info", $"tool call for {call.CallId} ignored: duplicate call id");
+            return;
+        }
+
+        if (!_toolRoundTracker.AddCall(call.DelegationId, call.CallId, call.Session, _runGeneration))
+        {
+            LogMessage("info", $"tool call for {call.CallId} ignored: could not track");
+            return;
+        }
+
+        LogMessage("info", $"tool: {call.Name} ({call.CallId}) requested for delegation {call.DelegationId}");
+        StartToolInvocation(call.Session, _runGeneration, call.DelegationId, call.CallId, call.Name, call.Arguments);
+    }
+
+    private void StartToolInvocation(
+        ILiveSession session,
+        long runGeneration,
+        string delegationId,
+        string callId,
+        string name,
+        string argumentsJson)
+    {
+        var catalogue = _catalogue;
+        var timeoutMs = _settings.ToolTimeoutMs;
+        _ = Task.Run(async () =>
+        {
+            ActiveToolCallId.Value = callId;
+            ToolResult result = ToolResult.Failure("tool failed");
+            try
+            {
+                if (catalogue is null)
+                {
+                    result = ToolResult.Failure("no tool catalogue available");
+                }
+                else
+                {
+                    JsonDocument? doc = null;
+                    try
+                    {
+                        doc = JsonDocument.Parse(argumentsJson);
+                    }
+                    catch (JsonException)
+                    {
+                        result = ToolResult.Failure("malformed argument JSON");
+                    }
+
+                    if (doc is not null)
+                    {
+                        using (doc)
+                        {
+                            var tool = catalogue.FindTool(name);
+                            if (tool is null)
+                            {
+                                result = ToolResult.Failure($"unknown tool '{name}'");
+                            }
+                            else
+                            {
+                                var validation = ToolArgumentValidator.Validate(doc.RootElement, tool.Parameters);
+                                if (!validation.IsValid)
+                                {
+                                    result = ToolResult.Failure(validation.ErrorMessage ?? "invalid arguments");
+                                }
+                                else
+                                {
+                                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
+                                    try
+                                    {
+                                        result = await tool.InvokeAsync(doc.RootElement, cts.Token).ConfigureAwait(false);
+                                    }
+                                    catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                                    {
+                                        result = ToolResult.Failure("timed out");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                result = ToolResult.Failure("tool failed");
+            }
+
+            QueueFromProducer(new ToolInvocationCompleted(session, runGeneration, delegationId, callId, result));
+        });
+    }
+
+    private void OnToolInvocationCompleted(ToolInvocationCompleted completed)
+    {
+        if (!ReferenceEquals(completed.Session, _session))
+        {
+            LogMessage("info", $"tool invocation for {completed.CallId} dropped: session replaced");
+            return;
+        }
+
+        if (completed.RunGeneration != _runGeneration && completed.CallId != _navigatingCallId)
+        {
+            LogMessage("info", $"tool invocation for {completed.CallId} dropped: stale generation ({completed.RunGeneration} vs {_runGeneration})");
+            return;
+        }
+
+        if (!_toolRoundTracker.IsCallPending(completed.DelegationId, completed.CallId))
+        {
+            LogMessage("info", $"tool invocation for {completed.CallId} dropped: call not pending in tracker");
+            return;
+        }
+
+        _toolRoundTracker.MarkCallSubmitted(completed.DelegationId, completed.CallId);
+        if (_navigatingCallId == completed.CallId)
+        {
+            _navigatingCallId = null;
+        }
+
+        _session?.SubmitToolOutput(completed.CallId, completed.Result.ToJsonString());
+        LogMessage("info", $"tool: {completed.CallId} output submitted (ok={completed.Result.Ok})");
+
+        if (_toolRoundTracker.ShouldSendContinueResponses())
+        {
+            _session?.ContinueResponses();
+            _toolRoundTracker.OnResponsesContinued();
         }
     }
 
@@ -818,7 +1021,7 @@ public sealed class Presenter : IPresenter
         ArmWrapUpFallback();
     }
 
-    private bool NextCore()
+    private bool NextCore(string? sourceCallId = null)
     {
         if (!CanNavigate())
         {
@@ -828,16 +1031,18 @@ public sealed class Presenter : IPresenter
         LeavePauseForNavigation();
         if (_slideIndex >= SlideCount - 1)
         {
+            OnNavigationSucceeded(sourceCallId);
             StartWrapUp();
             return true;
         }
 
         LogMessage("info", $"manual next → slide {_slideIndex + 2}");
+        OnNavigationSucceeded(sourceCallId);
         PresentSlide(_slideIndex + 1, interrupt: true);
         return true;
     }
 
-    private bool PrevCore()
+    private bool PrevCore(string? sourceCallId = null)
     {
         if (!CanNavigate())
         {
@@ -847,11 +1052,12 @@ public sealed class Presenter : IPresenter
         LeavePauseForNavigation();
         var target = Math.Max(0, _slideIndex - 1);
         LogMessage("info", $"manual prev → slide {target + 1}");
+        OnNavigationSucceeded(sourceCallId);
         PresentSlide(target, interrupt: true);
         return true;
     }
 
-    private bool GotoCore(int index)
+    private bool GotoCore(int index, string? sourceCallId = null)
     {
         if (!CanNavigate())
         {
@@ -866,8 +1072,15 @@ public sealed class Presenter : IPresenter
 
         LeavePauseForNavigation();
         LogMessage("info", $"goto → slide {index + 1}");
+        OnNavigationSucceeded(sourceCallId);
         PresentSlide(index, interrupt: true);
         return true;
+    }
+
+    private void OnNavigationSucceeded(string? sourceCallId)
+    {
+        _navigatingCallId = sourceCallId;
+        _runGeneration++;
     }
 
     private bool PauseCore()
@@ -957,6 +1170,9 @@ public sealed class Presenter : IPresenter
 
         CompleteSlideDiagnostics();
         ClearTimers();
+        _navigatingCallId = null;
+        _runGeneration++;
+        _toolRoundTracker.Clear();
         _endResumable = resumable;
         var session = _session;
         SetState(PresenterState.Ending);
@@ -1002,6 +1218,9 @@ public sealed class Presenter : IPresenter
     {
         CompleteSlideDiagnostics();
         ClearTimers();
+        _navigatingCallId = null;
+        _runGeneration++;
+        _toolRoundTracker.Clear();
         var endedNormally = IsNormalClose(reason) && !_endResumable;
         if (_presentation is not null)
         {
@@ -1195,7 +1414,6 @@ public sealed class Presenter : IPresenter
         _questionHoldOpen = false;
         _answerVoiced = false;
         _latestQuestionEndMs = null;
-        _pendingBackendDelegation = null;
         ClearQuestionTimer();
     }
 
@@ -1291,6 +1509,7 @@ public sealed class Presenter : IPresenter
     private abstract record Command : PresenterEvent
     {
         public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string? InvocationCallId { get; set; }
     }
 
     private sealed record StartCommand(string OwnerId, string Id, int? FromIndex) : PresenterEvent
@@ -1313,6 +1532,8 @@ public sealed class Presenter : IPresenter
     private sealed record DelegationReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
     private sealed record UpstreamErrorReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
     private sealed record DelegatedResponseReceived(ILiveSession Session, string DelegationId, string Type) : PresenterEvent;
+    private sealed record ToolCallReceived(ILiveSession Session, string DelegationId, string CallId, string Name, string Arguments) : PresenterEvent;
+    private sealed record ToolInvocationCompleted(ILiveSession Session, long RunGeneration, string DelegationId, string CallId, ToolResult Result) : PresenterEvent;
     private sealed record SessionWarning(ILiveSession Session, string Message) : PresenterEvent;
     private sealed record SessionClosed(ILiveSession Session, string Reason, double? Seconds) : PresenterEvent;
     private sealed record SilenceElapsed(long Generation, bool PartGap) : PresenterEvent;

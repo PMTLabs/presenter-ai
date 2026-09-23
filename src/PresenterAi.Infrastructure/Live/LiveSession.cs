@@ -690,7 +690,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         var responses = new JsonObject
         {
             ["model"] = _route.DelegationModel,
-            ["instructions"] = $"Answer audience questions about the talk titled {_config.PresentationTitle ?? "the presentation"} in one to three short spoken sentences; if unsure, say so.",
+            ["instructions"] = _config.DelegationInstructions ?? $"Answer audience questions about the talk titled {_config.PresentationTitle ?? "the presentation"} in one to three short spoken sentences; if unsure, say so.",
             ["reasoning"] = new JsonObject { ["effort"] = "low" },
             ["service_tier"] = "priority",
             ["text"] = new JsonObject { ["verbosity"] = "low" }
