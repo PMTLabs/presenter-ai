@@ -1,12 +1,18 @@
 import { create } from "zustand";
 import type { BridgeMessage, Snapshot } from "../ws/bridgeClient";
 export type Turn = { role: string; text: string; endMs: number | null };
+export type PresenterLog = {
+  level: string;
+  message: string;
+  time: string;
+  source?: "local" | "server";
+};
 type State = {
   snapshot: Snapshot;
   slide: number;
   usage: number | null;
   transcript: Turn[];
-  logs: { level: string; message: string; time: string }[];
+  logs: PresenterLog[];
   connected: boolean;
   micReady: boolean;
   bufferedMs: number;
@@ -37,7 +43,12 @@ export const usePresenterStore = create<State>((set) => ({
     set((s) => ({
       logs: [
         ...s.logs,
-        { level, message, time: new Date().toTimeString().slice(0, 8) },
+        {
+          level,
+          message,
+          time: new Date().toTimeString().slice(0, 8),
+          source: "local" as const,
+        },
       ].slice(-400),
     })),
   message: (m) =>
@@ -75,6 +86,7 @@ export const usePresenterStore = create<State>((set) => ({
               level: String(m.level),
               message: String(m.message),
               time: new Date().toTimeString().slice(0, 8),
+              source: "server" as const,
             },
           ].slice(-400),
         };

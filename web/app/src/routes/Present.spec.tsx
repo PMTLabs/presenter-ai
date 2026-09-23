@@ -3,8 +3,9 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAuthSession, setAuthSession, useAuthStore } from "@presenter/shared";
+import { usePresenterStore } from "../store/presenterStore";
 
-const { bridgeConnect, bridgeDisconnect, bridgeHandlers, captureStop, close, deckLogs, dispose, get, load, playbackStop, post, startAudio } = vi.hoisted(() => ({
+const { bridgeConnect, bridgeDisconnect, bridgeHandlers, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   load: vi.fn().mockResolvedValue({ adapter: "sections", count: 1 }),
@@ -13,6 +14,7 @@ const { bridgeConnect, bridgeDisconnect, bridgeHandlers, captureStop, close, dec
   captureStop: vi.fn(),
   deckLogs: vi.fn(),
   playbackStop: vi.fn(),
+  playbackFlush: vi.fn(),
   startAudio: vi.fn(),
   bridgeConnect: vi.fn(),
   bridgeDisconnect: vi.fn(),
@@ -80,22 +82,102 @@ describe("Present", () => {
     close.mockClear();
     captureStop.mockClear();
     playbackStop.mockClear();
+    playbackFlush.mockClear();
     startAudio.mockClear();
     bridgeConnect.mockClear();
     bridgeDisconnect.mockClear();
     bridgeHandlers.clear();
     clearAuthSession();
+    window.history.replaceState({}, "", "/");
     useAuthStore.setState({ ready: false });
+    usePresenterStore.setState({
+      snapshot: { state: "idle", slideIndex: 0, slideCount: 0, muted: false },
+      logs: [],
+    });
     post.mockResolvedValue({ data: { ticket: "ticket" } });
     startAudio.mockResolvedValue({
       context: { close, sampleRate: 48000, state: "running" },
       capture: { stop: captureStop },
-      playback: { stop: playbackStop, bufferedMs: 0, enqueue() {} },
+      playback: { stop: playbackStop, flush: playbackFlush, bufferedMs: 0, enqueue() {} },
       micReady: true,
     });
   });
 
   afterEach(() => clearAuthSession());
+
+  it("flushes playback once and logs when capture reports barge-in", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await vi.waitFor(() => expect(startAudio).toHaveBeenCalledOnce());
+
+    act(() => startAudio.mock.calls[0][0].onBargeIn());
+    expect(playbackFlush).toHaveBeenCalledOnce();
+    expect(usePresenterStore.getState().logs.at(-1)?.message).toBe(
+      "barge-in: playback flushed",
+    );
+  });
+
+  it("passes echoGate=off to startAudio", async () => {
+    window.history.pushState({}, "", "/present/demo?echoGate=off");
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await vi.waitFor(() => expect(startAudio).toHaveBeenCalledOnce());
+    expect(startAudio.mock.calls[0][0].echoGate).toBe(false);
+  });
+
+  it("shows only the newest server warning while paused", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("log", { type: "log", level: "warn", message: "first warning" });
+    emitBridge("log", { type: "log", level: "warn", message: "newest warning" });
+    expect((await screen.findByRole("alert")).textContent).toContain("newest warning");
+
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows no banner for a manual pause after an earlier warning, and the stall warning after its pause", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    const serverLog = (level: string, message: string) => emitBridge("log", { type: "log", level, message });
+    serverLog("warn", "no output audio 15000 ms after slide 1 was sent; nudging the model");
+    serverLog("info", "state → paused");
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    serverLog("info", "state → presenting");
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    serverLog("info", "state → paused");
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    serverLog("warn", "The model stopped responding on slide 1 — Resume or End.");
+    expect((await screen.findByRole("alert")).textContent).toContain("stopped responding on slide 1");
+  });
+
+  it("never promotes the page-local connection closed line to the paused banner", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("close");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 
   it("renders mapped Problem Details copy", async () => {
     signIn();

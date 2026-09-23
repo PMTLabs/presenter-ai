@@ -1,5 +1,8 @@
+import { ECHO_GATE_WORKLET_SENTINEL, EchoGate, FRAME_MS } from "../echoGate";
+
 const TARGET_RATE = 24000;
 const FRAME_SAMPLES = 480;
+const STATS_FRAMES = 100 / FRAME_MS;
 class CaptureProcessor extends AudioWorkletProcessor {
   ratio = sampleRate / TARGET_RATE;
   pos = 0;
@@ -7,12 +10,23 @@ class CaptureProcessor extends AudioWorkletProcessor {
   frame = new Int16Array(FRAME_SAMPLES);
   frameFill = 0;
   muted = false;
+  gateEnabled = true;
+  gate = new EchoGate();
+  farLevel = 0;
   peak = 0;
   peakCounter = 0;
+  statsFrames = 0;
   constructor() {
     super();
     this.port.onmessage = (e) => {
       if (e.data?.type === "mute") this.muted = Boolean(e.data.value);
+      else if (e.data?.type === "echo-gate") this.gateEnabled = Boolean(e.data.enabled);
+      else if (e.data?.type === "far-level-port") {
+        const farPort = e.data.port as MessagePort;
+        farPort.onmessage = (event) => {
+          if (event.data?.type === "far-level") this.farLevel = event.data.value;
+        };
+      }
     };
   }
   process(inputs: Float32Array[][]) {
@@ -54,10 +68,31 @@ class CaptureProcessor extends AudioWorkletProcessor {
     return true;
   }
   flush() {
-    const buffer = this.frame.buffer.slice(0);
-    this.port.postMessage({ type: "frame", buffer }, [buffer]);
+    let output = this.frame.buffer.slice(0);
+    const result = this.gate.process(rms(this.frame), this.farLevel, !this.gateEnabled);
+    if (!result.pass) output = new ArrayBuffer(this.frame.byteLength);
+    if (result.bargeIn) this.port.postMessage({ type: "barge-in" });
+    this.statsFrames++;
+    if (this.statsFrames >= STATS_FRAMES) {
+      this.port.postMessage({
+        type: "echo-stats",
+        gateOpenRatio: this.gate.openRatio,
+        coupling: result.coupling,
+        worklet: ECHO_GATE_WORKLET_SENTINEL,
+      });
+      this.statsFrames = 0;
+    }
+    this.port.postMessage({ type: "frame", buffer: output }, [output]);
     this.frameFill = 0;
   }
+}
+function rms(frame: Int16Array) {
+  let sum = 0;
+  for (const sample of frame) {
+    const value = sample / 0x8000;
+    sum += value * value;
+  }
+  return Math.sqrt(sum / frame.length);
 }
 function toInt16(x: number) {
   const c = Math.max(-1, Math.min(1, x));

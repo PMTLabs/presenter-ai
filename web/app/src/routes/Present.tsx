@@ -6,7 +6,7 @@ import { errorMessages, isProblem, useAuthStore } from "@presenter/shared";
 import { BridgeClient } from "../ws/bridgeClient";
 import { DeckDriver } from "../deck/deckDriver";
 import { startAudio, type StartedAudio } from "../audio/capture";
-import { usePresenterStore } from "../store/presenterStore";
+import { usePresenterStore, type PresenterLog } from "../store/presenterStore";
 import { Transcript } from "../components/Transcript";
 import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
@@ -72,6 +72,12 @@ export function Present() {
   const driver = useRef<DeckDriver | null>(null);
   const audio = useRef<StartedAudio | null>(null);
   const audioAbort = useRef<AbortController | null>(null);
+  const echo = useRef({
+    reference: "fallback" as "loopback" | "fallback",
+    gateOpenRatio: 0,
+    coupling: 0.5,
+    bargeIns: 0,
+  });
   const [presentation, setPresentation] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
@@ -202,10 +208,30 @@ export function Present() {
     stopAudio();
     const controller = new AbortController();
     audioAbort.current = controller;
+    const echoGate = new URLSearchParams(window.location.search).get("echoGate") !== "off";
     const started = await startAudio({
       onFrame: (buffer) => client.current?.sendAudio(buffer),
       onBuffered: setBuffered,
       onMicReady: setMicReady,
+      onBargeIn: () => {
+        audio.current?.playback.flush();
+        echo.current.bargeIns++;
+        log("info", "barge-in: playback flushed");
+      },
+      onEchoStats: (stats) => {
+        echo.current.gateOpenRatio = stats.gateOpenRatio;
+        echo.current.coupling = stats.coupling;
+      },
+      onReference: (reference, reason) => {
+        echo.current.reference = reference;
+        log(
+          "info",
+          reference === "loopback"
+            ? "echo reference: loopback"
+            : `echo reference: fallback (${reason ?? "unknown"})`,
+        );
+      },
+      echoGate,
       signal: controller.signal,
     });
     if (controller.signal.aborted) {
@@ -268,10 +294,12 @@ export function Present() {
           .join("")
           .slice(-400),
         logTail: logs.slice(-8),
+        echo: echo.current,
         wsOpen: snapshot.state !== "idle",
       });
   }, [presentation, snapshot, transcript, logs]);
   const live = snapshot.state === "presenting" || snapshot.state === "paused";
+  const pausedWarning = snapshot.state === "paused" ? warningSincePause(logs) : null;
   const isDesktop = useDesktopLayout();
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: "presenter-split",
@@ -332,6 +360,11 @@ export function Present() {
               "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
             ].join(" ")}
           >
+            {pausedWarning && (
+              <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-amber-50 p-3 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                {pausedWarning.message}
+              </p>
+            )}
             <div className="min-h-0 min-w-0 flex-1 p-1">
               <iframe
                 ref={frame}
@@ -422,4 +455,19 @@ export function Present() {
       </Group>
     </section>
   );
+}
+
+/**
+ * The newest server warning logged after the run entered its current state. The server logs "state → paused" as it
+ * pauses and a stall adds its warning after that, so a manual pause shows no banner and an older warning (an earlier
+ * nudge, say) is never promoted.
+ */
+function warningSincePause(logs: PresenterLog[]) {
+  for (let index = logs.length - 1; index >= 0; index--) {
+    const entry = logs[index];
+    if (entry.source !== "server") continue;
+    if (entry.level === "warn") return entry;
+    if (entry.message.startsWith("state → ")) return null;
+  }
+  return null;
 }
