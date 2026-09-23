@@ -13,14 +13,48 @@ when something goes wrong. Design and decisions: plan 005 §4.5 (amendment A1); 
 3. **Backend otherwise.** If the material does not cover it, GPT-Live hands the question to a second model (the
    *delegation model*, `gpt-5.6-luna` by default). The AI says at most "One moment." and speaks the backend's answer
    when it arrives.
-4. **Follow-up window.** After answering, the AI stays silent for the follow-up wait (5 s by default). A new question
-   in that window starts again at step 1. If a backend answer is still on its way when the next question comes, the
-   hold also waits for that answer, because GPT-Live speaks it anyway.
-5. **Resume.** When the window passes quietly, the presenter tells the AI to say a short bridge ("Back to the slide")
-   and restart the sentence it was in when it was interrupted. Normal slide timing then takes over.
+4. **Check-in and follow-up.** After answering, the AI asks “Shall I carry on?” and waits. Say an eligible yes to
+   resume, or say no to stay on the slide for another question. If nobody replies, it resumes after the configured
+   follow-up wait (5 s by default). A new question during the check-in opens a new hold.
+5. **Resume.** The presenter tells the AI to make a short, natural transition and restart the interrupted sentence
+   (or say only the transition if the slide was finished). A voice command never triggers this bridge.
 
-If nothing answers within 15 s, the hold is released anyway and the AI is told to resume, so a missed or misheard
-question never stalls the talk.
+A complete utterance is assembled from transcript fragments, with a 700 ms gap ending the utterance; utterances
+longer than 120 characters or 6 seconds are not commands. The matcher accepts exact phrases after punctuation,
+whitespace and its filler allowlist are normalized. It does not trigger on a command word embedded in a question.
+
+### Voice commands
+
+| Intent | Accepted phrases |
+|---|---|
+| Pause | `stop`, `pause`, `wait`, `hold on`, `stop talking`, `stop there`, `pause there` |
+| Resume | `continue`, `carry on`, `keep going`, `go on`, `go ahead`, `resume`, `keep continue` |
+| Next | `next`, `next slide`, `go next`, `move on` |
+| Previous | `back`, `go back`, `previous`, `previous slide`, `last slide` |
+| Go to slide | `go to slide N`, `slide N` (digits or one through twenty) |
+| End | `end`, `end meeting`, `end presentation`, `end talk`, `finish`, `stop presentation` |
+| Confirmation / check-in | Yes: `yes`, `yeah`, `yep`, `sure`, `do it`; no: `no`, `nope`, `not yet`, `don't` |
+
+The matcher also strips `please`, `just`, `now`, `okay`, `ok`, `hey`, `the`, and `a`, and treats “can you” and
+“could you” as removable. It does not match arbitrary rewordings. A Go to slide target must also exist in the deck.
+Yes/no only act in the matching check-in or end-confirmation phase.
+
+**Echo safety:** if voiced model output overlaps the utterance (using audio timestamps), or was forwarded within
+300 ms when timestamps are unavailable, only Pause is eligible. Every other voice command requires the model to
+have been silent throughout the utterance. Thus an echo of the model's own voice can at worst pause the talk. Use
+headphones where possible; press **M** to stop listening entirely.
+
+Pause does not mute the microphone: the presenter keeps listening for spoken commands while paused. It flushes
+queued playback so narration already in flight is not played over the pause. A non-command utterance while paused
+may receive a brief spoken answer; explicit Mute stops microphone input.
+
+### Ending the presentation
+
+Saying an End phrase pauses the talk and asks, “Shall I end the presentation now?” The model asks and then waits;
+answer yes while it is silent to end and record the session as ended. Say no to resume. If the question is not voiced
+after 8 seconds, the answer window still opens; if there is no eligible answer within 10 seconds, the presenter stays
+paused. Saying End again does not restart the deadline. The End button / bridge command is explicit and ends without
+asking for confirmation.
 
 ## Configuration
 
@@ -108,7 +142,9 @@ nothing.
 With an empty delegation model, or when Azure rejects the delegation model at session start, the session runs in
 *client* delegation mode. `LiveSession.ConnectAsync` retries the start once in that mode, and the log says why. When
 the AI then delegates, the presenter immediately appends `PromptBuilder.ClientDelegationAnswerNowInstruction`:
-answer from the material now, or say plainly that it does not cover the question.
+answer from the material now, or say plainly that it does not cover the question. This applies while paused too:
+input continues to reach the model unless muted, but output is gated except for a brief response permitted after that
+utterance.
 
 ## Timers at a glance
 
@@ -131,7 +167,7 @@ These appear in the Log panel of the Present page.
 | `question: delegated (backend)` | GPT-Live sent the question to the delegation model. |
 | `question: backend answer ready` | The delegation model finished; its answer is being spoken. |
 | `question: backend answer failed (<type>)` (warn) | The backend call failed (a failed `response.event`, or a top-level `backend_error`); the AI answers without it. |
-| `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material (only while presenting; while paused nothing is sent). |
+| `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material. While paused, input is still sent unless muted, and only permitted reply audio is forwarded. |
 | `question: answered after N ms` | First answer audio, N ms after the question. |
 | `question: no follow-up after N ms; resuming` | The follow-up window passed; the AI was told to resume. |
 | `question: released after 15 s without an answer` | Nothing answered; the talk carries on. |
@@ -148,7 +184,7 @@ The API log (`dotnet run` output) also shows `<< session.delegation.created`, `<
 | `backend answer failed` on questions | Backend quota, content filter or deployment problem | Check the Azure resource; the talk continues deck-only for that question |
 | The AI resumes too soon after answering | Follow-up wait too short for your audience | Raise `Presenter:FollowUpWaitMs` |
 | Long pauses after every answer | Follow-up wait too long | Lower it (not below 2500) |
-| `hold opened` with nobody speaking | Room noise or speaker echo transcribed as speech | Use headphones or a headset; the echo gate (plan 005 §4.2) reduces this. A false hold costs at most one follow-up wait |
+| `hold opened` with nobody speaking | Room noise or speaker echo transcribed as speech | Use headphones or a headset. Voice-command echo protection is separate: during voiced model output only Pause is eligible. A false question hold can delay slide progress. |
 | The AI says "I'll check on that" and moves on | Older build (before plan 005 A1) | Run the current branch |
 
 ## Limitations

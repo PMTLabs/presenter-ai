@@ -174,6 +174,7 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   it; the replaced client gets `{"type":"error","code":"taken_over"}` and close `4409` with reason `taken_over`,
   and must not reconnect. Another account's request gets busy with `canTakeOver:false`.
 - Ping/pong: client `{"type":"ping"}` → `{"type":"pong"}` every 15 s; server closes after 45 s of silence.
+- Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on pause). This is a server-to-client event, not a command; clients that do not recognize it may ignore it.
 
 ## 9. Security and headers
 

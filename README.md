@@ -106,13 +106,25 @@ not pick up the model's own voice.
 
 | Key | Action |
 |---|---|
-| Space | Pause / resume (pause also mutes the mic) |
+| Space | Pause / resume (microphone stays open while paused; press M to mute) |
 | → / ← | Next / previous slide (narration follows) |
 | M | Mute / unmute the microphone |
 | Esc | End the session (stops billing) |
 | S | Start (when idle) |
 
-The deck's own navigation buttons also work: the presenter follows the deck.
+The deck's own navigation buttons also work: the presenter follows the deck. Spoken commands are listed below. The presenter listens while paused; press **M** to stop listening.
+
+| Voice command | Effect |
+|---|---|
+| Pause: `stop`, `pause`, `wait`, `hold on`, `stop talking`, `stop there`, `pause there` | Pauses immediately. While the model is speaking, Pause is the only voice command accepted. |
+| Resume: `continue`, `carry on`, `keep going`, `go on`, `go ahead`, `resume`, `keep continue` | Resumes from the interrupted point. |
+| Next: `next`, `next slide`, `go next`, `move on` | Advances one slide. |
+| Previous: `back`, `go back`, `previous`, `previous slide`, `last slide` | Goes back one slide. |
+| Go to: `go to slide N`, `slide N` | Goes to a numbered slide (1–20 by number word, or any positive digit number); the target must exist. |
+| End: `end`, `end meeting`, `end presentation`, `end talk`, `finish`, `stop presentation` | Pauses and asks for confirmation. Say `yes`, `yeah`, `yep`, `sure`, or `do it` to end; say `no`, `nope`, `not yet`, or `don't` to resume. |
+| Check-in: `yes`, `yeah`, `yep`, `sure`, `do it` / `no`, `nope`, `not yet`, `don't` | Answers “Shall I carry on?” with yes/resume or no/stay on the slide. |
+
+Commands must be a complete utterance, not just a word within a question. Except Pause, commands are ignored if they overlap the model's voiced speech. Punctuation, filler words, and common forms such as “can you” / “could you” are normalized; see [Audience questions](docs/guides/002-audience-questions.md).
 
 ## Configuration (`.env`)
 
@@ -192,7 +204,7 @@ Things learned from the live service that the code relies on:
 - Output audio is a **continuous stream, silence included**, so "finished speaking" is detected by RMS on the
   audio, not by the absence of events. The model pauses up to ~2.3 s at paragraph breaks; keep
   `advanceSilenceMs` ≥ 2500.
-- Client delegation events carry no task text, so voice commands like "go to slide 3" are not implemented.
+- Client delegation events carry no task text. Common English voice commands are handled locally; richer requests that need managed tools are unavailable in deck-only mode.
 
 ## Troubleshooting
 
@@ -205,6 +217,6 @@ Things learned from the live service that the code relies on:
 | Slides advance mid-narration | Raise `advanceSilenceMs` (frontmatter or `.env`). |
 | Model goes quiet and nothing happens | The app nudges it after 15 s and again after 30 s; at 45 s it pauses the talk with a warning. Press Resume, → to re-inject the slide, or End. |
 | Deck not driven (`deck adapter: none matched`) | Deck is not same-origin or has no `show()`/`Reveal`/`section.slide`; set `driver:` explicitly or adapt the deck. |
-| Echo / the model answers itself | Use headphones or press M while it speaks. |
+| Echo / the model answers itself | Use headphones. During model speech only a complete Pause command is eligible; other commands are ignored. Press M to stop the microphone from listening. |
 | Rate limit on Azure (10 RPM) | Set `FALLBACK_OPENAI_KEY`; the app fails over automatically at session start. |
 | Presenter is in use in another tab | For the same account, press **Take over** to end the other tab's talk and resume at its slide. Another account cannot take it over. |
