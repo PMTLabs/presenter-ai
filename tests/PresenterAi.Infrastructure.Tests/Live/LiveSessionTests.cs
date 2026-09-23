@@ -124,6 +124,125 @@ public sealed class LiveSessionTests
     }
 
     [Fact]
+    public async Task Session_start_includes_tools_only_in_managed_mode()
+    {
+        var sampleTool = SampleToolDefinition();
+
+        // 1. Managed mode: delegation model set -> tools included under delegation.responses
+        await using var serverManaged = await FakeLiveServer.StartAsync();
+        await using var sessionManaged = Create(serverManaged, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna", tools: [sampleTool]);
+        var infoManaged = await sessionManaged.ConnectAsync();
+
+        infoManaged.DelegationMode.Should().Be("responses");
+        var startManaged = await EventuallyAsync(() => serverManaged.ReceivedSnapshot().SingleOrDefault(EventTypeIs("session.start")));
+        var responses = startManaged!["session"]!["delegation"]!["responses"]!.AsObject();
+        responses["tools"]!.AsArray().Should().HaveCount(1);
+        responses["tools"]![0]!["name"]!.GetValue<string>().Should().Be("pause_presentation");
+        responses["tool_choice"]!.GetValue<string>().Should().Be("auto");
+        responses["parallel_tool_calls"]!.GetValue<bool>().Should().BeFalse();
+
+        // 2. Client mode: delegation model empty -> client delegation, no tools
+        await using var serverClient = await FakeLiveServer.StartAsync();
+        await using var sessionClient = Create(serverClient, new FakeTimeProvider(), delegationModel: "", tools: [sampleTool]);
+        var infoClient = await sessionClient.ConnectAsync();
+
+        infoClient.DelegationMode.Should().Be("client");
+        var startClient = await EventuallyAsync(() => serverClient.ReceivedSnapshot().SingleOrDefault(EventTypeIs("session.start")));
+        startClient!["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
+        startClient["session"]!["delegation"]!["responses"].Should().BeNull();
+        startClient["session"]!["delegation"]!["tools"].Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Function_call_item_done_raises_ToolCallRequested_event()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+        string? receivedDelegationId = null;
+        string? receivedCallId = null;
+        string? receivedName = null;
+        string? receivedArgs = null;
+
+        session.ToolCallRequested += (delId, callId, name, args) =>
+        {
+            receivedDelegationId = delId;
+            receivedCallId = callId;
+            receivedName = name;
+            receivedArgs = args;
+        };
+
+        await session.ConnectAsync();
+        await server.SendFunctionCallAsync("del_123", "call_abc", "pause_presentation", "{\"param\":\"val\"}");
+
+        await EventuallyAsync(() => receivedCallId is not null);
+        receivedDelegationId.Should().Be("del_123");
+        receivedCallId.Should().Be("call_abc");
+        receivedName.Should().Be("pause_presentation");
+        receivedArgs.Should().Be("{\"param\":\"val\"}");
+    }
+
+    [Fact]
+    public async Task SubmitToolOutput_sends_response_item_create_before_ContinueResponses_sends_response_create()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+        await session.ConnectAsync();
+
+        var outputSubmitted = session.SubmitToolOutput("call_abc", "{\"ok\":true}");
+        outputSubmitted.Should().BeTrue();
+
+        var continued = session.ContinueResponses();
+        continued.Should().BeTrue();
+
+        await EventuallyAsync(() =>
+        {
+            var msgs = server.ReceivedSnapshot();
+            return msgs.Any(EventTypeIs("response.item.create")) && msgs.Any(EventTypeIs("response.create"));
+        });
+
+        var snapshot = server.ReceivedSnapshot().ToList();
+        var itemCreateIdx = snapshot.FindIndex(m => Type(m) == "response.item.create");
+        var respCreateIdx = snapshot.FindIndex(m => Type(m) == "response.create");
+
+        itemCreateIdx.Should().BeGreaterThanOrEqualTo(0);
+        respCreateIdx.Should().BeGreaterThan(itemCreateIdx);
+
+        var itemCreate = snapshot[itemCreateIdx];
+        itemCreate["item"]!["type"]!.GetValue<string>().Should().Be("function_call_output");
+        itemCreate["item"]!["call_id"]!.GetValue<string>().Should().Be("call_abc");
+        itemCreate["item"]!["output"]!.GetValue<string>().Should().Be("{\"ok\":true}");
+    }
+
+    [Fact]
+    public async Task Tools_rejection_falls_back_to_client_mode_with_SessionInfo_saying_client()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        server.ToolsStartRejections = 1;
+        var warnings = new List<string>();
+        var errors = new List<string>();
+
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna", tools: [SampleToolDefinition()]);
+        session.Warning += warnings.Add;
+        session.UpstreamError += error => errors.Add(error.GetRawText());
+
+        var info = await session.ConnectAsync();
+
+        info.DelegationMode.Should().Be("client");
+        session.State.Should().Be(LiveSessionState.Open);
+
+        var starts = server.ReceivedSnapshot().Where(EventTypeIs("session.start")).ToArray();
+        starts.Should().HaveCount(2);
+        starts[0]["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("responses");
+        starts[0]["session"]!["delegation"]!["responses"]!["tools"].Should().NotBeNull();
+
+        starts[1]["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
+        starts[1]["session"]!["delegation"]!["responses"].Should().BeNull();
+
+        warnings.Should().ContainSingle().Which.Should().Contain("tools_not_supported");
+        errors.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Delegation_event_preserves_id_target_and_offset()
     {
         await using var server = await FakeLiveServer.StartAsync();
@@ -378,15 +497,29 @@ public sealed class LiveSessionTests
         TimeSpan? closeTimeout = null,
         string delegationModel = "",
         string? presentationTitle = null,
-        ILogger<LiveSession>? logger = null)
+        ILogger<LiveSession>? logger = null,
+        IReadOnlyList<JsonObject>? tools = null)
     {
         return new LiveSession(
             new UpstreamRoute("azure-like", new Uri(server.Url), headers ?? new Dictionary<string, string> { ["Authorization"] = "Bearer test" }, model, delegationModel),
-            new LiveSessionConfig(model, "test instructions", "test-voice", presentationTitle),
+            new LiveSessionConfig(model, "test instructions", "test-voice", presentationTitle, tools),
             clock,
             logger ?? NullLogger<LiveSession>.Instance,
             new LiveSessionOptions { SilencePump = silencePump, CloseTimeout = closeTimeout ?? TimeSpan.FromSeconds(5) });
     }
+
+    private static JsonObject SampleToolDefinition(string name = "pause_presentation") => new()
+    {
+        ["type"] = "function",
+        ["name"] = name,
+        ["description"] = "Pause presentation",
+        ["parameters"] = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject(),
+            ["additionalProperties"] = false
+        }
+    };
 
     private static IReadOnlyDictionary<string, string> AzureLikeHeaders()
     {

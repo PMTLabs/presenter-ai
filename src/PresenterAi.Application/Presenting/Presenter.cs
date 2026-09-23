@@ -4,7 +4,11 @@ using PresenterAi.Application.Scripts;
 
 namespace PresenterAi.Application.Presenting;
 
-public sealed record SessionRequest(string Instructions, string Voice, string Title);
+public sealed record SessionRequest(
+    string Instructions,
+    string Voice,
+    string Title,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null);
 
 public sealed record LoadedPresentation(
     string Id,

@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Sessions;
+using PresenterAi.Application.Tools;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
 using PresenterAi.Infrastructure.Persistence;
@@ -70,6 +71,13 @@ public static class DependencyInjection
             .Validate(
                 options => options.FollowUpWaitMs is >= PresenterOptions.MinFollowUpWaitMs and <= PresenterOptions.MaxFollowUpWaitMs,
                 $"Presenter:FollowUpWaitMs must be between {PresenterOptions.MinFollowUpWaitMs} and {PresenterOptions.MaxFollowUpWaitMs}")
+            .ValidateOnStart();
+
+        services.AddOptions<ToolsOptions>()
+            .Bind(configuration.GetSection("Tools"))
+            .Validate(
+                options => options.MaxInlineTools is >= ToolsOptions.MinMaxInlineTools and <= ToolsOptions.MaxMaxInlineTools,
+                $"Tools:MaxInlineTools must be between {ToolsOptions.MinMaxInlineTools} and {ToolsOptions.MaxMaxInlineTools}")
             .ValidateOnStart();
 
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
@@ -144,7 +152,7 @@ public static class DependencyInjection
 
             return new Presenter(
                 (request, attempt) => attempt < routes.Upstreams.Count
-                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice, request.Title))
+                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice, request.Title, request.Tools))
                     : null,
                 loader,
                 new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice, settings.FollowUpWaitMs),

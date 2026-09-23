@@ -34,6 +34,7 @@ internal sealed class FakeSession : ILiveSession
     public event Action<JsonElement>? UpstreamError;
     public event Action<string>? Warning;
     public event Action<string, string>? DelegatedResponseFinished;
+    public event Action<string, string, string, string>? ToolCallRequested;
     public event Action<string, double?>? Closed;
 
     public Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
@@ -49,7 +50,7 @@ internal sealed class FakeSession : ILiveSession
         }
 
         State = LiveSessionState.Open;
-        var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"));
+        var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"), "responses");
         Started?.Invoke(session);
         return Task.FromResult(session);
     }
@@ -59,6 +60,18 @@ internal sealed class FakeSession : ILiveSession
     public string? AppendThinking(string content, string? eventId = null, string? delegationId = null) => Append("thinking", content, eventId, delegationId);
 
     public string? AppendCommentary(string content, string? eventId = null, string? delegationId = null) => Append("commentary", content, eventId, delegationId);
+
+    public bool SubmitToolOutput(string callId, string output)
+    {
+        Sent.Add(("tool_output", output, callId, null));
+        return true;
+    }
+
+    public bool ContinueResponses()
+    {
+        Sent.Add(("continue_responses", null, null, null));
+        return true;
+    }
 
     public bool Mute()
     {
@@ -126,6 +139,9 @@ internal sealed class FakeSession : ILiveSession
 
     public void RaiseDelegatedResponse(string id, string type = "response.completed") =>
         DelegatedResponseFinished?.Invoke(id, type);
+
+    public void RaiseToolCall(string delegationId, string callId, string name, string arguments) =>
+        ToolCallRequested?.Invoke(delegationId, callId, name, arguments);
 
     private string? Append(string type, string content, string? eventId, string? delegationId)
     {

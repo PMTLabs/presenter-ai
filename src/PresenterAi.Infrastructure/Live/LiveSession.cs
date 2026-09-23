@@ -68,6 +68,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<JsonElement>? UpstreamError;
     public event Action<string>? Warning;
     public event Action<string, string>? DelegatedResponseFinished;
+    public event Action<string, string, string, string>? ToolCallRequested;
     public event Action<string, double?>? Closed;
 
     public LiveSessionState State => (LiveSessionState)Volatile.Read(ref _state);
@@ -176,6 +177,42 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public string? AppendCommentary(string content, string? eventId = null, string? delegationId = null)
     {
         return Append("commentary", content, eventId, delegationId);
+    }
+
+    public bool SubmitToolOutput(string callId, string output)
+    {
+        if (State != LiveSessionState.Open)
+        {
+            return false;
+        }
+
+        var payload = new JsonObject
+        {
+            ["type"] = "response.item.create",
+            ["event_id"] = NextEventId("tool-res"),
+            ["item"] = new JsonObject
+            {
+                ["type"] = "function_call_output",
+                ["call_id"] = callId,
+                ["output"] = output
+            }
+        };
+        return Enqueue(new JsonFrame(payload));
+    }
+
+    public bool ContinueResponses()
+    {
+        if (State != LiveSessionState.Open)
+        {
+            return false;
+        }
+
+        var payload = new JsonObject
+        {
+            ["type"] = "response.create",
+            ["event_id"] = NextEventId("continue")
+        };
+        return Enqueue(new JsonFrame(payload));
     }
 
     public bool Mute()
@@ -536,13 +573,16 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     private void HandleStarted(JsonElement message)
     {
         var session = GetProperty(message, "session") ?? message;
-        var info = new LiveSessionInfo(GetString(session, "id"), GetString(session, "model"), GetInt64(session, "expires_at"), session);
+        var delegationMode = _useClientDelegation || string.IsNullOrWhiteSpace(_route.DelegationModel)
+            ? "client"
+            : "responses";
+        var info = new LiveSessionInfo(GetString(session, "id"), GetString(session, "model"), GetInt64(session, "expires_at"), session, delegationMode);
         _session = info;
         Volatile.Write(ref _state, (int)LiveSessionState.Open);
         _pumpStartedAt = _timeProvider.GetTimestamp();
         _sentMs = 0;
         _pumpLoop = _options.SilencePump ? PumpLoopAsync() : null;
-        _logger.LogInformation("Session started: id={Id} model={Model} expires_at={ExpiresAt}", info.Id, info.Model, info.ExpiresAt);
+        _logger.LogInformation("Session started: id={Id} model={Model} expires_at={ExpiresAt} delegation={DelegationMode}", info.Id, info.Model, info.ExpiresAt, info.DelegationMode);
         Started?.Invoke(info);
         _started.TrySetResult(info);
     }
@@ -552,7 +592,20 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         var delegationId = GetString(envelope, "delegation_id") ?? "unknown";
         var responseEvent = GetProperty(envelope, "event");
         var type = responseEvent is { } nested ? GetString(nested, "type") : null;
-        if (type == "response.completed")
+        if (type == "response.output_item.done")
+        {
+            var item = responseEvent is { } resEv ? GetProperty(resEv, "item") : null;
+            var itemType = item is { } it ? GetString(it, "type") : null;
+            if (itemType == "function_call" && item is { } fnItem)
+            {
+                var callId = GetString(fnItem, "call_id") ?? string.Empty;
+                var name = GetString(fnItem, "name") ?? string.Empty;
+                var arguments = GetString(fnItem, "arguments") ?? "{}";
+                _logger.LogInformation("Tool call requested: delegation={DelegationId} call={CallId} name={ToolName}", delegationId, callId, name);
+                ToolCallRequested?.Invoke(delegationId, callId, name, arguments);
+            }
+        }
+        else if (type == "response.completed")
         {
             _logger.LogInformation("Delegated response completed: id={DelegationId}", delegationId);
             DelegatedResponseFinished?.Invoke(delegationId, type);
@@ -577,7 +630,9 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         var code = GetString(error, "code") ?? string.Empty;
         var message = GetString(error, "message") ?? string.Empty;
         return code.Contains("delegation", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("delegation", StringComparison.OrdinalIgnoreCase);
+            || code.Contains("tools", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("delegation", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("tools", StringComparison.OrdinalIgnoreCase);
     }
 
     private string? Append(string kind, string content, string? eventId, string? delegationId)
@@ -632,17 +687,26 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
             return new JsonObject { ["type"] = "client" };
         }
 
+        var responses = new JsonObject
+        {
+            ["model"] = _route.DelegationModel,
+            ["instructions"] = $"Answer audience questions about the talk titled {_config.PresentationTitle ?? "the presentation"} in one to three short spoken sentences; if unsure, say so.",
+            ["reasoning"] = new JsonObject { ["effort"] = "low" },
+            ["service_tier"] = "priority",
+            ["text"] = new JsonObject { ["verbosity"] = "low" }
+        };
+
+        if (_config.Tools is { Count: > 0 } tools)
+        {
+            responses["tools"] = new JsonArray(tools.Select(t => (JsonNode)t.DeepClone()).ToArray());
+            responses["tool_choice"] = "auto";
+            responses["parallel_tool_calls"] = false;
+        }
+
         return new JsonObject
         {
             ["type"] = "responses",
-            ["responses"] = new JsonObject
-            {
-                ["model"] = _route.DelegationModel,
-                ["instructions"] = $"Answer audience questions about the talk titled {_config.PresentationTitle ?? "the presentation"} in one to three short spoken sentences; if unsure, say so.",
-                ["reasoning"] = new JsonObject { ["effort"] = "low" },
-                ["service_tier"] = "priority",
-                ["text"] = new JsonObject { ["verbosity"] = "low" }
-            }
+            ["responses"] = responses
         };
     }
 

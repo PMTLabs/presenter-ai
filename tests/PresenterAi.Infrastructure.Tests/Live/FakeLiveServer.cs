@@ -34,6 +34,8 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
     public int DelegationStartRejections { get; set; }
 
+    public int ToolsStartRejections { get; set; }
+
     public bool CloseAfterDelegationRejection { get; set; }
 
     public string SessionId { get; set; } = "sess_fake";
@@ -98,6 +100,26 @@ public sealed class FakeLiveServer : IAsyncDisposable
     {
         var socket = _connections.Keys.Single();
         return SendAsync(socket, message, CancellationToken.None);
+    }
+
+    public Task SendFunctionCallAsync(string delegationId, string callId, string name, string arguments)
+    {
+        return SendEventAsync(new JsonObject
+        {
+            ["type"] = "response.event",
+            ["delegation_id"] = delegationId,
+            ["event"] = new JsonObject
+            {
+                ["type"] = "response.output_item.done",
+                ["item"] = new JsonObject
+                {
+                    ["type"] = "function_call",
+                    ["call_id"] = callId,
+                    ["name"] = name,
+                    ["arguments"] = arguments
+                }
+            }
+        });
     }
 
     public IReadOnlyList<JsonObject> ReceivedSnapshot()
@@ -211,6 +233,29 @@ public sealed class FakeLiveServer : IAsyncDisposable
                             ["code"] = "delegation_unavailable",
                             ["message"] = "delegation backend is unavailable",
                             ["param"] = "session.delegation.responses.model",
+                            ["client_event_id"] = message["event_id"]?.GetValue<string>()
+                        }
+                    }, cancellationToken);
+                    if (CloseAfterDelegationRejection)
+                    {
+                        await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "startup rejected", cancellationToken);
+                    }
+
+                    return;
+                }
+
+                if (ToolsStartRejections > 0 && session?["delegation"]?["responses"]?["tools"] is not null)
+                {
+                    ToolsStartRejections--;
+                    await SendAsync(socket, new JsonObject
+                    {
+                        ["type"] = "error",
+                        ["error"] = new JsonObject
+                        {
+                            ["type"] = "invalid_request_error",
+                            ["code"] = "tools_not_supported",
+                            ["message"] = "tools are not supported on this deployment",
+                            ["param"] = "session.delegation.responses.tools",
                             ["client_event_id"] = message["event_id"]?.GetValue<string>()
                         }
                     }, cancellationToken);
