@@ -31,16 +31,14 @@ public sealed class ResumePresentationTool : ITool
     public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default)
     {
         var snapshot = _presenter.Snapshot();
-        if (!snapshot.Paused && snapshot.State.Equals("presenting", StringComparison.OrdinalIgnoreCase))
-        {
-            return ToolResult.Success($"already presenting on slide {snapshot.SlideIndex + 1} of {snapshot.SlideCount}");
-        }
-
+        var alreadyPresenting = !snapshot.Paused && snapshot.State.Equals("presenting", StringComparison.OrdinalIgnoreCase);
         var changed = await _presenter.ResumeAsync(cancellationToken).ConfigureAwait(false);
         var after = _presenter.Snapshot();
         if (changed || !after.Paused)
         {
-            return ToolResult.Success($"resumed on slide {after.SlideIndex + 1} of {after.SlideCount}");
+            return ToolResult.Success(alreadyPresenting
+                ? $"already presenting on slide {after.SlideIndex + 1} of {after.SlideCount}"
+                : $"resumed on slide {after.SlideIndex + 1} of {after.SlideCount}");
         }
 
         return ToolResult.Failure($"failed to resume on slide {after.SlideIndex + 1} of {after.SlideCount}");

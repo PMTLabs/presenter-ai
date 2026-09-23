@@ -15,6 +15,7 @@ internal sealed class FakeSession : ILiveSession
     public bool RefuseToolOutput { get; set; }
     public bool RefuseContinue { get; set; }
     public TaskCompletionSource? CloseGate { get; set; }
+    public bool DeferCloseEvent { get; set; }
 
     public string? WarnOnConnect { get; set; }
 
@@ -107,8 +108,11 @@ internal sealed class FakeSession : ILiveSession
             throw new InvalidOperationException("close failed");
         }
 
-        State = LiveSessionState.Closed;
-        Closed?.Invoke("close_requested", 7);
+        if (!DeferCloseEvent)
+        {
+            State = LiveSessionState.Closed;
+            Closed?.Invoke("close_requested", 7);
+        }
         return new LiveCloseResult("close_requested", 7);
     }
 

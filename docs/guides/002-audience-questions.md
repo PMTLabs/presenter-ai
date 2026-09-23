@@ -104,7 +104,7 @@ Browser mic ──PCM──► PresenterBridge (/ws) ──► Presenter.SendAud
 
 session.start (LiveSession.CreateDelegation):
   delegation: { type: "responses", responses: { model: <DelegationModel>, instructions, reasoning, service_tier, text,
-    tools: [pinned tools, find_tools, call_tool], tool_choice: "auto", parallel_tool_calls: false } }
+    tools: [all tools when count ≤ MaxInlineTools; otherwise pinned tools, find_tools, call_tool], tool_choice: "auto", parallel_tool_calls: false } }
   In client mode there are no response tools.
   GPT-Live itself calls the delegation model; presenter-ai never calls it directly.
 
@@ -122,7 +122,7 @@ GPT-Live ──► LiveSession.ReceiveLoopAsync ──► LiveSession.HandleEven
                                    ──► Presenter.OnDelegatedResponse: tool round, not an answer
                                         after all outputs: one response.create barrier, hold re-armed
   response.event (final response.completed / failed)
-                                   ──► Presenter.OnDelegatedResponse: backend answer ready / failed; hold re-armed
+                                   ──► Presenter.OnDelegatedResponse: backend answer ready / failed; unanswered deadline unchanged
   session.output_audio.delta       ──► Presenter.OnAudio: the backend answer, then the follow-up timer as above
 
 check-in quiet timer fires ──► Presenter.OnInteractionElapsed ──► ResumeAfterQuestion
@@ -148,15 +148,14 @@ nothing.
 With an empty delegation model, or when Azure rejects the delegation model at session start, the session runs in
 *client* delegation mode. `LiveSession.ConnectAsync` retries the start once in that mode, and the log says why. When
 the AI then delegates, the presenter immediately appends `PromptBuilder.ClientDelegationAnswerNowInstruction`:
-answer from the material now, or say plainly that it does not cover the question. This applies while paused too:
-input continues to reach the model unless muted, but output is gated except for a brief response permitted after that
-utterance.
+answer from the material now, or say plainly that it does not cover the question. This instruction is sent only while presenting. While paused, input continues to reach the model unless muted;
+a permitted reply may be voiced without this injected instruction, but other output is gated.
 
 ## Timers at a glance
 
 | Timer | Default | Starts | Effect |
 |---|---|---|---|
-| Question hold | 15 s | question, delegation, tool call, tool round or backend finish | unanswered escape; a tool round re-arms it |
+| Question hold | 15 s | question, delegation, tool call or tool round | unanswered escape; a tool round re-arms it |
 | Answer quiet / check-in | 700 ms then `Presenter:FollowUpWaitMs` (5 s) | voiced answer | `InteractionElapsed` enters AwaitingCarryOn, then resumes after quiet unless yes/no or a new question intervenes |
 | Advance silence | `Presenter:AdvanceSilenceMs` (3 s) | each piece of narration audio | next slide (or wrap-up close) |
 | Part gap | min(2.5 s, 80 % of advance silence) | each piece of narration audio while parts remain | sends the next narration part |
@@ -175,7 +174,7 @@ These appear in the Log panel of the Present page.
 | `tool: <call_id> output submitted (ok=<bool>)` | The output was accepted by the writer; a barrier follows when all open rounds are ready. |
 | `question: backend answer ready` | A completion with no current tool calls finished the delegation; its answer may now be spoken. |
 | `question: backend answer failed (<type>)` (warn) | The backend call failed (a failed `response.event`, or a top-level `backend_error`); the AI answers without it. |
-| `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material. While paused, input is still sent unless muted, and only permitted reply audio is forwarded. |
+| `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material. While paused, input is still sent unless muted and only permitted reply audio is forwarded; the client-delegation answer-now instruction is appended only while presenting. |
 | `question: answered after N ms` | First answer audio, N ms after the question. |
 | `question: no follow-up after N ms; resuming` | The follow-up window passed; the AI was told to resume. |
 | `question: released after 15 s without an answer` | Nothing answered; the talk carries on. |

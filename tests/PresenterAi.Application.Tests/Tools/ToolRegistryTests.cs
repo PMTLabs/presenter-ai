@@ -170,6 +170,31 @@ public sealed class ToolRegistryTests
         Assert.Equal(32, registry.Count);
     }
 
+    [Fact]
+    public async Task Concurrent_register_and_catalogue_creation_produce_consistent_snapshots()
+    {
+        var registry = new ToolRegistry();
+        registry.Register(CreateTestTool("initial"));
+        using var start = new ManualResetEventSlim(false);
+        var writer = Task.Run(() =>
+        {
+            start.Wait();
+            for (var i = 0; i < 300; i++) registry.Register(CreateTestTool($"tool_{i}"));
+        });
+        var reader = Task.Run(() =>
+        {
+            start.Wait();
+            for (var i = 0; i < 300; i++)
+            {
+                var catalogue = registry.CreateCatalogue();
+                Assert.NotNull(catalogue.FindTool("initial"));
+            }
+        });
+        start.Set();
+        await Task.WhenAll(writer, reader).WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Equal(301, registry.Count);
+    }
+
     internal static TestTool CreateTestTool(
         string name,
         string description = "A test tool",

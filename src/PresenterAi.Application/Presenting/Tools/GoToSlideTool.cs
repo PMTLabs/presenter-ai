@@ -49,16 +49,14 @@ public sealed class GoToSlideTool : ITool
             return ToolResult.Failure($"there are slides 1 to {snapshot.SlideCount}");
         }
 
-        if (slideNumber == snapshot.SlideIndex + 1)
-        {
-            return ToolResult.Success($"already on slide {slideNumber} of {snapshot.SlideCount}");
-        }
-
+        var alreadyThere = slideNumber == snapshot.SlideIndex + 1;
         var changed = await _presenter.GotoAsync(slideNumber - 1, cancellationToken).ConfigureAwait(false);
         var after = _presenter.Snapshot();
         if (changed || after.SlideIndex + 1 == slideNumber)
         {
-            return ToolResult.Success($"moved to slide {after.SlideIndex + 1} of {after.SlideCount}");
+            return ToolResult.Success(alreadyThere
+                ? $"already on slide {after.SlideIndex + 1} of {after.SlideCount}"
+                : $"moved to slide {after.SlideIndex + 1} of {after.SlideCount}");
         }
 
         return ToolResult.Failure($"failed to navigate to slide {slideNumber} of {snapshot.SlideCount}");

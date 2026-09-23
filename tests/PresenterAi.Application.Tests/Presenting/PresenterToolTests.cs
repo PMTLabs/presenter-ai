@@ -111,6 +111,97 @@ public sealed class PresenterToolTests
     }
 
     [Fact]
+    public async Task Confirmed_end_tool_closes_only_after_question_is_ready()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("d", "ask", "end_presentation", "{\"confirmed\":false}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "ask");
+        session.Speak(startMs: 100, endMs: 150);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(501));
+        await harness.Flush();
+        session.RaiseToolCall("d", "confirm", "end_presentation", "{\"confirmed\":true}");
+        // Ending clears the round: the actual close and final state, not a tool output, are the oracle.
+        await harness.WaitForSentAsync(s => s.Type == "close");
+        await harness.Flush();
+        Assert.Equal("idle", harness.Presenter.Snapshot().State);
+    }
+
+    [Fact]
+    public async Task Same_slide_goto_cancels_end_confirmation_and_resume_tool_clears_check_in()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        await harness.Presenter.RequestEndConfirmationAsync(false);
+        session.RaiseToolCall("d", "same", "go_to_slide", "{\"slide_number\":1}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "same");
+        Assert.True(ParseOutput(session, "same").Ok);
+        Assert.Equal("presenting", harness.Presenter.Snapshot().State);
+        Assert.True(await harness.Presenter.RequestEndConfirmationAsync(true));
+        Assert.Equal("paused", harness.Presenter.Snapshot().State);
+        Assert.DoesNotContain(session.Sent, s => s.Type == "close");
+        await harness.Presenter.ResumeAsync();
+        session.Hear("question", 100, 150);
+        await harness.Flush();
+        session.Speak(startMs: 151, endMs: 200);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(701));
+        await harness.Flush();
+        session.RaiseToolCall("d", "resume", "resume_presentation", "{}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "resume");
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 2000));
+        await harness.Flush();
+        Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+    }
+
+    [Fact]
+    public async Task Already_presenting_resume_tool_clears_check_in_without_resume_bridge()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.Hear("question", 100, 150);
+        await harness.Flush();
+        session.Speak(startMs: 151, endMs: 200);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(701));
+        await harness.Flush();
+        session.RaiseToolCall("d", "resume", "resume_presentation", "{}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "resume");
+        Assert.True(ParseOutput(session, "resume").Ok);
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 2000));
+        await harness.Flush();
+        Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+    }
+
+    [Fact]
+    public async Task Final_answer_gives_the_live_model_a_fresh_window_before_the_escape()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        var logs = new List<string>();
+        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        session.Hear("question", 100, 150);
+        session.RaiseDelegation("responses", "d");
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromSeconds(14));
+        await harness.Flush();
+        session.RaiseDelegatedResponse("d", "response.completed");
+        await harness.Flush();
+        // Plan 005: a backend answer that is ready re-arms the 15 s window so the live model can speak it.
+        harness.Clock.Advance(TimeSpan.FromSeconds(2));
+        await harness.Flush();
+        Assert.DoesNotContain(logs, line => line.Contains("released after 15 s"));
+        harness.Clock.Advance(TimeSpan.FromSeconds(14));
+        await harness.Flush();
+        Assert.Contains(logs, line => line.Contains("released after 15 s"));
+    }
+
+    [Fact]
     public async Task Premature_confirmed_true_is_failure_and_only_asks_question()
     {
         await using var harness = Create();
@@ -308,6 +399,50 @@ public sealed class PresenterToolTests
         await Task.Delay(50);
         await harness.Flush();
         Assert.Single(session.Sent, s => s.Type == "tool_output" && s.EventId == "hung");
+    }
+
+    [Fact]
+    public async Task Timed_out_tool_can_read_cloned_arguments_and_late_fault_is_logged_as_type()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registry = new ToolRegistry();
+        registry.Register(new LateReadingTool(gate.Task));
+        await using var harness = Create(toolRegistry: registry, toolTimeoutMs: 50);
+        var logs = new List<string>();
+        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("d", "late", "late_reader", "{\"value\":\"intact\"}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "late");
+        Assert.Equal("timed out", ParseOutput(session, "late").Message);
+        gate.SetResult();
+        for (var i = 0; i < 100 && !logs.Any(x => x.Contains("late tool fault")); i++)
+        {
+            await Task.Delay(10);
+            await harness.Flush();
+        }
+        Assert.Contains(logs, x => x.Contains("late tool fault") && x.Contains("InvalidOperationException"));
+        Assert.DoesNotContain(logs, x => x.Contains("sensitive late value"));
+        Assert.Single(session.Sent, s => s.Type == "tool_output" && s.EventId == "late");
+    }
+
+    [Fact]
+    public async Task Navigation_by_tool_then_button_before_completion_is_stale()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registry = new ToolRegistry();
+        await using var harness = Create(toolRegistry: registry);
+        registry.Register(new NavigateThenGateTool(gate.Task, harness.Presenter));
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("d", "nav", "navigate_gate", "{}");
+        for (var i = 0; i < 100 && harness.Presenter.Snapshot().SlideIndex != 1; i++) await Task.Delay(10);
+        Assert.Equal(1, harness.Presenter.Snapshot().SlideIndex);
+        Assert.True(await harness.Presenter.NextAsync());
+        gate.SetResult();
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "nav");
+        Assert.False(ParseOutput(session, "nav").Ok);
+        Assert.Contains("stale", ParseOutput(session, "nav").Message);
     }
 
     [Fact]
@@ -719,6 +854,36 @@ public sealed class PresenterToolTests
         }
 
         public ValueTask DisposeAsync() => Presenter.DisposeAsync();
+    }
+
+    private sealed class LateReadingTool(Task gate) : ITool
+    {
+        public string Name => "late_reader";
+        public string Description => "Reads late";
+        public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } } };
+        public IReadOnlyList<string> Tags => [];
+        public bool Pinned => false;
+        public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken)
+        {
+            await gate;
+            if (arguments.GetProperty("value").GetString() != "intact") throw new Exception("arguments disposed");
+            throw new InvalidOperationException("sensitive late value");
+        }
+    }
+
+    private sealed class NavigateThenGateTool(Task gate, IPresenter presenter) : ITool
+    {
+        public string Name => "navigate_gate";
+        public string Description => "Navigates and waits";
+        public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject() };
+        public IReadOnlyList<string> Tags => [];
+        public bool Pinned => false;
+        public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken)
+        {
+            await presenter.NextAsync(cancellationToken);
+            await gate;
+            return ToolResult.Success("moved to slide 2");
+        }
     }
 
     private sealed class CrashingTool : ITool

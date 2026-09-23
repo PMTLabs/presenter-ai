@@ -84,10 +84,11 @@ public sealed class Presenter : IPresenter
     private static readonly AsyncLocal<string?> ActiveToolCallId = new();
     private ToolSessionCatalogue? _catalogue;
     private long _runGeneration;
-    private readonly HashSet<string> _navigatingCallIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _navigatingCallIds = new(StringComparer.Ordinal);
     private int _resumeSequence;
-    private enum Interaction { None, Answering, AwaitingCarryOn, AwaitingEndQuestion, AwaitingEndAnswer }
+    private enum Interaction { None, Answering, AwaitingCarryOn, WaitingOnSlide, AwaitingEndQuestion, AwaitingEndAnswer }
     private Interaction _interaction;
+    private bool _rangeReply;
     private ITimer? _interactionTimer;
     private long _interactionGeneration;
     private ITimer? _utteranceTimer;
@@ -641,7 +642,7 @@ public sealed class Presenter : IPresenter
         }
 
         var voiced = AudioLevel.IsVoiced(audio.Bytes);
-        var forwarded = _state != PresenterState.Paused || (_speechPermit &&
+        var forwarded = _state == PresenterState.Presenting || (_state == PresenterState.Paused && _speechPermit &&
             (_permitBarrierMs is null || audio.StartMs is null || audio.StartMs >= _permitBarrierMs));
         if (forwarded)
         {
@@ -698,7 +699,7 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting)
         {
             // While a backend answer is pending, speech is filler ("One moment."), not the answer.
-            if (_questionHoldOpen && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
+            if (_questionHoldOpen && _interaction != Interaction.WaitingOnSlide && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
             {
                 if (!_answerVoiced)
                 {
@@ -711,13 +712,13 @@ public sealed class Presenter : IPresenter
                 }
             }
 
-            if (_questionHoldOpen && _answerVoiced)
+            if (_questionHoldOpen && _interaction != Interaction.WaitingOnSlide && _answerVoiced)
             {
                 _lastAnswerAt = _timeProvider.GetTimestamp();
                 SetInteraction(Interaction.Answering);
                 ArmInteraction(700);
             }
-            else
+            else if (_interaction != Interaction.WaitingOnSlide)
             {
                 ArmAfterVoice();
             }
@@ -741,6 +742,7 @@ public sealed class Presenter : IPresenter
         {
             if (_state == PresenterState.Presenting)
             {
+                if (_interaction == Interaction.WaitingOnSlide) SetInteraction(Interaction.None);
                 OpenOrExtendQuestionHold(transcript.EndMs);
             }
 
@@ -817,8 +819,12 @@ public sealed class Presenter : IPresenter
         if (command is { Intent: VoiceCommandIntent.GoTo } &&
             (command.SlideNumber < 1 || command.SlideNumber > SlideCount))
         {
-            ClearQuestionHold();
-            if (_state == PresenterState.Paused) OpenPermit(end);
+            if (_state == PresenterState.Presenting)
+            {
+                OpenOrExtendQuestionHold(end);
+                _rangeReply = true;
+            }
+            else OpenPermit(end);
             LogMessage("info", $"voice: go to slide {command.SlideNumber} out of range (1-{SlideCount})");
             _session?.AppendInstructions(PromptBuilder.InvalidSlideRangeInstruction(SlideCount), "invalid-slide-range");
             return;
@@ -865,7 +871,8 @@ public sealed class Presenter : IPresenter
                 ResumeAfterQuestion("question: confirmed; resuming");
                 return true;
             case VoiceCommandIntent.No when _interaction == Interaction.AwaitingCarryOn:
-                SetInteraction(Interaction.None);
+                SetInteraction(Interaction.WaitingOnSlide);
+                ClearQuestionTimer();
                 ClearSilenceTimer();
                 return true;
             case VoiceCommandIntent.Yes when _interaction == Interaction.AwaitingEndAnswer:
@@ -925,6 +932,11 @@ public sealed class Presenter : IPresenter
         switch (_interaction)
         {
             case Interaction.Answering:
+                if (_rangeReply)
+                {
+                    SetInteraction(Interaction.WaitingOnSlide);
+                    break;
+                }
                 SetInteraction(Interaction.AwaitingCarryOn);
                 var remaining = FollowUpWaitMs + 700 - (int)_timeProvider.GetElapsedTime(_lastAnswerAt).TotalMilliseconds;
                 if (remaining <= 0)
@@ -1193,8 +1205,11 @@ public sealed class Presenter : IPresenter
                                     using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
                                     try
                                     {
-                                        result = await tool.InvokeAsync(doc.RootElement, cts.Token)
-                                            .WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cts.Token).ConfigureAwait(false);
+                                        var invocation = tool.InvokeAsync(doc.RootElement.Clone(), cts.Token);
+                                        _ = invocation.ContinueWith(t =>
+                                            QueueFromProducer(new BackgroundFailure("late tool fault", t.Exception!.GetBaseException().GetType().Name)),
+                                            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                                        result = await invocation.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cts.Token).ConfigureAwait(false);
                                     }
                                     catch (TimeoutException)
                                     {
@@ -1227,7 +1242,8 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        var result = completed.RunGeneration != _runGeneration && !_navigatingCallIds.Contains(completed.CallId)
+        var result = completed.RunGeneration != _runGeneration &&
+            (!_navigatingCallIds.TryGetValue(completed.CallId, out var navigationGeneration) || navigationGeneration != _runGeneration)
             ? ToolResult.Failure("stale: the presentation moved on") : completed.Result;
 
         if (!_toolRoundTracker.IsCallPending(completed.DelegationId, completed.CallId))
@@ -1422,8 +1438,8 @@ public sealed class Presenter : IPresenter
 
     private void OnNavigationSucceeded(string? sourceCallId)
     {
-        if (sourceCallId is not null) _navigatingCallIds.Add(sourceCallId);
         _runGeneration++;
+        if (sourceCallId is not null) _navigatingCallIds[sourceCallId] = _runGeneration;
     }
 
     private bool PauseCore()
@@ -1444,6 +1460,12 @@ public sealed class Presenter : IPresenter
 
     private bool ResumeCore()
     {
+        if (_state == PresenterState.Presenting)
+        {
+            ClearQuestionHold();
+            SetInteraction(Interaction.None);
+            return false;
+        }
         if (_state != PresenterState.Paused || _presentation is null)
         {
             return false;
@@ -1524,6 +1546,7 @@ public sealed class Presenter : IPresenter
         _endResumable = resumable;
         var session = _session;
         SetState(PresenterState.Ending);
+        Flush?.Invoke();
         if (session is null)
         {
             OnClosed("close_requested", null);
@@ -1617,7 +1640,7 @@ public sealed class Presenter : IPresenter
 
     private void OnQuestionHoldElapsed()
     {
-        if (!_questionHoldOpen || _interaction is Interaction.Answering or Interaction.AwaitingCarryOn)
+        if (!_questionHoldOpen || _interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide)
         {
             return;
         }
@@ -1765,10 +1788,11 @@ public sealed class Presenter : IPresenter
     private void ClearQuestionHold()
     {
         _questionHoldOpen = false;
+        _rangeReply = false;
         _answerVoiced = false;
         _latestQuestionEndMs = null;
         ClearQuestionTimer();
-        if (_interaction is Interaction.Answering or Interaction.AwaitingCarryOn)
+        if (_interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide)
         {
             SetInteraction(Interaction.None);
         }
