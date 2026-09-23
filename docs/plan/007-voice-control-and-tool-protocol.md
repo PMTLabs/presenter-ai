@@ -118,9 +118,10 @@ than English; changing how answers are delegated.
 3. The invocation's continuation posts `ToolInvocationCompleted` back to the loop. An exception becomes
    `{ok:false, message:"tool failed"}`; a 5 s per-call timeout becomes `{ok:false, message:"timed out"}`; malformed
    argument JSON or an unknown name completes immediately with `ok:false`.
-4. On `ToolInvocationCompleted`, the loop submits the output **exactly once** — only if the captured session is still
-   the current one and the run generation is unchanged; otherwise it is dropped and logged. Duplicate completions and
-   duplicate upstream `call_id`s are ignored.
+4. On `ToolInvocationCompleted`, the loop submits the output **exactly once** if the captured session is still
+   the current one. A stale result in the same session (run generation changed) is submitted as `{ok:false}` with
+   message `stale: the presentation moved on`, so the round's barrier can pass; it is dropped only when the session
+   changed. Duplicate completions and duplicate upstream `call_id`s are ignored.
 
 ### 3.3 Live wire and the tool-round tracker
 

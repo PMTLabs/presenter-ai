@@ -106,8 +106,21 @@ public sealed class PresenterToolTests
         Assert.NotEqual("idle", harness.Presenter.Snapshot().State);
         Assert.DoesNotContain(session.Sent, s => s.Type == "close");
         var endConfOutput = ParseOutput(session, "c_end_confirmed");
-        Assert.True(endConfOutput.Ok);
+        Assert.False(endConfOutput.Ok);
         Assert.Contains("confirmation required", endConfOutput.Message);
+    }
+
+    [Fact]
+    public async Task Premature_confirmed_true_is_failure_and_only_asks_question()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("d", "premature", "end_presentation", "{\"confirmed\":true}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "premature");
+        Assert.False(ParseOutput(session, "premature").Ok);
+        Assert.Contains(session.Sent, s => s.EventId == "end-confirmation");
+        Assert.DoesNotContain(session.Sent, s => s.Type == "close");
     }
 
     [Theory]
@@ -279,7 +292,26 @@ public sealed class PresenterToolTests
     }
 
     [Fact]
-    public async Task Tool_completion_after_navigation_is_dropped()
+    public async Task Ignored_cancellation_times_out_once_and_passes_barrier()
+    {
+        var gate = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registry = new ToolRegistry();
+        registry.Register(new GateTool("ignores_cancel", gate.Task, ignoreCancellation: true));
+        await using var harness = Create(toolRegistry: registry, toolTimeoutMs: 50);
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("del_timeout", "hung", "ignores_cancel", "{}");
+        session.RaiseDelegatedResponse("del_timeout", "response.completed");
+        await harness.WaitForSentAsync(s => s.Type == "continue_responses");
+        Assert.Equal("timed out", ParseOutput(session, "hung").Message);
+        gate.SetResult(ToolResult.Success("late"));
+        await Task.Delay(50);
+        await harness.Flush();
+        Assert.Single(session.Sent, s => s.Type == "tool_output" && s.EventId == "hung");
+    }
+
+    [Fact]
+    public async Task Tool_completion_after_navigation_is_stale_but_submitted()
     {
         var gate = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var registry = new ToolRegistry();
@@ -303,8 +335,79 @@ public sealed class PresenterToolTests
         await Task.Delay(50);
         await harness.Flush();
 
-        // Output must be dropped due to stale generation
-        Assert.DoesNotContain(session.Sent, s => s.Type == "tool_output" && s.EventId == "c_stale_nav");
+        // Same-session navigation must not strand the global tool barrier.
+        var output = ParseOutput(session, "c_stale_nav");
+        Assert.False(output.Ok);
+        Assert.Contains("stale", output.Message);
+        session.RaiseDelegatedResponse("del_1", "response.completed");
+        await harness.WaitForSentAsync(s => s.Type == "continue_responses");
+        session.RaiseToolCall("del_1", "later", "pause_presentation", "{}");
+        session.RaiseDelegatedResponse("del_1", "response.completed");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "later");
+        Assert.True(ParseOutput(session, "later").Ok);
+    }
+
+    [Fact]
+    public async Task Refused_output_does_not_mark_call_submitted_or_pass_barrier()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RefuseToolOutput = true;
+        session.RaiseToolCall("del_refused", "refused", "pause_presentation", "{}");
+        session.RaiseDelegatedResponse("del_refused", "response.completed");
+        await Task.Delay(50);
+        await harness.Flush();
+        Assert.True(harness.Presenter.ToolRoundTracker.IsCallPending("del_refused", "refused"));
+        Assert.DoesNotContain(session.Sent, s => s.Type == "continue_responses");
+    }
+
+    [Fact]
+    public async Task Refused_continue_does_not_advance_round()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RefuseContinue = true;
+        session.RaiseToolCall("del_refused", "refused", "pause_presentation", "{}");
+        session.RaiseDelegatedResponse("del_refused", "response.completed");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output");
+        Assert.True(harness.Presenter.ToolRoundTracker.ShouldSendContinueResponses());
+    }
+
+    [Fact]
+    public async Task Tool_call_queued_while_ending_is_rejected()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.CloseGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ending = harness.Presenter.EndAsync();
+        await Task.Delay(30);
+        Assert.Contains(session.Sent, s => s.Type == "close");
+        session.RaiseToolCall("late", "late", "next_slide", "{}");
+        session.CloseGate.SetResult();
+        await ending;
+        await harness.Flush();
+        Assert.DoesNotContain(session.Sent, s => s.Type == "tool_output" && s.EventId == "late");
+        Assert.False(harness.Presenter.ToolRoundTracker.HasPendingBackendDelegation);
+    }
+
+    [Fact]
+    public async Task Two_navigation_calls_from_interleaved_delegations_both_get_outputs()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("d1", "n1", "next_slide", "{}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "n1");
+        session.RaiseToolCall("d2", "n2", "next_slide", "{}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "n2");
+        session.RaiseDelegatedResponse("d1", "response.completed");
+        session.RaiseDelegatedResponse("d2", "response.completed");
+        await harness.WaitForSentAsync(s => s.Type == "continue_responses");
+        Assert.Single(session.Sent, s => s.Type == "continue_responses");
+        Assert.Equal(2, harness.Presenter.Snapshot().SlideIndex);
     }
 
     [Fact]
@@ -442,6 +545,37 @@ public sealed class PresenterToolTests
 
         // End follow-up wait
         await harness.EndFollowUp();
+    }
+
+    [Fact]
+    public async Task Tool_round_rearms_hold_while_backend_spans_fifteen_seconds()
+    {
+        var gate = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registry = new ToolRegistry();
+        registry.Register(new GateTool("long_backend", gate.Task));
+        await using var harness = Create(toolRegistry: registry);
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        var logs = new List<string>();
+        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        session.Hear("question", 100, 150);
+        session.RaiseDelegation("responses", "slow_backend");
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromSeconds(8));
+        await harness.Flush();
+        session.RaiseToolCall("slow_backend", "call", "long_backend", "{}");
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromSeconds(8));
+        await harness.Flush();
+        gate.SetResult(ToolResult.Success("done"));
+        session.RaiseDelegatedResponse("slow_backend", "response.completed");
+        await harness.WaitForSentAsync(s => s.Type == "continue_responses");
+        harness.Clock.Advance(TimeSpan.FromSeconds(8));
+        await harness.Flush();
+        Assert.Equal(0, harness.Presenter.Snapshot().SlideIndex);
+        Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+        Assert.True(harness.Presenter.ToolRoundTracker.HasPendingBackendDelegation);
+        Assert.DoesNotContain(logs, line => line.Contains("released after 15 s"));
     }
 
     [Fact]
@@ -620,10 +754,13 @@ public sealed class PresenterToolTests
     {
         private readonly Task<ToolResult> _task;
 
-        public GateTool(string name, Task<ToolResult> task)
+        private readonly bool _ignoreCancellation;
+
+        public GateTool(string name, Task<ToolResult> task, bool ignoreCancellation = false)
         {
             Name = name;
             _task = task;
+            _ignoreCancellation = ignoreCancellation;
         }
 
         public string Name { get; }
@@ -634,7 +771,7 @@ public sealed class PresenterToolTests
 
         public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default)
         {
-            return await _task.WaitAsync(cancellationToken);
+            return await (_ignoreCancellation ? _task : _task.WaitAsync(cancellationToken));
         }
     }
 }

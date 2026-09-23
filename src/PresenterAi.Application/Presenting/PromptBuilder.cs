@@ -157,6 +157,9 @@ public static class PromptBuilder
     public static string EndConfirmationInstruction() =>
         "Ask the audience briefly: Shall I end the presentation now? Then wait for their answer. Do not end the talk yourself.";
 
+    public static string InvalidSlideRangeInstruction(int slideCount) =>
+        $"Say briefly: There are slides 1 to {slideCount}. Do not resume the presentation.";
+
     public static string ClientModeInstruction() =>
         "You cannot move the slides yourself. If asked for a particular slide by topic, or anything beyond pause, continue, next, back, a slide number or end, say briefly that you can't do that here.";
 

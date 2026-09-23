@@ -47,8 +47,12 @@ public sealed class EndPresentationTool : ITool
         var confirmed = confirmedElement.GetBoolean();
         var changed = await _presenter.RequestEndConfirmationAsync(confirmed, cancellationToken).ConfigureAwait(false);
         var after = _presenter.Snapshot();
-        return ToolResult.Success(confirmed && changed && after.State is "ending" or "idle"
-            ? "presentation ended after confirmation"
-            : $"confirmation required to end presentation: paused on slide {after.SlideIndex + 1} of {after.SlideCount}");
+        if (confirmed && changed && after.State is "ending" or "idle")
+        {
+            return ToolResult.Success("presentation ended after confirmation");
+        }
+
+        var message = $"confirmation required to end presentation: paused on slide {after.SlideIndex + 1} of {after.SlideCount}";
+        return confirmed ? ToolResult.Failure(message) : ToolResult.Success(message);
     }
 }

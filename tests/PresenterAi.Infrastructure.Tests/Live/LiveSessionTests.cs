@@ -1,4 +1,7 @@
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using PresenterAi.Application.Tools;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -151,6 +154,35 @@ public sealed class LiveSessionTests
         startClient!["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
         startClient["session"]!["delegation"]!["responses"].Should().BeNull();
         startClient["session"]!["delegation"]!["tools"].Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Hundred_registered_tools_real_session_start_has_only_pinned_and_meta_within_budget()
+    {
+        var registry = new ToolRegistry();
+        for (var i = 0; i < 100; i++) registry.Register(new BudgetTool($"tool_{i:D3}", i < 6));
+        var catalogue = registry.CreateCatalogue(16);
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "backend", tools: catalogue.GetInlineToolDefinitions());
+        await session.ConnectAsync();
+        var start = (await EventuallyAsync(() => server.ReceivedSnapshot().SingleOrDefault(EventTypeIs("session.start"))))!;
+        var definitions = start["session"]!["delegation"]!["responses"]!["tools"]!.AsArray();
+        definitions.Select(d => d!["name"]!.GetValue<string>()).Should().BeEquivalentTo(
+            Enumerable.Range(0, 6).Select(i => $"tool_{i:D3}").Concat(["find_tools", "call_tool"]));
+        // The 32 KiB limit is for the serialized tool list, not the whole session envelope.
+        Encoding.UTF8.GetByteCount(definitions.ToJsonString()).Should().BeLessThan(32 * 1024);
+        Encoding.UTF8.GetByteCount(start.ToJsonString()).Should().BeLessThan(36 * 1024);
+    }
+
+    private sealed class BudgetTool(string name, bool pinned) : ITool
+    {
+        public string Name => name;
+        public string Description => "Budget test tool";
+        public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject() };
+        public IReadOnlyList<string> Tags => ["test"];
+        public bool Pinned => pinned;
+        public Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default) =>
+            Task.FromResult(ToolResult.Success("ok"));
     }
 
     [Fact]

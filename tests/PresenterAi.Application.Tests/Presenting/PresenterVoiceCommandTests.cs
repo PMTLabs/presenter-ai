@@ -51,6 +51,55 @@ public sealed class PresenterVoiceCommandTests
         }
     }
 
+    [Theory]
+    [InlineData("responses")]
+    [InlineData("client")]
+    public async Task Out_of_range_local_number_requests_spoken_range_without_bridge(string mode)
+    {
+        var (presenter, session, clock) = await Start(mode);
+        await using (presenter)
+        {
+            session.Hear("go to slide 40", 100, 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal(0, presenter.Snapshot().SlideIndex);
+            Assert.Contains(session.Sent, s => s.EventId == "invalid-slide-range" && s.Content!.Contains("slides 1 to 2"));
+            Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+        }
+    }
+
+    [Fact]
+    public async Task Single_seven_second_delta_is_not_an_instant_command()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            session.Hear("stop", 0, 7000);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal("presenting", presenter.Snapshot().State);
+        }
+    }
+
+    [Fact]
+    public async Task Timestamp_less_command_after_quick_restart_is_not_rejected_by_previous_speech()
+    {
+        var sessions = new List<FakeSession>();
+        var (presenter, session, clock) = await Start(sessions: sessions);
+        await using (presenter)
+        {
+            session.Speak();
+            await presenter.WaitUntilIdleAsync();
+            await presenter.EndAsync();
+            await presenter.WaitUntilIdleAsync();
+            Assert.True((await presenter.StartAsync("p", null, "owner")).Started);
+            sessions[^1].Hear("next slide", null, null);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal(1, presenter.Snapshot().SlideIndex);
+        }
+    }
+
     [Fact]
     public async Task Stop_end_and_continue_are_commands_not_questions()
     {
@@ -300,6 +349,28 @@ public sealed class PresenterVoiceCommandTests
             await presenter.WaitUntilIdleAsync();
             await Advance(presenter, clock);
             Assert.Contains(session.Sent, item => item.EventId?.Contains("-resume-") == true);
+        }
+    }
+
+    [Fact]
+    public async Task Check_in_no_keeps_hold_through_voiced_output_and_silence()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            session.Hear("What is this?", 100, 150);
+            await presenter.WaitUntilIdleAsync();
+            session.Speak(startMs: 151, endMs: 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 701);
+            session.Hear("no", 300, 320);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Speak(startMs: 330, endMs: 400);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 3000);
+            Assert.Equal(0, presenter.Snapshot().SlideIndex);
+            Assert.DoesNotContain(session.Sent, item => item.EventId?.Contains("-resume-") == true);
         }
     }
 

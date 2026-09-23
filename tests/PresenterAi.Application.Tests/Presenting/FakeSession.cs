@@ -12,6 +12,9 @@ internal sealed class FakeSession : ILiveSession
     public string DelegationMode { get; set; } = "responses";
 
     public bool ThrowOnClose { get; set; }
+    public bool RefuseToolOutput { get; set; }
+    public bool RefuseContinue { get; set; }
+    public TaskCompletionSource? CloseGate { get; set; }
 
     public string? WarnOnConnect { get; set; }
 
@@ -65,12 +68,14 @@ internal sealed class FakeSession : ILiveSession
 
     public bool SubmitToolOutput(string callId, string output)
     {
+        if (RefuseToolOutput) return false;
         Sent.Add(("tool_output", output, callId, null));
         return true;
     }
 
     public bool ContinueResponses()
     {
+        if (RefuseContinue) return false;
         Sent.Add(("continue_responses", null, null, null));
         return true;
     }
@@ -93,9 +98,10 @@ internal sealed class FakeSession : ILiveSession
         return true;
     }
 
-    public Task<LiveCloseResult> CloseAsync()
+    public async Task<LiveCloseResult> CloseAsync()
     {
         Sent.Add(("close", null, null, null));
+        if (CloseGate is not null) await CloseGate.Task;
         if (ThrowOnClose)
         {
             throw new InvalidOperationException("close failed");
@@ -103,7 +109,7 @@ internal sealed class FakeSession : ILiveSession
 
         State = LiveSessionState.Closed;
         Closed?.Invoke("close_requested", 7);
-        return Task.FromResult(new LiveCloseResult("close_requested", 7));
+        return new LiveCloseResult("close_requested", 7);
     }
 
     public ValueTask DisposeAsync()

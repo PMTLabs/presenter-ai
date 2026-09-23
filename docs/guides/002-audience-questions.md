@@ -103,7 +103,9 @@ Browser mic ──PCM──► PresenterBridge (/ws) ──► Presenter.SendAud
                                                                           (session.input_audio.append)
 
 session.start (LiveSession.CreateDelegation):
-  delegation: { type: "responses", responses: { model: <DelegationModel>, instructions, reasoning, service_tier, text } }
+  delegation: { type: "responses", responses: { model: <DelegationModel>, instructions, reasoning, service_tier, text,
+    tools: [pinned tools, find_tools, call_tool], tool_choice: "auto", parallel_tool_calls: false } }
+  In client mode there are no response tools.
   GPT-Live itself calls the delegation model; presenter-ai never calls it directly.
 
 GPT-Live ──► LiveSession.ReceiveLoopAsync ──► LiveSession.HandleEvent
@@ -114,12 +116,16 @@ GPT-Live ──► LiveSession.ReceiveLoopAsync ──► LiveSession.HandleEven
                                         15 s timer stopped, follow-up timer (FollowUpWaitMs) armed
   (deck does not cover it)
   session.delegation.created       ──► Presenter.OnDelegation: "delegated (backend)"; speech is filler until…
-  response.event (response.completed / failed)
-                                   ──► LiveSession.HandleResponseEvent ──► DelegatedResponseFinished
-                                   ──► Presenter.OnDelegatedResponse: "backend answer ready"; 15 s timer re-armed
+  response.event (output_item.done: function_call)
+                                   ──► Presenter.OnToolCall: invoke off-loop, return output once
+  response.event (response.completed, empty output)
+                                   ──► Presenter.OnDelegatedResponse: tool round, not an answer
+                                        after all outputs: one response.create barrier, hold re-armed
+  response.event (final response.completed / failed)
+                                   ──► Presenter.OnDelegatedResponse: backend answer ready / failed; hold re-armed
   session.output_audio.delta       ──► Presenter.OnAudio: the backend answer, then the follow-up timer as above
 
-follow-up timer fires ──► Presenter.OnSilence ──► HoldBlocksProgress ──► ResumeAfterQuestion
+check-in quiet timer fires ──► Presenter.OnInteractionElapsed ──► ResumeAfterQuestion
                           appends "slide-N-resume-K" (PromptBuilder.ResumeAfterQuestionInstruction)
                           then the ordinary timers: next part / next slide after the usual silence
 ```
@@ -150,8 +156,8 @@ utterance.
 
 | Timer | Default | Starts | Effect |
 |---|---|---|---|
-| Question hold | 15 s | a question is heard, or the backend is called or answers | releases the hold and resumes if no answer came |
-| Follow-up wait | `Presenter:FollowUpWaitMs` (5 s) | each piece of answer audio | resumes the slide |
+| Question hold | 15 s | question, delegation, tool call, tool round or backend finish | unanswered escape; a tool round re-arms it |
+| Answer quiet / check-in | 700 ms then `Presenter:FollowUpWaitMs` (5 s) | voiced answer | `InteractionElapsed` enters AwaitingCarryOn, then resumes after quiet unless yes/no or a new question intervenes |
 | Advance silence | `Presenter:AdvanceSilenceMs` (3 s) | each piece of narration audio | next slide (or wrap-up close) |
 | Part gap | min(2.5 s, 80 % of advance silence) | each piece of narration audio while parts remain | sends the next narration part |
 
@@ -165,7 +171,9 @@ These appear in the Log panel of the Present page.
 |---|---|
 | `question: hold opened` | Audience speech heard; the slide is held. |
 | `question: delegated (backend)` | GPT-Live sent the question to the delegation model. |
-| `question: backend answer ready` | The delegation model finished; its answer is being spoken. |
+| `question: backend tool round completed for <id>` | An empty completion following calls is a tool round; wait for outputs and the global `response.create`, not the spoken answer. |
+| `tool: <call_id> output submitted (ok=<bool>)` | The output was accepted by the writer; a barrier follows when all open rounds are ready. |
+| `question: backend answer ready` | A completion with no current tool calls finished the delegation; its answer may now be spoken. |
 | `question: backend answer failed (<type>)` (warn) | The backend call failed (a failed `response.event`, or a top-level `backend_error`); the AI answers without it. |
 | `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material. While paused, input is still sent unless muted, and only permitted reply audio is forwarded. |
 | `question: answered after N ms` | First answer audio, N ms after the question. |

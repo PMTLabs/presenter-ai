@@ -461,6 +461,22 @@ public sealed class ToolSessionCatalogueTests
         Assert.Contains("Unknown tool: 'beta_gizmo'", callRes.Message);
     }
 
+    [Fact]
+    public async Task Mutating_source_and_export_cannot_change_snapshot_or_next_export()
+    {
+        var schema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "integer" } },
+            ["required"] = new JsonArray { "value" }, ["additionalProperties"] = false };
+        var source = new TestTool("strict", "Original", schema, [], true,
+            _ => Task.FromResult(ToolResult.Success("ok")));
+        var catalogue = new ToolSessionCatalogue([source]);
+        schema["required"] = new JsonArray();
+        catalogue.GetInlineToolDefinitions()[0]["parameters"] = new JsonObject { ["type"] = "object" };
+        catalogue.FindTool("strict")!.Parameters["required"] = new JsonArray();
+        Assert.Equal("Original", catalogue.GetInlineToolDefinitions()[0]["description"]!.GetValue<string>());
+        Assert.Equal("value", catalogue.GetInlineToolDefinitions()[0]["parameters"]!["required"]![0]!.GetValue<string>());
+        Assert.False((await catalogue.InvokeAsync("strict", ParseJson("{}"))).Ok);
+    }
+
     private static ITool CreateTool(
         string name,
         string description = "Test tool description",
