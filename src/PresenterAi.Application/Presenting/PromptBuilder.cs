@@ -11,7 +11,8 @@ public static class PromptBuilder
         IReadOnlyList<SlideRef> slides,
         string? context = null,
         int maxContextChars = ContextCharBudget,
-        Action<string>? onWarn = null)
+        Action<string>? onWarn = null,
+        bool managedMode = false)
     {
         ArgumentNullException.ThrowIfNull(title);
         ArgumentNullException.ThrowIfNull(slides);
@@ -26,6 +27,19 @@ public static class PromptBuilder
             ctx = JavaScriptSlice(ctx, maxContextChars) + "\n[context truncated]";
         }
 
+        var audienceRules = new List<string>
+        {
+            "- If someone speaks to you, stop and listen. When the narration or background context covers the answer, answer immediately in one to three sentences; otherwise delegate the question.",
+            "- Never say that you checked, looked up, or found something before a result arrives. While waiting, at most say \"One moment.\" Do not resume the narration until the question is answered.",
+            "- After answering, stop and stay silent in case there is a follow-up question. You will be told when to continue.",
+            "- Never start the next slide on your own."
+        };
+
+        if (managedMode)
+        {
+            audienceRules.Add("- For any request to go to a particular slide or topic, or any presenter action other than a plain stop, continue, next or back, delegate it. Never say you did something until the result says so.");
+        }
+
         var parts = new List<string>
         {
             $"You are the presenter delivering a talk titled \"{title}\" to a live audience. A presentation controller shows the slides on screen and, for each slide, sends you an instruction that contains that slide's narration.",
@@ -36,17 +50,14 @@ public static class PromptBuilder
             "- When you finish a slide's narration, stop speaking and wait silently. Do not announce the next slide and do not ask whether to continue; the controller sends the next slide.",
             "- Long narrations arrive in numbered parts. Continue from one part to the next immediately, without a break.",
             string.Empty,
-            "Audience interaction (you can hear the audience):",
-            "- If someone speaks to you, stop and listen. When the narration or background context covers the answer, answer immediately in one to three sentences; otherwise delegate the question.",
-            "- Never say that you checked, looked up, or found something before a result arrives. While waiting, at most say \"One moment.\" Do not resume the narration until the question is answered.",
-            "- After answering, stop and stay silent in case there is a follow-up question. You will be told when to continue.",
-            "- Never start the next slide on your own.",
-            string.Empty,
-            "Speak in the same language as the narration.",
-            string.Empty,
-            "Slide outline:",
-            outline,
+            "Audience interaction (you can hear the audience):"
         };
+        parts.AddRange(audienceRules);
+        parts.Add(string.Empty);
+        parts.Add("Speak in the same language as the narration.");
+        parts.Add(string.Empty);
+        parts.Add("Slide outline:");
+        parts.Add(outline);
 
         if (ctx.Length > 0)
         {
@@ -63,13 +74,32 @@ public static class PromptBuilder
         IReadOnlyList<Slide> slides,
         string? context = null,
         int maxContextChars = ContextCharBudget,
-        Action<string>? onWarn = null) =>
+        Action<string>? onWarn = null,
+        bool managedMode = false) =>
         SystemInstructions(
             title,
             slides.Select(slide => new SlideRef(slide.Index, slide.Title)).ToArray(),
             context,
             maxContextChars,
-            onWarn);
+            onWarn,
+            managedMode);
+
+    public static string BackendInstructions(string title, IReadOnlyList<SlideRef> slides)
+    {
+        ArgumentNullException.ThrowIfNull(title);
+        ArgumentNullException.ThrowIfNull(slides);
+
+        var outline = string.Join('\n', slides.Select(slide =>
+            $"{slide.Index + 1}. {(slide.Title.Length > 0 ? slide.Title : "(untitled)")}"));
+
+        return $"Answer audience questions about the talk titled \"{title}\" in one to three short spoken sentences; if unsure, say so.\n\n" +
+               "Use the tools for any request to pause, continue, move or end; never claim an action the tool did not confirm.\n\n" +
+               "Slide outline:\n" +
+               outline;
+    }
+
+    public static string BackendInstructions(string title, IReadOnlyList<Slide> slides) =>
+        BackendInstructions(title, slides.Select(s => new SlideRef(s.Index, s.Title)).ToArray());
 
     public static string SlideInstruction(
         int index,

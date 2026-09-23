@@ -297,7 +297,7 @@ public sealed class ToolSessionCatalogueTests
         var callTool = catalogue.FindTool("call_tool");
         Assert.NotNull(callTool);
 
-        var result = await callTool!.InvokeAsync(ParseJson("{\"name\":\"non_existent\",\"arguments\":{}}"));
+        var result = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"non_existent\",\"arguments\":{}}" )).Error!;
 
         Assert.False(result.Ok);
         Assert.Contains("Unknown tool: 'non_existent'", result.Message);
@@ -328,7 +328,7 @@ public sealed class ToolSessionCatalogueTests
         var callTool = catalogue.FindTool("call_tool");
         Assert.NotNull(callTool);
 
-        var result = await callTool!.InvokeAsync(ParseJson("{\"name\":\"strict_tool\",\"arguments\":{}}"));
+        var result = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"strict_tool\",\"arguments\":{}}" )).Error!;
 
         Assert.False(result.Ok);
         Assert.Contains("Missing required property 'slide_number'", result.Message);
@@ -359,7 +359,7 @@ public sealed class ToolSessionCatalogueTests
         var callTool = catalogue.FindTool("call_tool");
         Assert.NotNull(callTool);
 
-        var result = await callTool!.InvokeAsync(ParseJson("{\"name\":\"strict_tool\",\"arguments\":{\"slide_number\":\"three\"}}"));
+        var result = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"strict_tool\",\"arguments\":{\"slide_number\":\"three\"}}" )).Error!;
 
         Assert.False(result.Ok);
         Assert.Contains("expected type 'integer'", result.Message);
@@ -390,7 +390,7 @@ public sealed class ToolSessionCatalogueTests
         var callTool = catalogue.FindTool("call_tool");
         Assert.NotNull(callTool);
 
-        var result = await callTool!.InvokeAsync(ParseJson("{\"name\":\"strict_tool\",\"arguments\":{\"slide_number\":3,\"unwanted_extra\":\"bad\"}}"));
+        var result = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"strict_tool\",\"arguments\":{\"slide_number\":3,\"unwanted_extra\":\"bad\"}}" )).Error!;
 
         Assert.False(result.Ok);
         Assert.Contains("Unknown property 'unwanted_extra' is not allowed", result.Message);
@@ -427,7 +427,7 @@ public sealed class ToolSessionCatalogueTests
         var callTool = catalogue.FindTool("call_tool");
         Assert.NotNull(callTool);
 
-        var result = await callTool!.InvokeAsync(ParseJson("{\"name\":\"calculator\",\"arguments\":{\"a\":17,\"b\":25}}"));
+        var result = await catalogue.InvokeAsync("call_tool", ParseJson("{\"name\":\"calculator\",\"arguments\":{\"a\":17,\"b\":25}}"));
 
         Assert.True(result.Ok);
         Assert.Equal("Sum: 42", result.Message);
@@ -456,9 +456,79 @@ public sealed class ToolSessionCatalogueTests
         // call_tool must refuse beta_gizmo
         var callTool = catalogue.FindTool("call_tool");
         Assert.NotNull(callTool);
-        var callRes = await callTool!.InvokeAsync(ParseJson("{\"name\":\"beta_gizmo\",\"arguments\":{}}"));
+        var callRes = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"beta_gizmo\",\"arguments\":{}}" )).Error!;
         Assert.False(callRes.Ok);
         Assert.Contains("Unknown tool: 'beta_gizmo'", callRes.Message);
+    }
+
+    [Fact]
+    public void Build_adds_session_tools_and_keeps_them_searchable_beyond_inline_threshold()
+    {
+        var registry = new ToolRegistry();
+        for (var i = 1; i <= 6; i++)
+        {
+            registry.Register(CreateTool($"presenter_{i}", pinned: true));
+        }
+
+        var ten = Enumerable.Range(1, 10).Select(i => CreateTool($"session_{i}")).ToArray();
+        var inline = ToolSessionCatalogue.Build(registry, ten);
+        Assert.Equal(16, inline.InlineTools.Count);
+        Assert.Equal(16, inline.AllTools.Count);
+
+        var eleven = Enumerable.Range(1, 11).Select(i => CreateTool($"session_{i}", pinned: i == 1)).ToArray();
+        var discovered = ToolSessionCatalogue.Build(registry, eleven);
+        Assert.Equal(8, discovered.InlineTools.Count);
+        Assert.Equal(17, discovered.AllTools.Count);
+        Assert.Contains(discovered.AllTools, tool => tool.Name == "session_11");
+        Assert.Empty(discovered.Notes);
+    }
+
+    [Fact]
+    public void Resolve_targets_the_effective_tool_for_direct_and_call_tool_calls()
+    {
+        var registry = new ToolRegistry();
+        registry.Register(CreateTool("target_tool"));
+        var catalogue = ToolSessionCatalogue.Build(registry, maxInlineTools: 0);
+        var direct = catalogue.Resolve("target_tool", ParseJson("{}"));
+        var wrapped = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"target_tool\",\"arguments\":{}}"));
+
+        Assert.True(direct.IsResolved);
+        Assert.Equal("target_tool", direct.Tool!.Name);
+        Assert.True(wrapped.IsResolved);
+        Assert.Equal("target_tool", wrapped.Tool!.Name);
+        Assert.Equal(JsonValueKind.Object, wrapped.Arguments.ValueKind);
+    }
+
+    [Fact]
+    public void Session_tools_exceeding_budget_are_not_inline_but_are_searchable_with_note()
+    {
+        var registry = new ToolRegistry();
+        var inlinePresenter = CreateTool("presenter", pinned: true);
+        registry.Register(inlinePresenter);
+        var largeTools = Enumerable.Range(1, 8).Select(i => new TestTool(
+            $"session_large_{i}",
+            new string('d', 1024),
+            new JsonObject { ["type"] = "object", ["properties"] = new JsonObject { [new string('x', 3900)] = new JsonObject { ["type"] = "string" } } },
+            [],
+            false,
+            _ => Task.FromResult(ToolResult.Success("ok")))).ToArray();
+
+        var catalogue = ToolSessionCatalogue.Build(registry, largeTools);
+
+        Assert.DoesNotContain(catalogue.InlineTools, tool => tool.Name == "session_large_8");
+        Assert.Contains(catalogue.AllTools, tool => tool.Name == "session_large_8");
+        Assert.Contains(catalogue.Notes, note => note.Contains("remains searchable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Tool_result_serializes_outcome_and_defaults_success_and_failure()
+    {
+        var success = ToolResult.Success("done");
+        var timeout = ToolResult.Failure("timed out") with { Outcome = "timeout" };
+
+        Assert.Equal("ok", success.Outcome);
+        Assert.Equal("error", ToolResult.Failure("failed").Outcome);
+        Assert.Equal("timeout", JsonDocument.Parse(timeout.ToJsonString()).RootElement.GetProperty("outcome").GetString());
     }
 
     private static ITool CreateTool(

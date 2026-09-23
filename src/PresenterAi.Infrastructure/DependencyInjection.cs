@@ -136,12 +136,15 @@ public static class DependencyInjection
 
     public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
+        services.TryAddSingleton<ToolRegistry>();
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
             var routes = serviceProvider.GetRequiredService<UpstreamRoutes>();
             var settings = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PresenterOptions>>().Value;
             var timeProvider = serviceProvider.GetRequiredService<TimeProvider>();
+            var toolsOptions = serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ToolsOptions>>()?.Value;
+            var toolRegistry = serviceProvider.GetService<ToolRegistry>();
 
             Func<string, string, CancellationToken, Task<LoadedPresentation>> loader;
             if (fileBacked)
@@ -164,11 +167,23 @@ public static class DependencyInjection
 
             return new Presenter(
                 (request, attempt) => attempt < routes.Upstreams.Count
-                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice, request.Title, request.Tools))
+                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(
+                        routes.Upstreams[attempt].Model,
+                        request.Instructions,
+                        request.Voice,
+                        request.Title,
+                        request.Tools,
+                        request.DelegationInstructions))
                     : null,
                 loader,
-                new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice, settings.FollowUpWaitMs),
-                timeProvider);
+                new PresenterSettings(
+                    settings.AdvanceSilenceMs,
+                    routes.Voice,
+                    settings.FollowUpWaitMs,
+                    toolsOptions?.MaxInlineTools ?? ToolsOptions.DefaultMaxInlineTools),
+                timeProvider,
+                toolRegistry,
+                attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel));
         });
         return services;
     }

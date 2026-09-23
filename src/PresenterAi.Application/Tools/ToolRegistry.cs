@@ -19,6 +19,8 @@ public sealed partial class ToolRegistry
 
     public int PinnedCount => _pinnedCount;
 
+    public bool Contains(string name) => _tools.ContainsKey(name);
+
     public void Register(ITool tool)
     {
         ArgumentNullException.ThrowIfNull(tool);

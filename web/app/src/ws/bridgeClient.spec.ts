@@ -201,6 +201,34 @@ describe("BridgeClient", () => {
     expect(c.snapshot.state).toBe("idle");
   });
 
+  it("sends microphone audio while presenting or paused, but not idle", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    const audio = new Uint8Array([1, 2]).buffer;
+    const state = (value: string) => ws.fire("message", { data: JSON.stringify({
+      type: "state", state: value, slideIndex: 0, slideCount: 1, muted: false,
+    }) });
+    ws.fire("open", {});
+    c.sendAudio(audio);
+    state("presenting");
+    c.sendAudio(audio);
+    state("paused");
+    c.sendAudio(audio);
+    state("idle");
+    c.sendAudio(audio);
+    expect(ws.sent).toEqual(['{"type":"auth","ticket":"test-ticket"}', audio, audio]);
+  });
+
+  it("emits a flush event for the server flush frame", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    const flushed = vi.fn();
+    c.on("flush", flushed);
+    c.connect();
+    FakeSocket.instances.at(-1)!.fire("message", { data: '{"type":"flush"}' });
+    expect(flushed).toHaveBeenCalledOnce();
+  });
+
   it("parses every text message and binary audio", () => {
     const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
