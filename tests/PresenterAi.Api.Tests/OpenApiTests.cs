@@ -55,6 +55,22 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
             ["rate_limit.exceeded"] = 429,
             ["internal.error"] = 500,
             ["internal.not_implemented"] = 501,
+            ["tools_url_invalid"] = 400,
+            ["tools_url_blocked"] = 400,
+            ["tools_server_limit"] = 400,
+            ["tools_name_invalid"] = 400,
+            ["tools_server_not_found"] = 404,
+            ["tools_header_invalid"] = 400,
+            ["tools_credentials_unavailable"] = 503,
+            ["tools_oauth_unsupported"] = 400,
+            ["tools_oauth_client_required"] = 400,
+            ["tools_unreachable"] = 502,
+            ["tools_redirect_refused"] = 400,
+            ["tools_oauth_state_invalid"] = 400,
+            ["tools_oauth_failed"] = 400,
+            ["tools_auth"] = 401,
+            ["tools_response_too_large"] = 502,
+            ["tools_oauth_invalid_grant"] = 400,
         };
 
     private static readonly IReadOnlyDictionary<string, RequiredOperation> RequiredOperations =
@@ -172,8 +188,17 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
     public async Task Checked_in_document_matches_live_document()
     {
         using var client = factory.CreateClient();
-        var live = JsonNode.Parse(await client.GetStringAsync("/openapi/v1.json"));
         var snapshotPath = Path.Combine(FindRepositoryRoot(), "web", "shared", "openapi", "v1.json");
+        if (Environment.GetEnvironmentVariable("UPDATE_OPENAPI") == "1")
+        {
+            var liveNode = JsonNode.Parse(await client.GetStringAsync("/openapi/v1.json"))!;
+            if (liveNode is JsonObject root && root["servers"] is JsonArray serversArr && serversArr.Count > 0)
+            {
+                if (serversArr[0] is JsonObject s) s["url"] = "http://localhost:47913/";
+            }
+            await File.WriteAllTextAsync(snapshotPath, liveNode.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n");
+        }
+        var live = JsonNode.Parse(await client.GetStringAsync("/openapi/v1.json"));
         var snapshot = JsonNode.Parse(await File.ReadAllTextAsync(snapshotPath));
 
         JsonNode.DeepEquals(Normalize(live), Normalize(snapshot)).Should().BeTrue("the checked-in OpenAPI snapshot must match the live document");

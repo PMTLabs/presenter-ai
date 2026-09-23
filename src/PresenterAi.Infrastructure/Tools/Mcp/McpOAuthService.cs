@@ -158,7 +158,7 @@ public sealed class McpOAuthService(
         }
     }
 
-    public async Task CompleteAsync(string ownerId, string code, string state, string? iss = null,
+    public async Task<Guid> CompleteAsync(string ownerId, string code, string state, string? iss = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -181,7 +181,8 @@ public sealed class McpOAuthService(
             var encrypted = protector.Protect(ownerId, saved.ServerId, JsonSerializer.Serialize(credential));
             if (!await repo.SaveCredentialAsync(ownerId, saved.ServerId, encrypted.Ciphertext, encrypted.KeyId,
                 credential.ExpiresAt, cancellationToken: cancellationToken)) throw new McpOAuthException("tools_oauth_failed");
-            await repo.SetStatusAsync(ownerId, saved.ServerId, "connected", null, cancellationToken);
+            await repo.SetStatusAsync(ownerId, saved.ServerId, "connected", null, "oauth", cancellationToken);
+            return saved.ServerId;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

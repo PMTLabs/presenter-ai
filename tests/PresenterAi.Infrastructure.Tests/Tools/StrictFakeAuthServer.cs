@@ -32,6 +32,13 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
     public int RefreshDelayMs { get; set; }
     public int SecondRefreshDelayMs { get; set; }
     public bool RejectRefresh { get; set; }
+    public bool RejectCode { get; set; }
+    public string? ErrorDescription { get; set; }
+    public string? RegistrationSecret { get; set; }
+    public string? AuthorizationCode { get; set; }
+    public string? AccessToken { get; set; }
+    public string? RefreshToken { get; set; }
+    public string? EchoHeader { get; set; }
     public int TokenCount;
     public int RefreshCount;
     public int MetadataFetchCount;
@@ -114,7 +121,7 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
             var id = "dynamic-" + Interlocked.Increment(ref _serial);
             _clients[id] = RegisteredAuthMethod;
             return Results.Json(new { client_id = id,
-                client_secret = RegisteredAuthMethod == "none" ? null : "dynamic-secret",
+                client_secret = RegisteredAuthMethod == "none" ? null : RegistrationSecret ?? "dynamic-secret",
                 token_endpoint_auth_method = IncompatibleRegistration ? "private_key_jwt" : RegisteredAuthMethod,
                 redirect_uris = IncompatibleRegistration ? Array.Empty<string>() : new[] { RedirectUri },
                 grant_types = new[] { "authorization_code", "refresh_token" } });
@@ -143,7 +150,7 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
                 q["response_type"] != "code" || string.IsNullOrEmpty(q["state"])) return Results.BadRequest();
             var challenge = q["code_challenge"].ToString();
             CodeChallenges.Enqueue(challenge);
-            var code = "code-" + Interlocked.Increment(ref _serial);
+            var code = AuthorizationCode ?? "code-" + Interlocked.Increment(ref _serial);
             _codes[code] = new Authorization(id, challenge, q["redirect_uri"].ToString());
             return Results.Redirect($"{RedirectUri}?code={code}&state={q["state"]}&iss={Uri.EscapeDataString(Url)}");
         });
@@ -161,20 +168,22 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
                     var raw = Encoding.UTF8.GetString(Convert.FromBase64String(ctx.Request.Headers.Authorization.ToString()[6..]));
                     var parts = raw.Split(':', 2);
                     id = Uri.UnescapeDataString(parts[0]);
-                    if (parts.Length != 2 || Uri.UnescapeDataString(parts[1]) != "dynamic-secret") return Results.BadRequest();
+                    if (parts.Length != 2 || Uri.UnescapeDataString(parts[1]) != (RegistrationSecret ?? "dynamic-secret")) return Results.BadRequest();
                 }
                 catch (FormatException) { return Results.BadRequest(); }
             }
             if (!_clients.TryGetValue(id, out var method) || form["resource"] != Resource ||
                 method == "client_secret_post" && (ctx.Request.Headers.ContainsKey("Authorization") ||
-                    form["client_secret"] != (id == "registered-client" ? "registered-secret" : "dynamic-secret")) ||
+                    form["client_secret"] != (id == "registered-client" ? string.Concat("registered", "-secret") : RegistrationSecret ?? "dynamic-secret")) ||
                 method == "client_secret_basic" && (!ctx.Request.Headers.Authorization.ToString().StartsWith("Basic ", StringComparison.Ordinal) ||
                     form.ContainsKey("client_secret")) ||
                 method == "none" && (form.ContainsKey("client_secret") || ctx.Request.Headers.ContainsKey("Authorization")))
                 return Results.BadRequest();
+            if (EchoHeader is not null) ctx.Response.Headers["X-Echo"] = EchoHeader;
             if (grant == "authorization_code")
             {
                 Interlocked.Increment(ref TokenCount);
+                if (RejectCode) return Results.BadRequest(new { error = "invalid_grant", error_description = ErrorDescription });
                 if (!_codes.TryRemove(form["code"].ToString(), out var auth) || auth.ClientId != id ||
                     form["redirect_uri"] != auth.RedirectUri ||
                     Hash(form["code_verifier"].ToString()) != auth.Challenge) return Results.BadRequest();
@@ -185,13 +194,13 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
                 var delay = count == 2 ? SecondRefreshDelayMs : RefreshDelayMs;
                 if (delay > 0) await Task.Delay(delay);
                 if (RejectRefresh || !_refresh.TryRemove(form["refresh_token"].ToString(), out _))
-                    return Results.BadRequest(new { error = "invalid_grant" });
+                    return Results.BadRequest(new { error = "invalid_grant", error_description = ErrorDescription });
             }
             else return Results.BadRequest();
             var serial = Interlocked.Increment(ref _serial);
-            var refresh = "refresh-" + serial;
+            var refresh = RefreshToken ?? "refresh-" + serial;
             _refresh[refresh] = true;
-            return Results.Json(new { access_token = "access-" + serial, refresh_token = refresh,
+            return Results.Json(new { access_token = AccessToken ?? "access-" + serial, refresh_token = refresh,
                 token_type = "Bearer", expires_in = 1, scope = "read write" });
         });
     }
