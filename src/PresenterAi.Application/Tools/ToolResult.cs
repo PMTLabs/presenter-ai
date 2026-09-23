@@ -8,6 +8,8 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
 {
     public const int MaxOutputBytes = 4096;
 
+    public string Outcome { get; init; } = Ok ? "ok" : "error";
+
     public static ToolResult Success(string message, JsonNode? data = null) => new(true, message, data);
 
     public static ToolResult Failure(string message, JsonNode? data = null) => new(false, message, data);
@@ -23,6 +25,7 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
         var node = new JsonObject
         {
             ["ok"] = Ok,
+            ["outcome"] = Outcome,
             ["message"] = Message
         };
 
@@ -40,27 +43,24 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
 
         var note = $" [truncated; original data size {bytes} bytes]";
         var truncatedMessage = Message + note;
-
-        var truncatedNode = new JsonObject
+        var fallbackJson = new JsonObject
         {
             ["ok"] = Ok,
+            ["outcome"] = Outcome,
             ["message"] = truncatedMessage
-        };
-
-        var fallbackJson = truncatedNode.ToJsonString();
+        }.ToJsonString();
         if (Encoding.UTF8.GetByteCount(fallbackJson) <= MaxOutputBytes)
         {
             return fallbackJson;
         }
 
-        // Extreme edge case: message itself is huge
-        var maxMsgBytes = MaxOutputBytes - 64;
+        var maxMsgBytes = MaxOutputBytes - 96;
         var msgBytes = Encoding.UTF8.GetBytes(truncatedMessage);
         var safeMessage = Encoding.UTF8.GetString(msgBytes, 0, Math.Min(msgBytes.Length, maxMsgBytes));
-
         return new JsonObject
         {
             ["ok"] = Ok,
+            ["outcome"] = Outcome,
             ["message"] = safeMessage
         }.ToJsonString();
     }

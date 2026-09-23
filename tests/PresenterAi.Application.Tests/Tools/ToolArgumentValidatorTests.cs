@@ -189,6 +189,26 @@ public sealed class ToolArgumentValidatorTests
         Assert.Contains("Expected arguments to be an object", result.ErrorMessage);
     }
 
+    [Fact]
+    public void Validate_ignores_keywords_outside_supported_subset_and_never_resolves_ref()
+    {
+        var schema = new JsonObject
+        {
+            ["type"] = "object",
+            ["$schema"] = "https://example.invalid/schema",
+            ["unevaluatedProperties"] = false,
+            ["properties"] = new JsonObject
+            {
+                ["remote"] = new JsonObject { ["$ref"] = "https://example.invalid/remote-schema" }
+            }
+        };
+
+        var result = ToolArgumentValidator.Validate(ParseJson("{\"remote\":{\"anything\":true},\"unknown\":1}"), schema);
+
+        Assert.True(result.IsValid);
+        Assert.Null(result.ErrorMessage);
+    }
+
     private static JsonElement ParseJson(string json)
     {
         using var doc = JsonDocument.Parse(json);

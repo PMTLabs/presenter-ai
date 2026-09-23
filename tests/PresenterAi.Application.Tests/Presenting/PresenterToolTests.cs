@@ -608,6 +608,7 @@ public sealed class PresenterToolTests
         public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject() };
         public IReadOnlyList<string> Tags { get; } = ["test"];
         public bool Pinned => false;
+        public TimeSpan Timeout => TimeSpan.FromMilliseconds(50);
 
         public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default)
         {

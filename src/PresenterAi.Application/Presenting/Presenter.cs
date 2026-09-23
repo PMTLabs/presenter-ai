@@ -811,7 +811,6 @@ public sealed class Presenter : IPresenter
         string argumentsJson)
     {
         var catalogue = _catalogue;
-        var timeoutMs = _settings.ToolTimeoutMs;
         _ = Task.Run(async () =>
         {
             ActiveToolCallId.Value = callId;
@@ -838,29 +837,22 @@ public sealed class Presenter : IPresenter
                     {
                         using (doc)
                         {
-                            var tool = catalogue.FindTool(name);
-                            if (tool is null)
+                            var resolution = catalogue.Resolve(name, doc.RootElement);
+                            if (!resolution.IsResolved)
                             {
-                                result = ToolResult.Failure($"unknown tool '{name}'");
+                                result = resolution.Error!;
                             }
                             else
                             {
-                                var validation = ToolArgumentValidator.Validate(doc.RootElement, tool.Parameters);
-                                if (!validation.IsValid)
+                                var tool = resolution.Tool!;
+                                using var cts = new CancellationTokenSource(tool.Timeout);
+                                try
                                 {
-                                    result = ToolResult.Failure(validation.ErrorMessage ?? "invalid arguments");
+                                    result = await tool.InvokeAsync(resolution.Arguments, cts.Token).ConfigureAwait(false);
                                 }
-                                else
+                                catch (OperationCanceledException) when (cts.IsCancellationRequested)
                                 {
-                                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
-                                    try
-                                    {
-                                        result = await tool.InvokeAsync(doc.RootElement, cts.Token).ConfigureAwait(false);
-                                    }
-                                    catch (OperationCanceledException) when (cts.IsCancellationRequested)
-                                    {
-                                        result = ToolResult.Failure("timed out");
-                                    }
+                                    result = ToolResult.Failure("timed out") with { Outcome = "timeout" };
                                 }
                             }
                         }
