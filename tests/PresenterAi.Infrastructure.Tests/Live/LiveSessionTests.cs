@@ -500,6 +500,23 @@ public sealed class LiveSessionTests
     }
 
     [Fact]
+    public async Task Dispose_logs_upstream_disposal_with_session_id()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        var logger = new RecordingLogger<LiveSession>(message =>
+            message.StartsWith("Upstream socket disposed:", StringComparison.Ordinal));
+        var session = Create(server, new FakeTimeProvider(), logger: logger);
+
+        await session.ConnectAsync();
+        session.Id.Should().Be("sess_fake");
+
+        await session.DisposeAsync();
+
+        logger.Messages.Should().ContainSingle()
+            .Which.Should().Be("Upstream socket disposed: session=sess_fake route=azure-like state=Closed");
+    }
+
+    [Fact]
     public async Task Transport_loss_finishes_once_with_connection_lost()
     {
         await using var server = await FakeLiveServer.StartAsync();
@@ -653,8 +670,9 @@ public sealed class LiveSessionTests
         throw new TimeoutException("Timed out waiting for fake live server observation.");
     }
 
-    private sealed class RecordingLogger<T> : ILogger<T>
+    private sealed class RecordingLogger<T>(Func<string, bool>? filter = null) : ILogger<T>
     {
+        private readonly Func<string, bool> _filter = filter ?? (message => message.StartsWith("Delegated response", StringComparison.Ordinal));
         public List<string> Messages { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
@@ -663,9 +681,13 @@ public sealed class LiveSessionTests
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (logLevel >= LogLevel.Information && formatter(state, exception).StartsWith("Delegated response", StringComparison.Ordinal))
+            if (logLevel >= LogLevel.Information)
             {
-                Messages.Add(formatter(state, exception));
+                var message = formatter(state, exception);
+                if (_filter(message))
+                {
+                    Messages.Add(message);
+                }
             }
         }
     }

@@ -296,6 +296,11 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         _socket.Dispose();
         _connection.Dispose();
         _lifetime.Dispose();
+        _logger.LogInformation(
+            "Upstream socket disposed: session={Id} route={Route} state={State}",
+            Id,
+            _route.Name,
+            State);
     }
 
     private async Task SendLoopAsync(CancellationToken connectionToken)

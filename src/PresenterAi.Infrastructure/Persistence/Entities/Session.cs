@@ -13,6 +13,9 @@ public sealed class Session
     public string Upstream { get; set; } = string.Empty;
     public string? UpstreamSessionId { get; set; }
     public string? CloseReason { get; set; }
+    public string? EndReason { get; set; }
+    public bool? UsageConfirmed { get; set; }
+    public int? EstimatedSeconds { get; set; }
 
     public Presentation Presentation { get; set; } = null!;
     public User User { get; set; } = null!;
