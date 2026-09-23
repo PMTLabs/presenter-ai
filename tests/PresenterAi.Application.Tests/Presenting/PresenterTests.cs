@@ -83,7 +83,7 @@ public sealed class PresenterTests
         await harness.Flush();
         Assert.Equal([0], harness.Slides);
         Assert.DoesNotContain(harness.Session().Sent, IsResume);
-        await harness.EndFollowUp(1);
+        await harness.EndFollowUp(701);
         Assert.Equal([0], harness.Slides);
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
@@ -111,7 +111,7 @@ public sealed class PresenterTests
     }
 
     [Fact]
-    public async Task Pause_mutes_blocks_advance_and_resume_unmutes_and_rearms()
+    public async Task Pause_keeps_listening_blocks_advance_and_resume_rearms()
     {
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
@@ -119,14 +119,15 @@ public sealed class PresenterTests
         await harness.Flush();
         Assert.True(await harness.Presenter.PauseAsync());
         Assert.Equal("paused", harness.Presenter.Snapshot().State);
-        Assert.Equal(["mute", "instructions"], harness.Session().Sent.TakeLast(2).Select(item => item.Type));
+        Assert.DoesNotContain(harness.Session().Sent, item => item.Type == "mute");
         Assert.Contains("Pause now", harness.Session().Sent[^1].Content);
         harness.Clock.Advance(TimeSpan.FromSeconds(30));
         await harness.Flush();
         Assert.Equal([0], harness.Slides);
-        Assert.False(await harness.Presenter.SendAudioAsync(new byte[960]));
+        Assert.True(await harness.Presenter.SendAudioAsync(new byte[960]));
         Assert.True(await harness.Presenter.ResumeAsync());
-        Assert.Equal(["unmute", "instructions"], harness.Session().Sent.TakeLast(2).Select(item => item.Type));
+        Assert.DoesNotContain(harness.Session().Sent, item => item.Type == "unmute");
+        Assert.Equal("instructions", harness.Session().Sent[^1].Type);
         harness.Session().Speak();
         await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
@@ -201,7 +202,8 @@ public sealed class PresenterTests
         harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs));
         await harness.Flush();
         Assert.Equal("paused", harness.Presenter.Snapshot().State);
-        Assert.Equal("mute", harness.Session().Sent[^2].Type);
+        Assert.DoesNotContain(harness.Session().Sent, item => item.Type == "mute");
+        Assert.Equal("instructions", harness.Session().Sent[^1].Type);
         Assert.Contains(new PresenterLog("warn", "The model stopped responding on slide 1 — Resume or End."), harness.Logs);
 
         var sentAfterPause = harness.Session().Sent.Count;
@@ -610,7 +612,7 @@ public sealed class PresenterTests
         await harness.Flush();
         Assert.Equal([0], harness.Slides);
 
-        await harness.EndFollowUp(Presenter.DefaultFollowUpWaitMs - 2001 + 1);
+        await harness.EndFollowUp(Presenter.DefaultFollowUpWaitMs - 2001 + 701);
         var resume = Assert.Single(harness.Session().Sent, IsResume);
         Assert.Equal("slide-1-resume-1", resume.EventId);
         Assert.Equal(PromptBuilder.ResumeAfterQuestionInstruction(), resume.Content);
@@ -634,11 +636,11 @@ public sealed class PresenterTests
         await harness.Flush();
         harness.Session().Speak();
         await harness.Flush();
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(7999));
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(8699));
         await harness.Flush();
         Assert.DoesNotContain(harness.Session().Sent, IsResume);
 
-        await harness.EndFollowUp(2);
+        await harness.EndFollowUp(702);
         Assert.Single(harness.Session().Sent, IsResume);
         Assert.Contains(new PresenterLog("info", "question: no follow-up after 8000 ms; resuming"), harness.Logs);
     }
@@ -1066,7 +1068,7 @@ public sealed class PresenterTests
 
         public Task Flush() => Presenter.WaitUntilIdleAsync();
 
-        public async Task EndFollowUp(int milliseconds = PresenterAi.Application.Presenting.Presenter.DefaultFollowUpWaitMs + 1)
+        public async Task EndFollowUp(int milliseconds = PresenterAi.Application.Presenting.Presenter.DefaultFollowUpWaitMs + 701)
         {
             Clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
             await Flush();
