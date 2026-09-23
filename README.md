@@ -66,7 +66,8 @@ Copy `.env.example` to `.env` and fill the upstream values. Compose reads `.env`
 container receives configuration keys with the `__` form. The mappings in `docker-compose.yml` include
 `UPSTREAM_ENDPOINT` → `Upstream__Endpoint`, `UPSTREAM_KEY` → `Upstream__Key`, `UPSTREAM_MODEL` →
 `Upstream__Model`, `UPSTREAM_VOICE` → `Upstream__Voice`, `FALLBACK_OPENAI_KEY` → `Upstream__Fallback__Key`,
-`ADVANCE_SILENCE_MS` → `Presenter__AdvanceSilenceMs`, and `LOG_EVENTS` → `Presenter__LogEvents`.
+`UPSTREAM_DELEGATION_MODEL` → `Upstream__DelegationModel`, `FALLBACK_DELEGATION_MODEL` →
+`Upstream__Fallback__DelegationModel`, `ADVANCE_SILENCE_MS` → `Presenter__AdvanceSilenceMs`, and `LOG_EVENTS` → `Presenter__LogEvents`.
 
 ```bash
 cp .env.example .env
@@ -124,6 +125,8 @@ The names used by Compose are mapped above. The .NET local path uses the `Upstre
 | `UPSTREAM_KEY` | yes | API key. Sent as `Authorization: Bearer` (plus `api-key` on Azure). |
 | `UPSTREAM_MODEL` | no | `gpt-live-1` (OpenAI) or the Azure deployment name. Default `gpt-live-1`. |
 | `UPSTREAM_VOICE` | no | Output voice, default `marin`. |
+| `UPSTREAM_DELEGATION_MODEL` | no | Model that answers audience questions the deck does not cover: model id (OpenAI) or Azure deployment name in the same resource. Default `gpt-5.6-luna`; empty = deck-only answers. If it is unavailable, the session starts deck-only and logs `delegation: backend unavailable`. |
+| `FALLBACK_DELEGATION_MODEL` | no | The same for the OpenAI fallback upstream. Default `gpt-5.6-luna`. |
 | `FALLBACK_OPENAI_KEY` | no | If set, `api.openai.com` is tried when the primary cannot start a session (rate limit, outage). `FALLBACK_OPENAI_ENDPOINT` / `FALLBACK_OPENAI_MODEL` override the route/model. |
 | `ADVANCE_SILENCE_MS` | no | Silence after the model stops speaking before the next slide. Default `3000`. |
 | `LOG_EVENTS` | no | Log every upstream JSON event (audio deltas excluded); the .NET host binds `true`/`false`. |
