@@ -179,21 +179,123 @@ public sealed class PresenterTests
     }
 
     [Fact]
-    public async Task No_output_audio_for_15_seconds_sends_exactly_one_nudge()
+    public async Task Silent_model_gets_two_nudges_then_the_run_pauses_with_a_warning()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + 1));
+        await harness.Flush();
+        Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge"));
+
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs));
+        await harness.Flush();
+        Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge-2"));
+
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs));
+        await harness.Flush();
+        Assert.Equal("paused", harness.Presenter.Snapshot().State);
+        Assert.Equal("mute", harness.Session().Sent[^2].Type);
+        Assert.Contains(new PresenterLog("warn", "The model stopped responding on slide 1 — Resume or End."), harness.Logs);
+
+        var sentAfterPause = harness.Session().Sent.Count;
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs * 2));
+        await harness.Flush();
+        Assert.Equal(sentAfterPause, harness.Session().Sent.Count);
+        Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge"));
+        Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge-2"));
+    }
+
+    [Fact]
+    public async Task Voiced_output_after_the_first_nudge_cancels_the_escalation()
+    {
+        await using var harness = Create(advanceSilenceMs: 60_000);
+        await harness.Presenter.StartAsync("p");
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + 1));
+        await harness.Flush();
+
+        harness.Session().Speak();
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs * 2));
+        await harness.Flush();
+
+        Assert.Equal("presenting", harness.Presenter.Snapshot().State);
+        Assert.DoesNotContain(harness.Session().Sent, item => item.EventId == "slide-1-nudge-2");
+        Assert.DoesNotContain(harness.Session().Sent, item => item.Type == "mute");
+    }
+
+    [Fact]
+    public async Task Resume_after_a_stall_rearms_the_first_nudge()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        for (var nudge = 0; nudge < 3; nudge++)
+        {
+            harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + (nudge == 0 ? 1 : 0)));
+            await harness.Flush();
+        }
+
+        Assert.Equal("paused", harness.Presenter.Snapshot().State);
+        Assert.True(await harness.Presenter.ResumeAsync());
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + 1));
+        await harness.Flush();
+
+        Assert.Equal("presenting", harness.Presenter.Snapshot().State);
+        Assert.Equal(2, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge"));
+        Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge-2"));
+    }
+
+    [Fact]
+    public async Task Resume_after_a_stall_counts_the_rest_of_the_slide_in_a_new_diagnostics_line()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        for (var nudge = 0; nudge < 3; nudge++)
+        {
+            harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + (nudge == 0 ? 1 : 0)));
+            await harness.Flush();
+        }
+
+        Assert.Contains(new PresenterLog("info", "slide 1: output 0 frames (0 voiced), user transcript 0 chars"), harness.Logs);
+        Assert.True(await harness.Presenter.ResumeAsync());
+        harness.Session().Speak();
+        await harness.Flush();
+        Assert.True(await harness.Presenter.NextAsync());
+
+        Assert.Contains(new PresenterLog("info", "slide 1: output 1 frames (1 voiced), user transcript 0 chars"), harness.Logs);
+    }
+
+    [Fact]
+    public async Task New_slide_during_escalation_starts_with_its_first_nudge()
     {
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
         harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + 1));
         await harness.Flush();
-        Assert.Equal("slide-1-nudge", harness.Session().Sent[^1].EventId);
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs * 2));
+
+        Assert.True(await harness.Presenter.NextAsync());
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs + 1));
         await harness.Flush();
+
         Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-1-nudge"));
+        Assert.Equal(1, harness.Session().Sent.Count(item => item.EventId == "slide-2-nudge"));
+        Assert.DoesNotContain(harness.Session().Sent, item => item.EventId == "slide-2-nudge-2");
+    }
+
+    [Fact]
+    public async Task Slide_diagnostics_count_output_frames_and_user_transcript_characters()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        harness.Session().Silence();
         harness.Session().Speak();
+        harness.Session().Silence();
+        harness.Session().Hear("what");
         await harness.Flush();
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
-        await harness.Flush();
-        Assert.Equal(1, harness.Presenter.Snapshot().SlideIndex);
+
+        Assert.True(await harness.Presenter.NextAsync());
+
+        Assert.Contains(new PresenterLog("info", "slide 1: output 3 frames (1 voiced), user transcript 4 chars"), harness.Logs);
     }
 
     [Fact]

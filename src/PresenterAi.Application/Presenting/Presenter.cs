@@ -44,8 +44,12 @@ public sealed class Presenter : IPresenter
     private int _slideIndex;
     private bool _muted;
     private bool _heardOutput;
-    private bool _nudged;
+    private int _nudgeCount;
     private bool _wrappingUp;
+    private int _outputFrames;
+    private int _voicedOutputFrames;
+    private int _userTranscriptCharacters;
+    private bool _slideDiagnosticsActive;
     private IReadOnlyList<string> _parts = Array.Empty<string>();
     private int _partsSent;
     private double _usageSeconds;
@@ -440,11 +444,13 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        CompleteSlideDiagnostics();
         ClearTimers();
         _slideIndex = index;
         _heardOutput = false;
-        _nudged = false;
+        _nudgeCount = 0;
         _wrappingUp = false;
+        StartSlideDiagnostics();
         var slide = _presentation.Slides[index];
         LogMessage("info", $"slide {index + 1}/{SlideCount}{(slide.Title.Length > 0 ? $" — {slide.Title}" : string.Empty)}");
         Slide?.Invoke(index);
@@ -505,7 +511,17 @@ public sealed class Presenter : IPresenter
         }
 
         Audio?.Invoke(new PresenterAudio(audio.Bytes, audio.StartMs, audio.EndMs));
-        if (_state is not (PresenterState.Presenting or PresenterState.Paused) || !AudioLevel.IsVoiced(audio.Bytes))
+        var voiced = AudioLevel.IsVoiced(audio.Bytes);
+        if (_slideDiagnosticsActive)
+        {
+            _outputFrames++;
+            if (voiced)
+            {
+                _voicedOutputFrames++;
+            }
+        }
+
+        if (_state is not (PresenterState.Presenting or PresenterState.Paused) || !voiced)
         {
             return;
         }
@@ -530,6 +546,11 @@ public sealed class Presenter : IPresenter
         }
 
         Transcript?.Invoke(new PresenterTranscript(transcript.Role, transcript.Delta, transcript.StartMs, transcript.EndMs));
+        if (transcript.Role == "user" && _slideDiagnosticsActive)
+        {
+            _userTranscriptCharacters += transcript.Delta.Length;
+        }
+
         if (transcript.Role == "user" && _state == PresenterState.Presenting && _heardOutput)
         {
             ArmAfterVoice();
@@ -607,17 +628,36 @@ public sealed class Presenter : IPresenter
 
     private void OnNudge()
     {
-        if (_state != PresenterState.Presenting || _heardOutput || _nudged || _presentation is null)
+        if (_state != PresenterState.Presenting || _heardOutput || _presentation is null)
         {
             return;
         }
 
-        _nudged = true;
         var slide = _presentation.Slides[_slideIndex];
-        LogMessage("warn", $"no output audio {NudgeMs} ms after slide {_slideIndex + 1} was sent; nudging the model");
-        _session?.AppendInstructions(
-            PromptBuilder.NudgeInstruction(_slideIndex, SlideCount, slide.Title),
-            $"slide-{_slideIndex + 1}-nudge");
+        switch (_nudgeCount)
+        {
+            case 0:
+                _nudgeCount = 1;
+                LogMessage("warn", $"no output audio {NudgeMs} ms after slide {_slideIndex + 1} was sent; nudging the model");
+                _session?.AppendInstructions(
+                    PromptBuilder.NudgeInstruction(_slideIndex, SlideCount, slide.Title),
+                    $"slide-{_slideIndex + 1}-nudge");
+                ArmNudge();
+                break;
+            case 1:
+                _nudgeCount = 2;
+                LogMessage("warn", $"no output audio {NudgeMs * 2} ms after slide {_slideIndex + 1} was sent; nudging the model again");
+                _session?.AppendInstructions(
+                    PromptBuilder.NudgeInstruction(_slideIndex, SlideCount, slide.Title),
+                    $"slide-{_slideIndex + 1}-nudge-2");
+                ArmNudge();
+                break;
+            default:
+                CompleteSlideDiagnostics();
+                PauseCore();
+                LogMessage("warn", $"The model stopped responding on slide {_slideIndex + 1} — Resume or End.");
+                break;
+        }
     }
 
     private void OnWrapUpFallback()
@@ -636,6 +676,7 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        CompleteSlideDiagnostics();
         ClearTimers();
         _wrappingUp = true;
         _parts = Array.Empty<string>();
@@ -726,7 +767,13 @@ public sealed class Presenter : IPresenter
 
         var slide = _presentation.Slides[_slideIndex];
         _heardOutput = false;
-        _nudged = false;
+        _nudgeCount = 0;
+        if (!_slideDiagnosticsActive)
+        {
+            // A stall pause closed this slide's counts; the resumed part of the slide gets its own line.
+            StartSlideDiagnostics();
+        }
+
         SetState(PresenterState.Presenting);
         if (_wrappingUp)
         {
@@ -777,6 +824,7 @@ public sealed class Presenter : IPresenter
             return false;
         }
 
+        CompleteSlideDiagnostics();
         ClearTimers();
         var session = _session;
         SetState(PresenterState.Ending);
@@ -820,6 +868,7 @@ public sealed class Presenter : IPresenter
 
     private void OnClosed(string reason, double? seconds)
     {
+        CompleteSlideDiagnostics();
         ClearTimers();
         var endedNormally = IsNormalClose(reason);
         if (_presentation is not null)
@@ -839,6 +888,27 @@ public sealed class Presenter : IPresenter
             $"closed: reason={reason} usage={(seconds.HasValue ? seconds.Value.ToString() : "unconfirmed")} s{(endedNormally ? string.Empty : $" (Start resumes at slide {_slideIndex + 1})")}");
         Closed?.Invoke(new PresenterClosed(reason, seconds));
         SetState(PresenterState.Idle);
+    }
+
+    private void StartSlideDiagnostics()
+    {
+        _outputFrames = 0;
+        _voicedOutputFrames = 0;
+        _userTranscriptCharacters = 0;
+        _slideDiagnosticsActive = true;
+    }
+
+    private void CompleteSlideDiagnostics()
+    {
+        if (!_slideDiagnosticsActive)
+        {
+            return;
+        }
+
+        LogMessage(
+            "info",
+            $"slide {_slideIndex + 1}: output {_outputFrames} frames ({_voicedOutputFrames} voiced), user transcript {_userTranscriptCharacters} chars");
+        _slideDiagnosticsActive = false;
     }
 
     private void ArmAfterVoice()
