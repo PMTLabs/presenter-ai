@@ -18,6 +18,9 @@ for (const file of files.filter((name) => name.endsWith(".js"))) {
   if (source.includes("data:video/mp2t")) {
     failures.push(`${file} inlines a .ts asset as data:video/mp2t`);
   }
+  if (source.includes("react-dom.development.js") || source.includes("react-dom-client.development.js")) {
+    failures.push(`${file} contains a development React bundle`);
+  }
 }
 
 if (failures.length > 0) {

@@ -79,6 +79,53 @@ describe("BridgeClient", () => {
     c.disconnect();
   });
 
+  it("backs busy closes off from five seconds without resetting on socket open", () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    const busy: BridgeMessage[] = [];
+    c.on("busy", (message) => busy.push(message));
+    c.connect();
+
+    for (const delay of [5000, 10000, 20000]) {
+      const ws = FakeSocket.instances.at(-1)!;
+      ws.fire("open", {});
+      ws.fire("message", { data: JSON.stringify({ type: "error", code: "busy" }) });
+      ws.fire("close", { code: 1013 });
+      vi.advanceTimersByTime(delay);
+    }
+
+    expect(busy).toHaveLength(3);
+    expect(setTimeoutSpy.mock.calls.map(([, delay]) => delay)).toEqual([5000, 10000, 20000]);
+    c.disconnect();
+  });
+
+  it("resets the retry counter only after the accepted state frame", () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    FakeSocket.instances.at(-1)!.fire("close", {});
+    vi.advanceTimersByTime(500);
+
+    const unaccepted = FakeSocket.instances.at(-1)!;
+    unaccepted.fire("open", {});
+    unaccepted.fire("message", { data: JSON.stringify({ type: "error", code: "busy" }) });
+    unaccepted.fire("close", { code: 1013 });
+    vi.advanceTimersByTime(10000);
+
+    const accepted = FakeSocket.instances.at(-1)!;
+    accepted.fire("open", {});
+    accepted.fire("message", {
+      data: JSON.stringify({ type: "state", state: "idle", slideIndex: 0, slideCount: 0, muted: false }),
+    });
+    accepted.fire("message", { data: JSON.stringify({ type: "error", code: "busy" }) });
+    accepted.fire("close", { code: 1013 });
+
+    expect(setTimeoutSpy.mock.calls.map(([, delay]) => delay)).toEqual([500, 10000, 5000]);
+    c.disconnect();
+  });
+
   it("snapshot → idle after reconnect", () => {
     const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();

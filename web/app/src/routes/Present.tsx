@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator, useDefaultLayout } from "react-resizable-panels";
 import { Link, useParams } from "react-router-dom";
 import apiClient, { type components } from "@presenter/shared/api";
-import { errorMessages, isProblem } from "@presenter/shared";
+import { errorMessages, isProblem, useAuthStore } from "@presenter/shared";
 import { BridgeClient } from "../ws/bridgeClient";
 import { DeckDriver } from "../deck/deckDriver";
 import { startAudio, type StartedAudio } from "../audio/capture";
@@ -74,6 +74,9 @@ export function Present() {
   const audioAbort = useRef<AbortController | null>(null);
   const [presentation, setPresentation] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busyMessage, setBusyMessage] = useState<string | null>(null);
+  const ready = useAuthStore((state) => state.ready);
+  const userId = useAuthStore((state) => state.user?.id ?? null);
   const snapshot = usePresenterStore((state) => state.snapshot);
   const bufferedMs = usePresenterStore((state) => state.bufferedMs);
   const transcript = usePresenterStore((state) => state.transcript);
@@ -93,13 +96,24 @@ export function Present() {
     setMicReady(false);
   }, [setMicReady]);
   useEffect(() => {
+    if (!ready || !userId) {
+      client.current?.disconnect();
+      client.current = null;
+      stopAudio();
+      driver.current?.dispose();
+      driver.current = null;
+      return;
+    }
     const bridge = new BridgeClient(undefined, undefined, async () => {
       const { data, error: requestError } = await apiClient.POST("/v1/sessions/ticket");
       if (requestError || !data) throw new Error("Unable to obtain a session ticket.");
       return data.ticket;
     });
     client.current = bridge;
-    bridge.on("state", applySnapshot);
+    bridge.on("state", (serverSnapshot) => {
+      applySnapshot(serverSnapshot);
+      setBusyMessage(null);
+    });
     bridge.on("slide", (index) => {
       driver.current?.goto(index);
       message({ type: "slide", index });
@@ -118,6 +132,9 @@ export function Present() {
     bridge.on("audio", (buffer) => audio.current?.playback.enqueue(buffer));
     bridge.on("open", () => log("info", "connected to server"));
     bridge.on("close", () => log("warn", "server connection closed"));
+    bridge.on("busy", () => {
+      setBusyMessage((current) => current ?? "The presenter is in use in another tab.");
+    });
     bridge.connect();
     return () => {
       bridge.disconnect();
@@ -125,9 +142,15 @@ export function Present() {
       driver.current?.dispose();
       driver.current = null;
     };
-  }, [applySnapshot, log, message, stopAudio]);
+  }, [applySnapshot, log, message, ready, stopAudio, userId]);
   useEffect(() => {
-    if (!id) return;
+    if (!ready || !userId || !id) {
+      setPresentation(null);
+      setError(null);
+      driver.current?.dispose();
+      driver.current = null;
+      return;
+    }
     let active = true;
     setError(null);
     void apiClient
@@ -175,9 +198,9 @@ export function Present() {
       driver.current?.dispose();
       driver.current = null;
     };
-  }, [id, log]);
+  }, [id, log, ready, userId]);
   const begin = async () => {
-    if (!presentation) return;
+    if (!ready || !userId || !presentation || snapshot.state !== "idle") return;
     stopAudio();
     const controller = new AbortController();
     audioAbort.current = controller;
@@ -267,6 +290,16 @@ export function Present() {
       <Link className="flex-none text-sm text-blue-600" to="/">
         ← Library
       </Link>
+      {ready && !userId && (
+        <p className="mt-4 flex-none text-gray-600 dark:text-gray-400">
+          Please sign in to continue. <Link className="text-blue-600 hover:underline" to="/login">Sign in</Link>
+        </p>
+      )}
+      {busyMessage && (
+        <p className="mt-4 flex-none rounded-lg bg-amber-50 p-4 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          {busyMessage}
+        </p>
+      )}
       {error && (
         <p className="mt-4 flex-none rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
           {error}
@@ -315,7 +348,7 @@ export function Present() {
               <button
                 className={startButtonClassName}
                 onClick={() => void begin()}
-                disabled={snapshot.state !== "idle"}
+                disabled={!ready || !userId || !presentation || snapshot.state !== "idle"}
               >
                 Start
               </button>

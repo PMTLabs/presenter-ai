@@ -1,8 +1,9 @@
+import { useEffect } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AdminLayout } from './components/layout/AdminLayout';
 import { AdminRoute } from './components/layout/AdminRoute';
 import { ComingSoon } from './pages/ComingSoon';
-import { useAuthStore } from '@presenter/shared';
+import { refreshAuth, useAuthStore } from '@presenter/shared';
 
 const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
 
@@ -27,6 +28,10 @@ function Login() {
 }
 
 export function App() {
+  useEffect(() => {
+    void refreshAuth();
+  }, []);
+
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
