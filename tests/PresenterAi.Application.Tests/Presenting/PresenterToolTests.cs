@@ -242,7 +242,7 @@ public sealed class PresenterToolTests
         registry.Register(new CrashingTool());
         registry.Register(new SlowTool());
 
-        await using var harness = Create(toolRegistry: registry, toolTimeoutMs: 50);
+        await using var harness = Create(toolRegistry: registry);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
 
@@ -512,7 +512,6 @@ public sealed class PresenterToolTests
         int chunkChars = 200,
         ToolRegistry? toolRegistry = null,
         Func<int, bool>? hasDelegationModel = null,
-        int toolTimeoutMs = 5000,
         int followUpWaitMs = Presenter.DefaultFollowUpWaitMs)
     {
         var clock = new FakeTimeProvider();
@@ -538,7 +537,7 @@ public sealed class PresenterToolTests
                 new PresentationMeta(id, "T", "deck", "showFn", null, null, advanceSilenceMs, chunkChars),
                 slides ?? DefaultSlides,
                 "ctx")),
-            new PresenterSettings(advanceSilenceMs, "marin", followUpWaitMs, ToolsOptions.DefaultMaxInlineTools, toolTimeoutMs),
+            new PresenterSettings(advanceSilenceMs, "marin", followUpWaitMs, ToolsOptions.DefaultMaxInlineTools),
             clock,
             toolRegistry,
             hasDelegationModel);
