@@ -45,10 +45,10 @@ spoken yes while the model is silent runs the captured action. No, timeout, or a
 cannot approve an action itself. Confirmation requests expire after 10 seconds; the question has up to 8 seconds to
 be voiced. Tool calls time out after 10 seconds by default.
 
-Tools are loaded at talk start in parallel. Each server's discovery has a 3-second budget
-(`Tools:Mcp:StartBudgetMs`, starting after repository reads); the presenter applies a separate 4-second hard cap
-(`StartBudgetMs` plus 1 second) to the whole talk-start load. A server may contribute at most 64 tools. A schema
-larger than 4 KiB is skipped. The inline catalogue defaults to 16 tools; larger catalogues use discovery
+Tools are loaded at talk start in parallel. The server-discovery phase shares one 3-second deadline
+(`Tools:Mcp:StartBudgetMs`, starting after repository and override reads). The presenter applies a separate 4-second
+hard cap (`StartBudgetMs` plus 1 second) to the whole talk-start load. A server may contribute at most 64 tools. A
+schema larger than 4 KiB is skipped. The inline catalogue defaults to 16 tools; larger catalogues use discovery
 (`find_tools` / `call_tool`) subject to its payload budget. A failed or slow server is skipped, logged, and does not
 stop the talk. Tools are available only in managed delegation mode, not client/deck-only mode.
 

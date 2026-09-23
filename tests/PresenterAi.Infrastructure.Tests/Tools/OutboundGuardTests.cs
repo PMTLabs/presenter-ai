@@ -176,10 +176,20 @@ public class OutboundGuardTests
         var blocked = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync(url + "/guard-ok"));
         Assert.Equal("tools_url_blocked", Assert.IsType<OutboundGuardException>(blocked.InnerException).Code);
         Assert.Equal(0, connector.Calls);
-        resolver.Address = IPAddress.Parse("8.8.8.8");
+        var approvedAddress = IPAddress.Parse("8.8.8.8");
+        resolver.Address = approvedAddress;
         using var ok = await client.GetAsync(url + "/guard-ok");
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
         Assert.Equal(1, connector.Calls);
+        Assert.Equal(approvedAddress, connector.DialedAddress);
+        Assert.Equal(port, connector.DialedPort);
+
+        resolver.Addresses = [approvedAddress, IPAddress.Loopback];
+        using var mixedRequest = new HttpRequestMessage(HttpMethod.Get, $"https://mixed.example:{port}/guard-ok");
+        mixedRequest.Headers.ConnectionClose = true;
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.SendAsync(mixedRequest));
+        Assert.Equal(1, connector.Calls);
+        resolver.Addresses = [approvedAddress];
         var refused = await Assert.ThrowsAsync<OutboundGuardException>(() => client.GetAsync(url + "/guard-redirect"));
         Assert.Equal("tools_redirect_refused", refused.Code);
         Assert.Equal(1, connector.Calls);
@@ -190,17 +200,22 @@ public class OutboundGuardTests
 
     private sealed class MutableResolver : IOutboundDnsResolver
     {
-        public IPAddress Address { get; set; } = IPAddress.Loopback;
-        public Task<IPAddress[]> ResolveAllAsync(string host, CancellationToken ct) => Task.FromResult(new[] { Address });
-        public Task<IPAddress[]> ResolveAAsync(string host, CancellationToken ct) => Task.FromResult(new[] { Address });
+        public IPAddress[] Addresses { get; set; } = [IPAddress.Loopback];
+        public IPAddress Address { get => Addresses[0]; set => Addresses = [value]; }
+        public Task<IPAddress[]> ResolveAllAsync(string host, CancellationToken ct) => Task.FromResult(Addresses);
+        public Task<IPAddress[]> ResolveAAsync(string host, CancellationToken ct) => Task.FromResult(Addresses);
     }
 
     private sealed class LoopbackSocketConnector : ISocketConnector
     {
         public int Calls;
+        public IPAddress? DialedAddress;
+        public int DialedPort;
         public async ValueTask<Stream> ConnectAsync(IPAddress address, int port, CancellationToken ct)
         {
             Interlocked.Increment(ref Calls);
+            DialedAddress = address;
+            DialedPort = port;
             var socket = new System.Net.Sockets.Socket(AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream,
                 System.Net.Sockets.ProtocolType.Tcp);
             try

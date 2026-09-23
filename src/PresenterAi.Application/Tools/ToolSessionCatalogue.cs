@@ -60,7 +60,7 @@ public sealed class ToolSessionCatalogue
         {
             if (all.Count <= maxInlineTools)
             {
-                _notes.Add("External tools use discovery because the inline tool payload exceeded the 32 KiB budget.");
+                _notes.Add("Tools use discovery because the inline tool payload exceeded the 32 KiB budget.");
             }
 
             var pinned = presenter.Where(t => t.Pinned).ToList();
