@@ -66,8 +66,9 @@ the default socket is found without it.
   outside the repository. External-tool HTTP endpoints live under `/v1/tools` (see
   [docs/guides/003-external-tools.md](docs/guides/003-external-tools.md)). Tools configuration keys are
   `Tools:CredentialKey`, `Tools:OAuthRedirectUri`, `Tools:Mcp:StartBudgetMs`,
-  `Tools:Mcp:CallTimeoutSeconds`, and `Tools:MaxInlineTools`. Run `bash scripts/secrets-guard.sh` before every
-  commit. `.env.example` holds placeholders only.
+  `Tools:Mcp:CallTimeoutSeconds`, and `Tools:MaxInlineTools`. See the
+  [talk limits and billing guide](docs/guides/004-talk-limits-and-billing.md). Run `bash scripts/secrets-guard.sh`
+  before every commit. `.env.example` holds placeholders only.
 - **Ports.** The API is 47913, Vite 47914/47915. Never touch port 3000 — it belongs to another project on the
   developer's machine. Stop a process by PID, never `kill all node/dotnet`.
 - **Git.** `master` is production, `develop` is integration, work happens on `feature/*` branches merged by PR
