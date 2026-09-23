@@ -179,3 +179,40 @@ Each timer has its own generation counter. Clearing/disarming increments the gen
 - No documented way in this repository to cancel an in-flight managed GPT-Live delegation or guarantee that a spoken acknowledgment was consumed as a result; the research marks such behavior as provider/documentation dependent.
 - No current configuration reader for the phase-0 proposal’s future `Generation:*` keys.
 
+
+## Plan 007 Task 0 — live probe result (2026-09-23)
+
+`tests/PresenterAi.Infrastructure.Tests/Live/LiveToolProbeTests.cs`, run with `PRESENTER_LIVE_PROBE=1`,
+`PRESENTER_LIVE_PROBE_REPEAT=5` and `PRESENTER_LIVE_PROBE_AUDIO_DIR` (synthesized 24 kHz PCM16 speech). Upstream
+config comes from the usual `Upstream:*` keys; no credential was written anywhere.
+
+**Route:** managed delegation, live model `gpt-live-1`, delegation model `gpt-5.6-luna`, the six presenter tools under
+`session.start.delegation.responses.tools`, the §3.4 policy. One fresh session per run.
+
+**How input must be sent (learned while building the probe):**
+- Audience requests must arrive as microphone audio (`session.input_audio.append` plus trailing silence for VAD).
+- OpenAI-Realtime frames (`conversation.item.create`, a bare `response.create`) are rejected with an `error`.
+- A `session.instructions.append` without `delegation_id` is rejected (`missing_required_parameter`).
+
+**Trace shape:** `input_transcript.delta… → (live filler audio) → session.delegation.created → response.event
+{response.created, output_item.done (function_call)} → client response.item.create (function_call_output) →
+client response.create → response.event{output_text…, response.completed} → live speaks the outcome`.
+
+**Results (20 runs):**
+
+| Utterance | Correct tool and arguments, cycle completed |
+|---|---|
+| "next slide" | 5 / 5 (`next_slide {}`) |
+| "go to slide three" | 4 / 5 (`go_to_slide {"slide_number":3}`); 1 miss: filler only, no call |
+| "go to the slide about how it works" (title navigation) | **4 / 5** (`go_to_slide {"slide_number":2}`); 1 miss: filler only |
+| "end the meeting" | 5 / 5 (`end_presentation {"confirmed":false}`) |
+
+- Delegation (function call) overall: 18 / 20.
+- Utterance end → function call: avg 1.41 s (min 0.78 s, max 3.33 s).
+- Output submitted → first spoken audio: avg 49 ms (the live model usually speaks a filler first).
+- Two actions in one utterance ("next slide and then pause"): two sequential calls (`next_slide`,
+  `pause_presentation`); both outputs submitted, one `response.create`, completed without error.
+
+**Gate: passed** (title navigation 4 / 5 ≥ 4 / 5; the tool cycle completes). It passed at the threshold, and about
+1 in 10 short commands gets filler speech with no call. That supports plan 007's instant local matcher for
+the common commands (§3.5): delegation is the fallback for free-form requests, not the primary path.
