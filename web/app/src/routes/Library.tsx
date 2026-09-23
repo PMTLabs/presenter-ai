@@ -1,15 +1,23 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import apiClient, { type components } from "@presenter/shared/api";
-import { errorMessages, isProblem } from "@presenter/shared";
+import { errorMessages, isProblem, useAuthStore } from "@presenter/shared";
 
 type PresentationRow = components["schemas"]["PresentationSummary"];
 
 export function Library() {
   const [presentations, setPresentations] = useState<PresentationRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const ready = useAuthStore((state) => state.ready);
+  const userId = useAuthStore((state) => state.user?.id ?? null);
 
   useEffect(() => {
+    if (!ready) return;
+    if (!userId) {
+      setPresentations([]);
+      setError(null);
+      return;
+    }
     let active = true;
     void apiClient
       .GET("/v1/presentations")
@@ -32,7 +40,7 @@ export function Library() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [ready, userId]);
 
   return (
     <section className="mx-auto max-w-7xl p-6">
@@ -42,12 +50,17 @@ export function Library() {
       <p className="mt-2 text-gray-600 dark:text-gray-400">
         Choose a presentation to begin.
       </p>
+      {ready && !userId && (
+        <p className="mt-6 text-gray-600 dark:text-gray-400">
+          Please sign in to continue. <Link className="text-blue-600 hover:underline" to="/login">Sign in</Link>
+        </p>
+      )}
       {error && (
         <p className="mt-6 rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
           {error}
         </p>
       )}
-      {!error && presentations.length === 0 && (
+      {ready && userId && !error && presentations.length === 0 && (
         <p className="mt-8 text-gray-500">No presentations found.</p>
       )}
       <ul className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

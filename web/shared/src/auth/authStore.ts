@@ -29,7 +29,7 @@ export function hasAccessToken() {
 function saveSession(response: AuthTokenResponse) {
   sessionGeneration++;
   accessToken = response.accessToken;
-  useAuthStore.setState({ user: response.user });
+  useAuthStore.setState({ user: response.user, ready: true });
 }
 
 export function setAuthSession(response: AuthTokenResponse) {
@@ -39,7 +39,7 @@ export function setAuthSession(response: AuthTokenResponse) {
 export function clearAuthSession() {
   sessionGeneration++;
   accessToken = null;
-  useAuthStore.setState({ user: null });
+  useAuthStore.setState({ user: null, ready: true });
 }
 
 // All callers, including startup and the API interceptor, share this flight so a rotating cookie is redeemed once.
@@ -47,16 +47,22 @@ export function refreshAuth(baseUrl = apiBaseUrl()): Promise<boolean> {
   if (refreshPromise) return refreshPromise;
   const generation = sessionGeneration;
   refreshPromise = (async () => {
-    const response = await fetch(apiUrl("/v1/auth/refresh", baseUrl), {
-      method: "POST",
-      credentials: "include",
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) return false;
-    const session = (await response.json()) as AuthTokenResponse;
-    if (sessionGeneration !== generation) return hasAccessToken();
-    saveSession(session);
-    return true;
+    try {
+      const response = await fetch(apiUrl("/v1/auth/refresh", baseUrl), {
+        method: "POST",
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) return false;
+      const session = (await response.json()) as AuthTokenResponse;
+      if (sessionGeneration !== generation) return hasAccessToken();
+      saveSession(session);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      useAuthStore.setState({ ready: true });
+    }
   })().finally(() => {
     refreshPromise = null;
   });
@@ -64,6 +70,7 @@ export function refreshAuth(baseUrl = apiBaseUrl()): Promise<boolean> {
 }
 
 export interface AuthState {
+  ready: boolean;
   user: AuthUser | null;
   signInDev: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -71,6 +78,7 @@ export interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>(() => ({
+  ready: false,
   user: null,
   signInDev: async () => {
     // This endpoint is intentionally absent from the checked-in OpenAPI document:
