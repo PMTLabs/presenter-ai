@@ -69,6 +69,30 @@ public sealed class PresenterTalkGuardTests
         Assert.Equal(0, created);
         Assert.Equal(EndReasons.MaxLength, Assert.Single(closed).EndReason);
         Assert.Equal(startedAt.AddMinutes(5), closed[0].EndedAt);
+
+        var connectClock = new FakeTimeProvider();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var candidates = new List<FakeSession>();
+        await using var connectingPresenter = new Presenter((_, _) =>
+        {
+            var candidate = new FakeSession { ConnectGate = gate };
+            candidates.Add(candidate);
+            return candidate;
+        }, (_, id, _) => Task.FromResult(new LoadedPresentation(id,
+            new PresentationMeta(id, "Title", "deck", "show", null, null, null),
+            [new Slide(0, 1, "One", "Narration.", null)], null)),
+            new PresenterSettings(MaxTalkMinutes: 5), connectClock);
+        var connectClosed = new List<PresenterClosed>();
+        connectingPresenter.Closed += connectClosed.Add;
+        var connectStart = connectingPresenter.StartAsync("deck", null, "owner");
+        while (candidates.Count == 0) await Task.Yield();
+        var connectStartedAt = connectClock.GetUtcNow();
+        connectClock.Advance(TimeSpan.FromMinutes(5));
+        Assert.False((await connectStart).Started);
+        await connectingPresenter.WaitUntilIdleAsync();
+        Assert.Single(candidates);
+        Assert.Equal(1, candidates[0].DisposeCount);
+        Assert.Equal(connectStartedAt.AddMinutes(5), Assert.Single(connectClosed).EndedAt);
     }
 
     [Fact]
@@ -203,6 +227,42 @@ public sealed class PresenterTalkGuardTests
     public static IEnumerable<object[]> ExternalReasons() => EndReasons.All
         .Where(reason => reason is not EndReasons.MaxLength and not EndReasons.Idle)
         .Select(reason => new object[] { reason });
+
+    [Fact]
+    public async Task Unrequested_provider_close_maps_to_upstream_lost()
+    {
+        await using var h = Create();
+        await h.Presenter.StartAsync("deck", null, "owner");
+        h.Sessions[0].Drop();
+        await h.Settle();
+        Assert.Equal(EndReasons.UpstreamLost, Assert.Single(h.Closed).EndReason);
+        Assert.Equal("connection_lost", h.Closed[0].Reason);
+    }
+
+    [Fact]
+    public async Task Wrap_up_close_maps_to_completed()
+    {
+        await using var h = Create();
+        await h.Presenter.StartAsync("deck", null, "owner");
+        await h.Presenter.NextAsync();
+        h.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.WrapUpFallbackMs + 1));
+        await h.Settle();
+        Assert.Equal(EndReasons.Completed, Assert.Single(h.Closed).EndReason);
+        Assert.Equal("close_requested", h.Closed[0].Reason);
+    }
+
+    [Fact]
+    public async Task Close_timeout_keeps_requested_end_reason_and_provider_reason()
+    {
+        await using var h = Create();
+        await h.Presenter.StartAsync("deck", null, "owner");
+        h.Sessions[0].CloseSeconds = null;
+        await h.Presenter.EndAsync(EndReasons.User);
+        await h.Settle();
+        Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
+        Assert.Equal("close_timeout", h.Closed[0].Reason);
+        Assert.False(h.Closed[0].UsageConfirmed);
+    }
 
     private static Harness Create(int? scriptMax = null, PresenterSettings? settings = null)
     {

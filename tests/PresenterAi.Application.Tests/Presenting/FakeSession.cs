@@ -17,6 +17,7 @@ internal sealed class FakeSession : ILiveSession
     public TaskCompletionSource? CloseGate { get; set; }
     public TaskCompletionSource? ConnectGate { get; set; }
     public double? CloseSeconds { get; set; } = 7;
+    public bool ThrowOnAppend { get; set; }
     public bool DeferCloseEvent { get; set; }
 
     public string? WarnOnConnect { get; set; }
@@ -117,7 +118,7 @@ internal sealed class FakeSession : ILiveSession
         if (!DeferCloseEvent)
         {
             State = LiveSessionState.Closed;
-            Closed?.Invoke("close_requested", CloseSeconds);
+            Closed?.Invoke(CloseSeconds is null ? "close_timeout" : "close_requested", CloseSeconds);
         }
         return new LiveCloseResult(CloseSeconds is null ? "close_timeout" : "close_requested", CloseSeconds);
     }
@@ -165,6 +166,7 @@ internal sealed class FakeSession : ILiveSession
 
     private string? Append(string type, string content, string? eventId, string? delegationId)
     {
+        if (ThrowOnAppend) throw new InvalidOperationException("append failed");
         Sent.Add((type, content, eventId, delegationId));
         Appended?.Invoke(type, eventId, Json("{}"));
         return eventId;
