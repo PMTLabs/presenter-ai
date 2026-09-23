@@ -93,15 +93,11 @@ public sealed class CredentialProtector
         Guid serverId, CancellationToken cancellationToken = default)
     {
         var credential = await repository.GetCredentialAsync(ownerId, serverId, cancellationToken);
-        if (credential is null)
-        {
-            return new(null, null);
-        }
+        if (credential is null) return new(null, null);
         var result = Unprotect(ownerId, serverId, credential);
         if (result.ErrorCode is "credential_key_changed" or "credential_unreadable")
-        {
-            await repository.SetStatusAsync(ownerId, serverId, "needs_reconnect", result.ErrorCode, cancellationToken);
-        }
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, serverId, credential.Version,
+                "needs_reconnect", result.ErrorCode, cancellationToken);
         return result;
     }
 }

@@ -94,6 +94,7 @@ public sealed class McpSessionToolSource(
     {
         var notes = new List<string>();
         var tools = new List<McpTool>();
+        uint? credentialVersion = null;
 
         try
         {
@@ -101,6 +102,7 @@ public sealed class McpSessionToolSource(
             var repo = scope.ServiceProvider.GetRequiredService<IToolConnectionRepository>();
 
             var credential = await repo.GetCredentialAsync(ownerId, server.Id, budgetToken);
+            credentialVersion = credential?.Version;
             var connection = await connector.ConnectAsync(ownerId, server, credential, overrides, sessionId: null, budgetToken);
             createdConnections.Add(connection);
 
@@ -158,13 +160,14 @@ public sealed class McpSessionToolSource(
                 tools.Add(tool);
             }
 
-            await repo.SetStatusAsync(ownerId, server.Id, "connected", null, cancellationToken);
+            await repo.SetStatusIfCredentialVersionAsync(ownerId, server.Id, credentialVersion,
+                "connected", null, cancellationToken);
             return new ServerResult(tools, notes);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             notes.Add($"tools: {UntrustedLogText.Sanitize(server.Name)} skipped (timeout)");
-            await UpdateStatusAsync(ownerId, server.Id, "error", "timeout", cancellationToken);
+            await UpdateStatusAsync(ownerId, server.Id, credentialVersion, "error", "timeout", cancellationToken);
             return new ServerResult(tools, notes);
         }
         catch (Exception ex)
@@ -181,18 +184,19 @@ public sealed class McpSessionToolSource(
             string status = McpFailure.Status(code);
 
             notes.Add($"tools: {UntrustedLogText.Sanitize(server.Name)} skipped ({code})");
-            await UpdateStatusAsync(ownerId, server.Id, status, code, cancellationToken);
+            await UpdateStatusAsync(ownerId, server.Id, credentialVersion, status, code, cancellationToken);
             return new ServerResult(tools, notes);
         }
     }
 
-    private async Task UpdateStatusAsync(string ownerId, Guid serverId, string status, string? code, CancellationToken ct)
+    private async Task UpdateStatusAsync(string ownerId, Guid serverId, uint? version,
+        string status, string? code, CancellationToken ct)
     {
         try
         {
             using var scope = scopeFactory.CreateScope();
             var repo = scope.ServiceProvider.GetRequiredService<IToolConnectionRepository>();
-            await repo.SetStatusAsync(ownerId, serverId, status, code, ct);
+            await repo.SetStatusIfCredentialVersionAsync(ownerId, serverId, version, status, code, ct);
         }
         catch
         {

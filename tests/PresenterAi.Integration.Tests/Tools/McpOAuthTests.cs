@@ -315,13 +315,18 @@ public sealed class McpOAuthTests(RedisFixture redis, PostgresFixture postgres)
         await using var fake = await StrictFakeAuthServer.StartAsync();
         await using var harness = await Harness.CreateAsync(fake, postgres, redis);
         await harness.ConnectAsync();
+        fake.RejectRefresh = true;
+        fake.RefreshDelayMs = 1200;
         var stale = (await harness.Repository.GetCredentialAsync(harness.Owner, harness.ServerId))!;
+        var refresh = harness.Service.RefreshAsync(harness.Owner, harness.ServerId);
+        await SpinWaitUntilAsync(() => Volatile.Read(ref fake.RefreshCount) == 1);
+        var replacement = harness.ReadStored() with { AccessToken = "winner-token" };
         var winner = harness.Protector.Protect(harness.Owner, harness.ServerId,
-            JsonSerializer.Serialize(harness.ReadStored() with { AccessToken = "winner-token" }));
+            JsonSerializer.Serialize(replacement));
         Assert.True(await harness.Repository.SaveCredentialAsync(harness.Owner, harness.ServerId,
             winner.Ciphertext, winner.KeyId, expectedVersion: stale.Version));
-        Assert.False(await harness.Repository.SetStatusIfCredentialVersionAsync(harness.Owner, harness.ServerId,
-            stale.Version, "needs_reconnect", "oauth_invalid_grant"));
+        await harness.Repository.SetStatusAsync(harness.Owner, harness.ServerId, "connected", null);
+        Assert.Equal(replacement, await refresh);
         Assert.Equal("connected", (await harness.Repository.GetAsync(harness.Owner, harness.ServerId))!.Status);
     }
 

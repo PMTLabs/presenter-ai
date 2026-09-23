@@ -134,7 +134,8 @@ public sealed class McpConnector(
                 var read = protector.Unprotect(ownerId, server.Id, rawCredential);
                 if (read.Payload == null)
                 {
-                    await UpdateStatusAsync(ownerId, server.Id, "needs_reconnect", read.ErrorCode ?? "credential_unreadable", cancellationToken);
+                    await UpdateStatusAsync(ownerId, server.Id, rawCredential.Version, "needs_reconnect",
+                        read.ErrorCode ?? "credential_unreadable", cancellationToken);
                     throw new McpConnectorException(read.ErrorCode ?? "credential_unreadable");
                 }
                 using var doc = JsonDocument.Parse(read.Payload);
@@ -147,13 +148,15 @@ public sealed class McpConnector(
                 var read = protector.Unprotect(ownerId, server.Id, rawCredential);
                 if (read.Payload == null)
                 {
-                    await UpdateStatusAsync(ownerId, server.Id, "needs_reconnect", read.ErrorCode ?? "credential_unreadable", cancellationToken);
+                    await UpdateStatusAsync(ownerId, server.Id, rawCredential.Version, "needs_reconnect",
+                        read.ErrorCode ?? "credential_unreadable", cancellationToken);
                     throw new McpConnectorException(read.ErrorCode ?? "credential_unreadable");
                 }
                 var oauthCred = JsonSerializer.Deserialize<OAuthTokenCredential>(read.Payload);
                 if (oauthCred == null)
                 {
-                    await UpdateStatusAsync(ownerId, server.Id, "needs_reconnect", "credential_unreadable", cancellationToken);
+                    await UpdateStatusAsync(ownerId, server.Id, rawCredential.Version, "needs_reconnect",
+                        "credential_unreadable", cancellationToken);
                     throw new McpConnectorException("credential_unreadable");
                 }
 
@@ -193,14 +196,7 @@ public sealed class McpConnector(
 
             Func<string, CancellationToken, Task> setStatusFunc = async (status, ct) =>
             {
-                if (server.AuthKind == "oauth" && rawCredential != null && status == "needs_reconnect")
-                {
-                    using var scope = scopeFactory.CreateScope();
-                    var repo = scope.ServiceProvider.GetRequiredService<IToolConnectionRepository>();
-                    await repo.SetStatusIfCredentialVersionAsync(
-                        ownerId, server.Id, rawCredential.Version, status, "auth", ct);
-                }
-                else await UpdateStatusAsync(ownerId, server.Id, status, "auth", ct);
+                await UpdateStatusAsync(ownerId, server.Id, rawCredential?.Version, status, "auth", ct);
             };
 
             return new McpConnection(server, client, tokenState, reconnectFunc, setStatusFunc);
@@ -259,13 +255,14 @@ public sealed class McpConnector(
             cancellationToken: cancellationToken);
     }
 
-    private async Task UpdateStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken ct)
+    private async Task UpdateStatusAsync(string ownerId, Guid serverId, uint? version, string status,
+        string? errorCode, CancellationToken ct)
     {
         try
         {
             using var scope = scopeFactory.CreateScope();
             var repo = scope.ServiceProvider.GetRequiredService<IToolConnectionRepository>();
-            await repo.SetStatusAsync(ownerId, serverId, status, errorCode, ct);
+            await repo.SetStatusIfCredentialVersionAsync(ownerId, serverId, version, status, errorCode, ct);
         }
         catch
         {

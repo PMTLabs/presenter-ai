@@ -198,6 +198,10 @@ public sealed class McpOAuthService(
             var encrypted = protector.Protect(ownerId, saved.ServerId, JsonSerializer.Serialize(credential));
             if (!await repo.SaveCredentialAsync(ownerId, saved.ServerId, encrypted.Ciphertext, encrypted.KeyId,
                 credential.ExpiresAt, cancellationToken: cancellationToken)) throw new McpOAuthException("tools_oauth_failed");
+            var savedToken = await repo.GetCredentialAsync(ownerId, saved.ServerId, cancellationToken);
+            if (savedToken is null || !savedToken.Ciphertext.SequenceEqual(encrypted.Ciphertext))
+                throw new McpOAuthException("tools_oauth_failed");
+            var version = savedToken.Version;
             var server = (await repo.GetAsync(ownerId, saved.ServerId, cancellationToken))! with { AuthKind = "oauth" };
             var stored = await repo.GetCredentialAsync(ownerId, saved.ServerId, cancellationToken);
             try
@@ -205,12 +209,14 @@ public sealed class McpOAuthService(
                 var connector = scope.ServiceProvider.GetRequiredService<McpConnector>();
                 await using var connection = await connector.ConnectAsync(ownerId, server, stored, cancellationToken: cancellationToken);
                 await connection.Client.ListToolsAsync(cancellationToken: cancellationToken);
-                await repo.SetStatusAsync(ownerId, saved.ServerId, "connected", null, "oauth", cancellationToken);
+                await repo.SetStatusIfCredentialVersionAsync(ownerId, saved.ServerId, version,
+                    "connected", null, cancellationToken, "oauth");
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 var failureCode = exception is McpConnectorException mcp ? mcp.Code : "auth";
-                await repo.SetStatusAsync(ownerId, saved.ServerId, "needs_reconnect", failureCode, "oauth", cancellationToken);
+                await repo.SetStatusIfCredentialVersionAsync(ownerId, saved.ServerId, version,
+                    "needs_reconnect", failureCode, cancellationToken, "oauth");
                 throw new McpOAuthException("tools_oauth_failed");
             }
             return saved.ServerId;
@@ -258,18 +264,20 @@ public sealed class McpOAuthService(
                     if (await repo.SaveCredentialAsync(ownerId, serverId, encrypted.Ciphertext, encrypted.KeyId,
                         updated.ExpiresAt, original.Version, cancellationToken))
                     {
-                        await repo.SetStatusAsync(ownerId, serverId, "connected", null, cancellationToken);
+                        var saved = await repo.GetCredentialAsync(ownerId, serverId, cancellationToken);
+                        if (saved is not null && saved.Ciphertext.SequenceEqual(encrypted.Ciphertext))
+                            await repo.SetStatusIfCredentialVersionAsync(ownerId, serverId, saved.Version,
+                                "connected", null, cancellationToken);
                         return updated;
                     }
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
-                    var winner = await FreshAsync(ownerId, serverId, original.Version, cancellationToken);
-                    if (winner is not null) return winner;
+                    // Attempt the atomic transition first; on a lost race, return the winner's token.
                     if (!await repo.SetStatusIfCredentialVersionAsync(ownerId, serverId, original.Version,
                         "needs_reconnect", "oauth_invalid_grant", cancellationToken))
                     {
-                        winner = await FreshAsync(ownerId, serverId, original.Version, cancellationToken);
+                        var winner = await FreshAsync(ownerId, serverId, original.Version, cancellationToken);
                         if (winner is not null) return winner;
                     }
                     throw Safe(exception);
