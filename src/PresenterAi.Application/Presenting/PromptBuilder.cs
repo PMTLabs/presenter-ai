@@ -148,6 +148,10 @@ public static class PromptBuilder
     public static string PauseInstruction() =>
         "Pause now. Stay silent. If someone speaks to you, you may answer in a few words or acknowledge a command; do not continue the narration until told.";
 
+    public static string LimitWarningInstruction(string kind) => kind == EndReasons.Idle
+        ? "Briefly tell the audience the presentation will end in one minute without activity."
+        : "Briefly tell the audience the presentation will end in one minute.";
+
     public static string ClientDelegationAnswerNowInstruction() =>
         "No lookup is available. Answer now in one to three sentences from the narration and background context, or say plainly that the material does not cover it; then stop and stay silent until you are told to continue.";
 

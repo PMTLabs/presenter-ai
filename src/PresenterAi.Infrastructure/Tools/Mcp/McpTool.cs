@@ -84,9 +84,11 @@ public sealed class McpTool : ITool
         string outcome = "error";
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (_ensureFreshTokenAsync != null)
             {
                 await _ensureFreshTokenAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
             }
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -115,18 +117,27 @@ public sealed class McpTool : ITool
                     {
                         if (_refreshTokenAsync != null)
                         {
+                            cancellationToken.ThrowIfCancellationRequested();
                             await _refreshTokenAsync(timeoutCts.Token);
+                            cancellationToken.ThrowIfCancellationRequested();
                             var dict = ToDictionary(arguments);
                             var retryResult = await _callToolAsync(_rawToolName, dict, timeoutCts.Token);
+                            cancellationToken.ThrowIfCancellationRequested();
                             var mapped = MapResult(retryResult);
                             outcome = mapped.Outcome;
                             return mapped;
                         }
                     }
-                    catch
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        outcome = "cancelled";
+                        return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
+                    }
+                    catch (Exception) when (!cancellationToken.IsCancellationRequested)
                     {
                         if (_setStatusAsync != null)
                         {
+                            cancellationToken.ThrowIfCancellationRequested();
                             await _setStatusAsync("needs_reconnect", cancellationToken);
                         }
                         outcome = "auth";
@@ -139,11 +150,22 @@ public sealed class McpTool : ITool
                     // Confirmed tool: refresh so next request works, but DO NOT RETRY!
                     if (_refreshTokenAsync != null)
                     {
-                        try { await _refreshTokenAsync(cancellationToken); }
-                        catch
+                        try
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await _refreshTokenAsync(cancellationToken);
+                            cancellationToken.ThrowIfCancellationRequested();
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            outcome = "cancelled";
+                            return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
+                        }
+                        catch (Exception) when (!cancellationToken.IsCancellationRequested)
                         {
                             if (_setStatusAsync != null)
                             {
+                                cancellationToken.ThrowIfCancellationRequested();
                                 await _setStatusAsync("needs_reconnect", cancellationToken);
                             }
                         }
@@ -161,15 +183,23 @@ public sealed class McpTool : ITool
                     {
                         if (_reconnectAsync != null)
                         {
+                            cancellationToken.ThrowIfCancellationRequested();
                             await _reconnectAsync(timeoutCts.Token);
+                            cancellationToken.ThrowIfCancellationRequested();
                             var dict = ToDictionary(arguments);
                             var retryResult = await _callToolAsync(_rawToolName, dict, timeoutCts.Token);
+                            cancellationToken.ThrowIfCancellationRequested();
                             var mapped = MapResult(retryResult);
                             outcome = mapped.Outcome;
                             return mapped;
                         }
                     }
-                    catch
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        outcome = "cancelled";
+                        return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
+                    }
+                    catch (Exception) when (!cancellationToken.IsCancellationRequested)
                     {
                         outcome = "unreachable";
                         return ToolResult.Failure("unreachable") with { Outcome = "unreachable" };
@@ -182,18 +212,38 @@ public sealed class McpTool : ITool
                     // Confirmed tool: reconnect once so next request works, but DO NOT RETRY!
                     if (_reconnectAsync != null)
                     {
-                        try { await _reconnectAsync(cancellationToken); }
-                        catch { /* ignore */ }
+                        try
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            await _reconnectAsync(cancellationToken);
+                            cancellationToken.ThrowIfCancellationRequested();
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            outcome = "cancelled";
+                            return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
+                        }
+                        catch (Exception) when (!cancellationToken.IsCancellationRequested) { /* ignore */ }
                     }
                     outcome = "auth";
                     return ToolResult.Failure("the server asked me to sign in again; please ask again") with { Outcome = "auth" };
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                outcome = "cancelled";
+                return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
             }
             catch (Exception)
             {
                 outcome = "unreachable";
                 return ToolResult.Failure("unreachable") with { Outcome = "unreachable" };
             }
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            outcome = "cancelled";
+            return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
         }
         finally
         {
