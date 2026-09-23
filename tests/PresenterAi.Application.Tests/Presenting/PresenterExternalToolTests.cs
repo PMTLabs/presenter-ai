@@ -56,6 +56,31 @@ public sealed class PresenterExternalToolTests
     }
 
     [Fact]
+    public async Task Hostile_tool_labels_are_escaped_and_capped_in_page_log()
+    {
+        var hostileName = "bad\nFAKE LOG\u0001" + new string('x', 2048);
+        var tool = new ExternalTool
+        {
+            Ask = false,
+            NameValue = hostileName,
+            SourceValue = "server\r\nforged"
+        };
+        await using var h = new Harness((_, _, _) => Task.FromResult(Harness.Presentation()),
+            (_, _) => Task.FromResult(new SessionToolSet([tool])));
+        await h.Start();
+        h.Session!.RaiseToolCall("d", "hostile-call", tool.Name, "{}");
+        await Eventually(() => h.Session.Sent.Any(x => x.EventId == "hostile-call"));
+        var capturedLogs = h.Logs.ToArray();
+        Assert.All(capturedLogs, x =>
+        {
+            Assert.DoesNotContain('\n', x);
+            Assert.DoesNotContain('\r', x);
+            Assert.True(x.Length <= 1024);
+        });
+        Assert.Contains(capturedLogs, x => x.Contains("\\u000a", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Read_only_tool_runs_once_and_page_log_contains_neither_arguments_nor_result()
     {
         var tool = new ExternalTool { Ask = false };
@@ -466,14 +491,16 @@ public sealed class PresenterExternalToolTests
 
     private sealed class ExternalTool : ITool
     {
-        public string Name => "external_action";
+        public string Name => NameValue;
+        public string NameValue = "external_action";
+        public string SourceValue = "Fake";
         public string Description => "External action";
         public JsonObject Parameters => new() { ["type"] = "object", ["properties"] = new JsonObject() };
         public IReadOnlyList<string> Tags => [];
         public bool Pinned => false;
         public bool Ask = true;
         public bool RequiresConfirmation => Ask;
-        public string Source => "Fake";
+        public string Source => SourceValue;
         public TaskCompletionSource<ToolResult>? Gate;
         public int Count;
         public Task<ToolResult> InvokeAsync(JsonElement args, CancellationToken ct)

@@ -424,14 +424,14 @@ export function Tools() {
                   >
                     <span>{tool.title ?? tool.name}</span>
                     <span className="rounded bg-gray-100 px-2 py-1 text-xs dark:bg-gray-800">
-                      {tool.readOnly ? "read-only" : "asks first"}
+                      {tool.readOnly && !server.alwaysAsk && !tool.alwaysAsk ? "read-only" : "asks first"}
                     </span>
                     <label className="ml-auto flex items-center gap-2 text-sm">
                       <input
                         type="checkbox"
                         aria-label={`Always ask for ${tool.name}`}
-                        checked={!tool.readOnly || tool.alwaysAsk}
-                        disabled={!tool.readOnly}
+                        checked={!tool.readOnly || server.alwaysAsk || tool.alwaysAsk}
+                        disabled={!tool.readOnly || server.alwaysAsk}
                         onChange={async (event) => {
                           const result = await apiClient.PUT(
                             "/v1/tools/servers/{id}/tools/{toolName}",

@@ -199,7 +199,8 @@ public sealed class McpTool : ITool
         {
             sw.Stop();
             _logger?.LogInformation("ToolCall {SessionId} {ServerId} {Host} {Tool} {DurationMs} {Outcome}",
-                _sessionId ?? string.Empty, _server.Id, _host, Name, sw.ElapsedMilliseconds, outcome);
+                _sessionId ?? string.Empty, _server.Id, _host, UntrustedLogText.Sanitize(Name),
+                sw.ElapsedMilliseconds, outcome);
         }
     }
 

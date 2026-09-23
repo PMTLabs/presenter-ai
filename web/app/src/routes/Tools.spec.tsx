@@ -35,14 +35,14 @@ const toolList = [
   { name: "write", title: "Write", description: null, readOnly: false, alwaysAsk: false },
 ];
 
-function setup() {
+function setup(servers = [alpha, beta], tools = toolList) {
   api.GET.mockImplementation((path: string) =>
     Promise.resolve(
       path === "/v1/tools/servers"
-        ? { data: [alpha, beta] }
+        ? { data: servers }
         : path === "/v1/tools/settings"
           ? { data: { webSearchEnabled: false } }
-          : { data: toolList },
+          : { data: tools },
     ),
   );
   api.POST.mockResolvedValue({ data: { ok: true, toolCount: 2 } });
@@ -132,6 +132,17 @@ describe("Tools", () => {
         body: { alwaysAsk: true },
       }),
     );
+  });
+
+  it("shows server-level always ask as effective and locked for read-only tools", async () => {
+    setup([{ ...alpha, alwaysAsk: true }], [{ ...toolList[0], alwaysAsk: false }]);
+    await screen.findByText("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }));
+    const always = await screen.findByRole("checkbox", {
+      name: "Always ask for lookup",
+    }) as HTMLInputElement;
+    expect(always.checked).toBe(true);
+    expect(always.disabled).toBe(true);
   });
 
   it("updates server-level always ask and web search with billing caption", async () => {

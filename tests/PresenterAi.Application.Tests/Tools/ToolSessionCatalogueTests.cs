@@ -516,8 +516,11 @@ public sealed class ToolSessionCatalogueTests
         var catalogue = ToolSessionCatalogue.Build(registry, largeTools);
 
         Assert.DoesNotContain(catalogue.InlineTools, tool => tool.Name == "session_large_8");
+        Assert.Contains(catalogue.InlineTools, tool => tool.Name == "find_tools");
+        Assert.Contains(catalogue.InlineTools, tool => tool.Name == "call_tool");
         Assert.Contains(catalogue.AllTools, tool => tool.Name == "session_large_8");
-        Assert.Contains(catalogue.Notes, note => note.Contains("remains searchable", StringComparison.Ordinal));
+        Assert.True(catalogue.Resolve("session_large_8", ParseJson("{}")).IsResolved);
+        Assert.Contains(catalogue.Notes, note => note.Contains("discovery", StringComparison.Ordinal));
     }
 
     [Fact]
