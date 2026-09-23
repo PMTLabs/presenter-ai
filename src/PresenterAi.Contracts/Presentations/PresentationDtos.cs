@@ -20,7 +20,8 @@ public sealed record PresentationMetaDto(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Voice,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Context,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? AdvanceSilenceMs,
-    int ChunkChars);
+    int ChunkChars,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? MaxMinutes);
 
 public sealed record SlideDto(int Index, int Number, string Title, string Narration, string? Notes);
 

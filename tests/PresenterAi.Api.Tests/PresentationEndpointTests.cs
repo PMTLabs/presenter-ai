@@ -32,6 +32,30 @@ public sealed class PresentationEndpointTests(ApiFactory factory, WebRootFixture
     }
 
     [Fact]
+    public async Task Meta_carries_max_minutes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "presenter-ai-max-minutes", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, "presentations"));
+        Directory.CreateDirectory(Path.Combine(root, "decks"));
+        await File.WriteAllTextAsync(Path.Combine(root, "presentations", "limited.md"),
+            "---\ndeck: decks/sample/index.html\nmaxMinutes: 35\n---\n## Slide 1\nHello.");
+        try
+        {
+            using var client = factory.WithWebHostBuilder(builder => builder.UseSetting("Content:RootDir", root)).CreateClient();
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", ApiFactory.CreateTestToken("test-user", "test@presenter-ai.local"));
+            var response = await client.GetAsync("/v1/presentations/limited");
+            response.EnsureSuccessStatusCode();
+            var body = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+            body!["meta"]!["maxMinutes"]!.GetValue<int>().Should().Be(35);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Missing_id_is_404_with_error_body()
     {
         using var client = factory.CreateAuthenticatedClient();

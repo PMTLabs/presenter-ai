@@ -89,6 +89,22 @@ public static partial class ScriptParser
         var voiceValue = Get(data, "voice");
         var contextValue = Get(data, "context");
         var chunkChars = ToInt(Get(data, "chunkChars")) ?? DefaultChunkChars;
+        int? maxMinutes = null;
+        if (data.ContainsKey("maxMinutes"))
+        {
+            var value = Get(data, "maxMinutes");
+            var isIntegerScalar = value is string or sbyte or byte or short or ushort or int or uint or long or ulong;
+            var text = value is null ? string.Empty : ToJavaScriptString(value);
+            if (!isIntegerScalar
+                || !Regex.IsMatch(text, "^[0-9]+$", RegexOptions.None)
+                || !int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedMaxMinutes)
+                || parsedMaxMinutes < 1)
+            {
+                throw Invalid(metaId, "maxMinutes must be a positive whole number of minutes");
+            }
+
+            maxMinutes = parsedMaxMinutes;
+        }
 
         if (chunkChars < 200)
         {
@@ -103,7 +119,8 @@ public static partial class ScriptParser
             IsTruthy(voiceValue) ? ToJavaScriptString(voiceValue!) : null,
             IsTruthy(contextValue) ? ToJavaScriptString(contextValue!) : null,
             ToInt(Get(data, "advanceSilenceMs")),
-            chunkChars);
+            chunkChars,
+            maxMinutes);
     }
 
     private static Dictionary<string, object?> ParseFrontMatter(string? frontMatter)

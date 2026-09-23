@@ -71,7 +71,7 @@ public static class PresentationEndpoints
             var meta = presentation.Meta;
             return Results.Ok(new PresentationDetail(
                 presentation.Id,
-                new PresentationMetaDto(meta.Id, meta.Title, meta.Deck, meta.Driver, meta.Voice, meta.Context, meta.AdvanceSilenceMs, meta.ChunkChars),
+                new PresentationMetaDto(meta.Id, meta.Title, meta.Deck, meta.Driver, meta.Voice, meta.Context, meta.AdvanceSilenceMs, meta.ChunkChars, meta.MaxMinutes),
                 presentation.Slides.Select(slide => new SlideDto(slide.Index, slide.Number, slide.Title, slide.Narration, slide.Notes)).ToArray(),
                 !string.IsNullOrEmpty(presentation.Context)));
         }
