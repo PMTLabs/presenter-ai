@@ -12,6 +12,7 @@ using PresenterAi.Application.Tools.External;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Persistence.Entities;
 using PresenterAi.Infrastructure.Tools.Mcp;
+using PresenterAi.Infrastructure.Tests.Tools;
 using PresenterAi.Integration.Tests.Support;
 using StackExchange.Redis;
 using Xunit;
