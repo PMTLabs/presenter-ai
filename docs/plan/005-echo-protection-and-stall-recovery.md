@@ -184,7 +184,7 @@ reasoning effort, priority tier, low verbosity).
   - pause, stall pause, navigation, end and close clear the hold.
   - *Follow-up window (2026-09-22, user request after the first live run):* the model no longer bridges back on its
     own. After answering it stays silent (prompt rule), and once the answer is followed by `FollowUpWaitMs` (5 s) of
-    quiet, `Presenter` appends `slide-N-resume-K`: say a short bridge, then restart the interrupted sentence (the live
+    quiet (setting `Presenter:FollowUpWaitMs`, 2500–60000, env `FOLLOW_UP_WAIT_MS`; guide `docs/guides/002-audience-questions.md`), `Presenter` appends `slide-N-resume-K`: say a short bridge, then restart the interrupted sentence (the live
     run resumed mid-sentence and was hard to follow). A new question inside the window reopens the hold. The resume
     replaces the old "normal action on silence", so the slide never advances straight after an answer; the ordinary
     timers take over once the model speaks again, or after the usual silence if it does not. The 15 s timer stops once
