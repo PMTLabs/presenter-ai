@@ -41,15 +41,28 @@ describe("BridgeClient", () => {
     vi.restoreAllMocks();
   });
 
-  it("start sends presentation id", () => {
+  it("start omits an undefined fromIndex and sends an explicit index", () => {
     const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
     const ws = FakeSocket.instances.at(-1)!;
     ws.fire("open", {});
     c.start("sample");
-    expect(ws.sent[1]).toBe(
-      '{"type":"start","presentation":"sample","fromIndex":0}',
-    );
+    c.start("sample", 2);
+    expect(ws.sent[1]).toBe('{"type":"start","presentation":"sample"}');
+    expect(ws.sent[2]).toBe('{"type":"start","presentation":"sample","fromIndex":2}');
+  });
+
+  it("take-over auth is sent only once", () => {
+    vi.useFakeTimers();
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.takeOver();
+    FakeSocket.instances[0].fire("open", {});
+    expect(FakeSocket.instances[0].sent[0]).toBe('{"type":"auth","ticket":"test-ticket","takeOver":true}');
+    FakeSocket.instances[0].fire("close", { code: 1013 });
+    vi.advanceTimersByTime(5000);
+    FakeSocket.instances[1].fire("open", {});
+    expect(FakeSocket.instances[1].sent[0]).toBe('{"type":"auth","ticket":"test-ticket"}');
+    c.disconnect();
   });
 
   it("sends auth frame first", () => {
@@ -58,6 +71,31 @@ describe("BridgeClient", () => {
     const ws = FakeSocket.instances.at(-1)!;
     ws.fire("open", {});
     expect(ws.sent[0]).toBe('{"type":"auth","ticket":"test-ticket"}');
+  });
+
+  it("4409 emits taken-over and never reconnects", () => {
+    vi.useFakeTimers();
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    const events: string[] = [];
+    c.on("taken-over", () => events.push("taken-over"));
+    c.connect();
+    FakeSocket.instances[0].fire("open", {});
+    FakeSocket.instances[0].fire("close", { code: 4409 });
+    vi.advanceTimersByTime(60_000);
+    expect(events).toEqual(["taken-over"]);
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it("takeOver cancels a busy backoff and connects immediately", () => {
+    vi.useFakeTimers();
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    FakeSocket.instances[0].fire("close", { code: 1013 });
+    c.takeOver();
+    expect(FakeSocket.instances).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.instances).toHaveLength(2);
   });
 
   it("reconnects with the exponential schedule capped at ten seconds", () => {

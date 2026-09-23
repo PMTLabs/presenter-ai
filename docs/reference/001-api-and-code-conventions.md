@@ -169,6 +169,10 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
 - Error frames: `{"type":"error","code":"<catalogue code>","message":"…"}` — the same `code` values as HTTP.
   Close codes: `1000` normal, `1013` busy (second client), `1011` server cannot keep up, `4401` auth,
   `4409` `session.already_running`, `4429` `session.slots_busy`.
+- Take over (plan 006): the busy frame carries `canTakeOver` (true when the slot holder is the same user). An `auth`
+  frame with `"takeOver":true` from that user ends the holder's talk (Start then resumes at its slide) and replaces
+  it; the replaced client gets `{"type":"error","code":"taken_over"}` and close `4409` with reason `taken_over`,
+  and must not reconnect. Another account's request gets busy with `canTakeOver:false`.
 - Ping/pong: client `{"type":"ping"}` → `{"type":"pong"}` every 15 s; server closes after 45 s of silence.
 
 ## 9. Security and headers

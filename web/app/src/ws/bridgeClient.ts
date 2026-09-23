@@ -20,6 +20,7 @@ export type BridgeEventMap = {
   closed: [BridgeMessage];
   pong: [];
   busy: [BridgeMessage];
+  "taken-over": [];
   audio: [ArrayBuffer];
 };
 export type BridgeMessage = { type: string; [key: string]: unknown };
@@ -34,6 +35,8 @@ export class BridgeClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connecting = false;
   private connectGeneration = 0;
+  private takeOverOnNextAuth = false;
+  private takenOver = false;
   private listeners = new Map<
     keyof BridgeEventMap,
     Set<(...args: unknown[]) => void>
@@ -97,7 +100,9 @@ export class BridgeClient {
     ws.binaryType = "arraybuffer";
     ws.addEventListener("open", () => {
       if (this.ws !== ws) return;
-      ws.send(JSON.stringify({ type: "auth", ticket }));
+      const takeOver = this.takeOverOnNextAuth;
+      this.takeOverOnNextAuth = false;
+      ws.send(JSON.stringify({ type: "auth", ticket, ...(takeOver ? { takeOver: true } : {}) }));
       this.emit("open");
     });
     ws.addEventListener("message", (event) => {
@@ -110,7 +115,8 @@ export class BridgeClient {
       this.snapshot = { ...this.snapshot, state: "idle" };
       this.emit("state", this.snapshot);
       this.emit("close");
-      this.scheduleReconnect(event.code === 1013);
+      if (event.code === 4409) this.markTakenOver();
+      if (!this.takenOver) this.scheduleReconnect(event.code === 1013);
     });
   }
 
@@ -131,12 +137,24 @@ export class BridgeClient {
     this.ws = null;
     ws?.close();
   }
+  takeOver() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.retry = 0;
+    this.connectGeneration++;
+    this.connecting = false;
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+    this.takeOverOnNextAuth = true;
+    this.connect();
+  }
   send(message: BridgeMessage) {
     if (this.ws?.readyState === this.WebSocketImpl.OPEN)
       this.ws.send(JSON.stringify(message));
   }
-  start(presentation: string, fromIndex = 0) {
-    this.send({ type: "start", presentation, fromIndex });
+  start(presentation: string, fromIndex?: number) {
+    this.send({ type: "start", presentation, ...(fromIndex === undefined ? {} : { fromIndex }) });
   }
   next() {
     this.send({ type: "next" });
@@ -207,6 +225,7 @@ export class BridgeClient {
       case "error":
         this.emit("error", message);
         if (message.code === "busy") this.emit("busy", message);
+        if (message.code === "taken_over") this.markTakenOver();
         break;
       case "closed":
         this.emit("closed", message);
@@ -218,5 +237,10 @@ export class BridgeClient {
         this.emit("busy", message);
         break;
     }
+  }
+  private markTakenOver() {
+    if (this.takenOver) return;
+    this.takenOver = true;
+    this.emit("taken-over");
   }
 }

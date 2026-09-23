@@ -54,6 +54,49 @@ public sealed class BridgeTests
     }
 
     [Fact]
+    public async Task Same_user_take_over_replaces_the_holder()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory, takeOver: true);
+
+        var takenOver = await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["code"]?.GetValue<string>() == "taken_over");
+        takenOver["type"]!.GetValue<string>().Should().Be("error");
+        var close = await BridgeTestSupport.ReceiveCloseAsync(first);
+        close.CloseStatus.Should().Be((WebSocketCloseStatus)4409);
+        await first.CloseOutputAsync(close.CloseStatus!.Value, close.CloseStatusDescription, CancellationToken.None);
+        (await BridgeTestSupport.ReceiveUntilAsync(second, frame => frame["type"]?.GetValue<string>() == "state"))["state"]!.GetValue<string>().Should().Be("idle");
+    }
+
+    [Fact]
+    public async Task Take_over_by_another_account_is_refused()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory, "another-user", takeOver: true);
+
+        var busy = await BridgeTestSupport.ReceiveUntilAsync(second, frame => frame["code"]?.GetValue<string>() == "busy");
+        busy["canTakeOver"]!.GetValue<bool>().Should().BeFalse();
+        (await BridgeTestSupport.ReceiveCloseAsync(second)).CloseStatus.Should().Be((WebSocketCloseStatus)1013);
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"ping\"}");
+        (await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["type"]?.GetValue<string>() == "pong"))["type"]!.GetValue<string>().Should().Be("pong");
+    }
+
+    [Fact]
+    public async Task Busy_without_take_over_offers_it_to_the_same_user()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory);
+
+        var busy = await BridgeTestSupport.ReceiveUntilAsync(second, frame => frame["code"]?.GetValue<string>() == "busy");
+        busy["canTakeOver"]!.GetValue<bool>().Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Browser_disconnect_ends_live_session()
     {
         await using var fake = await FakeLiveServer.StartAsync();

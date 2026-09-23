@@ -29,13 +29,13 @@ internal static class BridgeTestSupport
         return socket;
     }
 
-    public static async Task<WebSocket> ConnectWithTicketAsync(ApiFactory factory)
+    public static async Task<WebSocket> ConnectWithTicketAsync(ApiFactory factory, string userId = "test-user", bool takeOver = false)
     {
         var ticket = Guid.NewGuid().ToString("N");
-        await factory.Services.GetRequiredService<ITicketStore>().IssueAsync(ticket, "test-user");
+        await factory.Services.GetRequiredService<ITicketStore>().IssueAsync(ticket, userId);
         var socket = await factory.Server.CreateWebSocketClient()
             .ConnectAsync(new Uri("ws://localhost/ws"), CancellationToken.None);
-        await SendAsync(socket, $"{{\"type\":\"auth\",\"ticket\":\"{ticket}\"}}");
+        await SendAsync(socket, $"{{\"type\":\"auth\",\"ticket\":\"{ticket}\"{(takeOver ? ",\"takeOver\":true" : string.Empty)}}}");
         return socket;
     }
 

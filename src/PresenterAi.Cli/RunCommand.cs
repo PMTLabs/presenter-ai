@@ -120,7 +120,7 @@ public static class RunCommand
             output.WriteLine($"{At()} state={snapshot.State} slide={snapshot.SlideIndex + 1}/{snapshot.SlideCount}{(snapshot.SessionId is null ? string.Empty : $" session={snapshot.SessionId}")}");
         Task RequestEndAsync()
         {
-            var task = presenter.EndAsync(CancellationToken.None);
+            var task = presenter.EndAsync(cancellationToken: CancellationToken.None);
             Interlocked.CompareExchange(ref endTask, task, null);
             return task;
         }

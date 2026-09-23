@@ -22,5 +22,5 @@ public interface IPresenter : IAsyncDisposable
     Task<bool> MuteAsync(CancellationToken cancellationToken = default);
     Task<bool> UnmuteAsync(CancellationToken cancellationToken = default);
     Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default);
-    Task<bool> EndAsync(CancellationToken cancellationToken = default);
+    Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default);
 }

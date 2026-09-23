@@ -57,6 +57,7 @@ public sealed class Presenter : IPresenter
     private double _usageSeconds;
     private double? _usageRatio;
     private LastRun? _lastRun;
+    private bool _endResumable;
     private ITimer? _silenceTimer;
     private ITimer? _nudgeTimer;
     private ITimer? _wrapUpTimer;
@@ -139,8 +140,8 @@ public sealed class Presenter : IPresenter
     public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new SendAudioCommand(pcm16.ToArray()), cancellationToken);
 
-    public Task<bool> EndAsync(CancellationToken cancellationToken = default) =>
-        EnqueueCommandAsync(new EndCommand(), cancellationToken);
+    public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) =>
+        EnqueueCommandAsync(new EndCommand(resumable), cancellationToken);
 
     /// <summary>Test hook that completes after all currently queued producer events have been consumed.</summary>
     public async Task WaitUntilIdleAsync(CancellationToken cancellationToken = default)
@@ -360,7 +361,7 @@ public sealed class Presenter : IPresenter
                 MuteCommand => MuteCore(),
                 UnmuteCommand => UnmuteCore(),
                 SendAudioCommand audio => SendAudioCore(audio.Pcm16),
-                EndCommand => await EndAsyncCore().ConfigureAwait(false),
+                EndCommand end => await EndAsyncCore(end.Resumable).ConfigureAwait(false),
                 _ => false
             };
             command.Completion.TrySetResult(result);
@@ -379,6 +380,7 @@ public sealed class Presenter : IPresenter
             return new PresenterStartResult(false, id, null, null, null);
         }
 
+        _endResumable = false;
         SetState(PresenterState.Connecting);
         try
         {
@@ -942,7 +944,7 @@ public sealed class Presenter : IPresenter
     private bool SendAudioCore(byte[] pcm16) =>
         _state == PresenterState.Presenting && !_muted && (_session?.SendAudio(pcm16) ?? false);
 
-    private async Task<bool> EndAsyncCore()
+    private async Task<bool> EndAsyncCore(bool resumable)
     {
         if (_state is PresenterState.Idle or PresenterState.Ending)
         {
@@ -951,6 +953,7 @@ public sealed class Presenter : IPresenter
 
         CompleteSlideDiagnostics();
         ClearTimers();
+        _endResumable = resumable;
         var session = _session;
         SetState(PresenterState.Ending);
         if (session is null)
@@ -995,7 +998,7 @@ public sealed class Presenter : IPresenter
     {
         CompleteSlideDiagnostics();
         ClearTimers();
-        var endedNormally = IsNormalClose(reason);
+        var endedNormally = IsNormalClose(reason) && !_endResumable;
         if (_presentation is not null)
         {
             _lastRun = new LastRun(_presentation.Id, _slideIndex, endedNormally);
@@ -1298,7 +1301,7 @@ public sealed class Presenter : IPresenter
     private sealed record MuteCommand : Command;
     private sealed record UnmuteCommand : Command;
     private sealed record SendAudioCommand(byte[] Pcm16) : Command;
-    private sealed record EndCommand : Command;
+    private sealed record EndCommand(bool Resumable) : Command;
     private sealed record AudioReceived(ILiveSession Session, byte[] Bytes, long? StartMs, long? EndMs) : PresenterEvent;
     private sealed record TranscriptReceived(ILiveSession Session, string Role, string Delta, long? StartMs, long? EndMs) : PresenterEvent;
     private sealed record UsageReceived(ILiveSession Session, double Seconds, double? Ratio) : PresenterEvent;

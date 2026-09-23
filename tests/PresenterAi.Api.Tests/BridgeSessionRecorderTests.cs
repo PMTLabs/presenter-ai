@@ -10,6 +10,30 @@ namespace PresenterAi.Api.Tests;
 public sealed class BridgeSessionRecorderTests
 {
     [Fact]
+    public async Task Take_over_ends_a_running_talk_and_records_it()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        var recorders = factory.Services.GetRequiredService<TestSessionRecorderFactory>();
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        _ = await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["type"]?.GetValue<string>() == "state" && frame["state"]?.GetValue<string>() == "presenting");
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"goto\",\"index\":1}");
+        _ = await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["type"]?.GetValue<string>() == "slide" && frame["index"]?.GetValue<int>() == 1);
+
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory, takeOver: true);
+        _ = await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["code"]?.GetValue<string>() == "taken_over");
+        var close = await BridgeTestSupport.ReceiveCloseAsync(first);
+        await first.CloseOutputAsync(close.CloseStatus!.Value, close.CloseStatusDescription, CancellationToken.None);
+        _ = await BridgeTestSupport.ReceiveUntilAsync(second, frame => frame["type"]?.GetValue<string>() == "state");
+        await BridgeTestSupport.WaitForAsync(() => recorders.Recorders.Count == 1 && recorders.Recorders[0].EndCount == 1);
+        recorders.Recorders[0].ClosedBeforeEnd.Should().BeTrue();
+
+        await BridgeTestSupport.SendAsync(second, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        (await BridgeTestSupport.ReceiveUntilAsync(second, frame => frame["type"]?.GetValue<string>() == "slide"))["index"]!.GetValue<int>().Should().Be(1);
+    }
+
+    [Fact]
     public async Task Disconnect_during_a_queued_start_keeps_the_slot_until_the_recorder_attempt_is_finalised()
     {
         await using var fake = await FakeLiveServer.StartAsync();
