@@ -32,6 +32,10 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
     public bool IgnoreClose { get; set; }
 
+    public int DelegationStartRejections { get; set; }
+
+    public bool CloseAfterDelegationRejection { get; set; }
+
     public string SessionId { get; set; } = "sess_fake";
 
     public int Port { get; private set; }
@@ -88,6 +92,12 @@ public sealed class FakeLiveServer : IAsyncDisposable
         DropAll();
         await _app.StopAsync();
         await _app.DisposeAsync();
+    }
+
+    public Task SendEventAsync(JsonObject message)
+    {
+        var socket = _connections.Keys.Single();
+        return SendAsync(socket, message, CancellationToken.None);
     }
 
     public IReadOnlyList<JsonObject> ReceivedSnapshot()
@@ -186,6 +196,29 @@ public sealed class FakeLiveServer : IAsyncDisposable
                             ["client_event_id"] = message["event_id"]?.GetValue<string>()
                         }
                     }, cancellationToken);
+                    return;
+                }
+
+                if (DelegationStartRejections > 0 && session?["delegation"] is not null)
+                {
+                    DelegationStartRejections--;
+                    await SendAsync(socket, new JsonObject
+                    {
+                        ["type"] = "error",
+                        ["error"] = new JsonObject
+                        {
+                            ["type"] = "invalid_request_error",
+                            ["code"] = "delegation_unavailable",
+                            ["message"] = "delegation backend is unavailable",
+                            ["param"] = "session.delegation.responses.model",
+                            ["client_event_id"] = message["event_id"]?.GetValue<string>()
+                        }
+                    }, cancellationToken);
+                    if (CloseAfterDelegationRejection)
+                    {
+                        await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "startup rejected", cancellationToken);
+                    }
+
                     return;
                 }
 

@@ -11,6 +11,8 @@ public interface ILiveSession : IAsyncDisposable
     event Action<double, double?>? Usage;
     event Action<JsonElement>? Delegation;
     event Action<JsonElement>? UpstreamError;
+    event Action<string>? Warning;
+    event Action<string, string>? DelegatedResponseFinished;
     event Action<string, double?>? Closed;
 
     LiveSessionState State { get; }

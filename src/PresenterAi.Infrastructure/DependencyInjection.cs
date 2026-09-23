@@ -139,7 +139,7 @@ public static class DependencyInjection
 
             return new Presenter(
                 (request, attempt) => attempt < routes.Upstreams.Count
-                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice))
+                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice, request.Title))
                     : null,
                 loader,
                 new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice),

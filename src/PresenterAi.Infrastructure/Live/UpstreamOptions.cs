@@ -10,6 +10,8 @@ public sealed class UpstreamOptions
 
     public string Voice { get; set; } = "marin";
 
+    public string DelegationModel { get; set; } = "gpt-5.6-luna";
+
     public FallbackOptions Fallback { get; set; } = new();
 
     public sealed class FallbackOptions
@@ -19,5 +21,7 @@ public sealed class UpstreamOptions
         public string Key { get; set; } = string.Empty;
 
         public string Model { get; set; } = "gpt-live-1";
+
+        public string DelegationModel { get; set; } = "gpt-5.6-luna";
     }
 }

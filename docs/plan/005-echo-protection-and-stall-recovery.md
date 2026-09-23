@@ -151,6 +151,8 @@ reasoning effort, priority tier, low verbosity).
   example, no such deployment), the same upstream is retried once with client delegation, and one warn line is logged
   (`delegation: backend unavailable (…); answering from the deck only`). The mode is fixed per session, so this
   happens only at start.
+  *As built:* the rule also accepts a `code` or `message` that names delegation. After a rejection, the receive loop
+  stops reading, so if the server closes the socket right after the error, the session doesn't finish before the retry.
 - **Deck first:** the live model already has the deck (`instructions` plus per-slide notes as `thinking`).
   `PromptBuilder`'s audience rules change to: answer immediately from the narration and background context when they
   cover it; otherwise delegate; never say that you checked or found something before a result arrives (at most "One
@@ -158,6 +160,8 @@ reasoning effort, priority tier, low verbosity).
 - **Backend results** are injected into the live conversation by GPT-Live (`response.event` envelopes).
   `LiveSession` reads the envelopes only to log the terminal `response.completed` or an error; no client function
   tools are defined.
+  *As built:* `LiveSession` also raises `DelegatedResponseFinished(delegationId, type)` for those terminal events,
+  because `Presenter` needs it for the hold (see below). No text is forwarded.
 - **Client mode** (safety net or empty model): on `session.delegation.created` with `target: "client"`, `Presenter`
   immediately appends a delegation-scoped instruction (`AppendInstructions(..., delegationId)`): "No lookup is
   available. Answer now in one to three sentences from the narration and background context, or say plainly that the
@@ -169,6 +173,10 @@ reasoning effort, priority tier, low verbosity).
   - voiced output that arrives after the latest user delta sets `answerVoiced` and re-arms the ordinary post-voice
     timer as today;
   - `session.delegation.created` resets `answerVoiced` (so "One moment." is not the answer) and re-arms the 15 s timer;
+    *as built:* this happens only while presenting. For a `responses` delegation, no speech counts as the answer until
+    that delegation's terminal `response.event` arrives (info `question: backend answer ready`, or warn `question:
+    backend answer failed (<type>)`), and that event re-arms the 15 s timer. Otherwise "One moment." spoken after the
+    delegation event, followed by a backend that takes longer than the silence window, would still advance the slide;
   - a silence or part-gap expiry while the hold is open is ignored until `answerVoiced`; after that it releases the
     hold and does its normal action (next part, next slide, wrap-up close);
   - the 15 s timer releases the hold and restores normal timing (ordinary silence if the slide has voiced output,
