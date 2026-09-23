@@ -95,7 +95,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
-            if (SessionToolSource is not null) services.AddSingleton(SessionToolSource);
+            // The real MCP source reads Postgres, which these tests do not run; a test that needs external tools
+            // supplies its own source.
+            services.RemoveAll<ISessionToolSource>();
+            services.AddSingleton(SessionToolSource ?? new EmptySessionToolSource());
             if (UseQueuedPresenter)
             {
                 services.RemoveAll<IPresenter>();
@@ -333,4 +336,10 @@ internal sealed class TestTicketStore : ITicketStore
         if (_tickets.TryGetValue(ticketId, out var ticket))
             _tickets[ticketId] = (ticket.UserId, DateTimeOffset.UtcNow.AddSeconds(-1));
     }
+}
+
+internal sealed class EmptySessionToolSource : ISessionToolSource
+{
+    public Task<SessionToolSet> LoadAsync(string ownerId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new SessionToolSet(tools: [], hostedTools: [], notes: [], disposable: null));
 }
