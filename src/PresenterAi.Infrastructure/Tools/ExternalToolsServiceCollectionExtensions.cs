@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PresenterAi.Application.Tools.External;
 using PresenterAi.Infrastructure.Tools.Mcp;
 
 namespace PresenterAi.Infrastructure.Tools;
@@ -9,8 +10,11 @@ public static class ExternalToolsServiceCollectionExtensions
     // Called by the API only; CLI outbound transports are deliberately unaffected.
     public static IServiceCollection AddExternalTools(this IServiceCollection services)
     {
+        services.AddSingleton<CredentialProtector>();
         services.AddSingleton<McpOAuthStateStore>();
         services.AddScoped<McpOAuthService>();
+        services.AddScoped<McpConnector>();
+        services.AddScoped<ISessionToolSource, McpSessionToolSource>();
         services.TryAddSingleton<IOutboundAddressPolicy, StrictOutboundAddressPolicy>();
         services.TryAddSingleton<IOutboundDnsResolver, OutboundDnsResolver>();
         services.TryAddSingleton<ISocketConnector, SocketConnector>();

@@ -9,7 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
-namespace PresenterAi.Integration.Tests.Tools;
+namespace PresenterAi.Infrastructure.Tests.Tools;
 
 // Loopback TLS fixture, deliberately strict about every value that binds the authorization to the resource.
 public sealed class StrictFakeAuthServer : IAsyncDisposable
