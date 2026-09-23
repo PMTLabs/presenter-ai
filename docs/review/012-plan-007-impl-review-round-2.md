@@ -84,3 +84,10 @@ topicsWithNoFindings: cross-run echo timestamp reset; long single-delta cutoff; 
 | D-09 | D | Confirmed (public singleton registry, plan §3.1 allows a change before the next Start) | Fix: lock register/enumerate |
 | C-01 | C | Confirmed | Fix both guide claims in place |
 | Row 3/15 oracles | B | Confirmed | Add: the final answer does not re-arm; a real confirmed end through the tool succeeds |
+
+**Correction after the fixes (`088ecf1`).** The orchestrator's fix brief asked for "the final answer does not re-arm
+the 15 s timer". That contradicted plan 005 ("the backend answer is ready → give the live model a fresh window to speak
+it"), so the brief, not the code, was wrong: the re-arm on the final answer is kept and the oracle is
+`Final_answer_gives_the_live_model_a_fresh_window_before_the_escape` (no escape 2 s after a final answer at 14 s; escape
+15 s after it). The registry lock was narrowed to the duplicate check, pinned count and insert; a test that required
+the lock to be held while a tool's own getters run was removed as over-specified.
