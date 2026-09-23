@@ -22,6 +22,16 @@ public static class RunCommand
         TextWriter error,
         CancellationToken cancellationToken)
     {
+        var ceilingMinutes = configuration.GetValue<int?>("Presenter:MaxTalkCeilingMinutes") ?? 120;
+        var ceilingSeconds = checked(ceilingMinutes * 60);
+        if (arguments.MaxSeconds > ceilingSeconds)
+        {
+            await output.WriteLineAsync(
+                $"Warning: --max-seconds {arguments.MaxSeconds} clamped to {ceilingSeconds} (Presenter:MaxTalkCeilingMinutes={ceilingMinutes}).")
+                .ConfigureAwait(false);
+            arguments = arguments with { MaxSeconds = ceilingSeconds };
+        }
+
         if (arguments.Owner is null)
         {
             var contentRoot = arguments.ContentRoot is null
@@ -118,9 +128,9 @@ public static class RunCommand
 
         presenter.State += snapshot =>
             output.WriteLine($"{At()} state={snapshot.State} slide={snapshot.SlideIndex + 1}/{snapshot.SlideCount}{(snapshot.SessionId is null ? string.Empty : $" session={snapshot.SessionId}")}");
-        Task RequestEndAsync()
+        Task RequestEndAsync(string endReason)
         {
-            var task = presenter.EndAsync(cancellationToken: CancellationToken.None);
+            var task = presenter.EndAsync(endReason, cancellationToken: CancellationToken.None);
             Interlocked.CompareExchange(ref endTask, task, null);
             return task;
         }
@@ -134,7 +144,7 @@ public static class RunCommand
             if (arguments.StopAfterSlide > 0 && index + 1 > arguments.StopAfterSlide && Interlocked.Exchange(ref endRequested, 1) == 0)
             {
                 output.WriteLine($"{At()} stop-after-slide reached; ending");
-                RequestEndAsync();
+                RequestEndAsync(EndReasons.StopAfterSlide);
             }
         };
         presenter.Transcript += transcript =>
@@ -176,7 +186,7 @@ public static class RunCommand
         {
             FlushLine();
             FlushBar();
-            output.WriteLine($"{At()} closed reason={result.Reason} seconds={Format(result.Seconds)}");
+            output.WriteLine($"{At()} closed reason={result.Reason} end={result.EndReason} seconds={Format(result.Seconds)}");
             closed.TrySetResult(result);
         };
         presenter.UpstreamError += upstream =>
@@ -202,14 +212,19 @@ public static class RunCommand
                 return 1;
             }
 
-            var timeout = Task.Delay(TimeSpan.FromSeconds(arguments.MaxSeconds), cancellationToken);
+            var timeout = Task.Delay(TimeSpan.FromSeconds(arguments.MaxSeconds), CancellationToken.None);
+            var cancellation = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             var completed = endTask is null
-                ? await Task.WhenAny(closed.Task, timeout).ConfigureAwait(false)
-                : await Task.WhenAny(closed.Task, timeout, endTask).ConfigureAwait(false);
+                ? await Task.WhenAny(closed.Task, timeout, cancellation).ConfigureAwait(false)
+                : await Task.WhenAny(closed.Task, timeout, endTask, cancellation).ConfigureAwait(false);
+            if (completed == cancellation)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
             if (completed == timeout && !closed.Task.IsCompleted && Interlocked.Exchange(ref endRequested, 1) == 0)
             {
                 output.WriteLine($"{At()} max-seconds reached; ending");
-                await RequestEndAsync().ConfigureAwait(false);
+                await RequestEndAsync(EndReasons.CliMaxSeconds).ConfigureAwait(false);
             }
 
             if (endTask is not null)
@@ -229,6 +244,29 @@ public static class RunCommand
             }
 
             return Presenter.IsNormalClose(result.Reason) ? 0 : 1;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            presenter.AbortPendingStart();
+            try
+            {
+                await presenter.EndAsync(EndReasons.CliCancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                await error.WriteLineAsync($"Run cancellation close failed: {exception.Message}").ConfigureAwait(false);
+            }
+
+            try
+            {
+                await closed.Task.WaitAsync(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                await error.WriteLineAsync("Run failed: timed out waiting for session close.").ConfigureAwait(false);
+            }
+
+            return 1;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
