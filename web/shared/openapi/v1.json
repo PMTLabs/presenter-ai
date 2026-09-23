@@ -96,6 +96,18 @@
         }
       }
     },
+    "/v1/tools/oauth/client-metadata.json": {
+      "get": {
+        "tags": [
+          "PresenterAi.Api"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/v1/presentations": {
       "get": {
         "tags": [
