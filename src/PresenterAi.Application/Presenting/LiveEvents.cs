@@ -17,7 +17,8 @@ public sealed record LiveSessionConfig(
     string Voice,
     string? PresentationTitle = null,
     IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null,
-    string? DelegationInstructions = null);
+    string? DelegationInstructions = null,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? HostedTools = null);
 
 public sealed record LiveSessionInfo(
     string? Id,

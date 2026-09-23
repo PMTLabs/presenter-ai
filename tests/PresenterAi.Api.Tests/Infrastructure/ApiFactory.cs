@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Tools.External;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Content;
 using Microsoft.IdentityModel.Tokens;
@@ -21,6 +22,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     public IReadOnlyDictionary<string, string?>? Overrides { get; set; }
     public string EnvironmentName { get; set; } = "Testing";
     public bool UseQueuedPresenter { get; set; }
+    public ISessionToolSource? SessionToolSource { get; set; }
 
     public HttpClient CreateAuthenticatedClient(string? userId = null, string? email = null, string role = "user")
     {
@@ -93,6 +95,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
+            if (SessionToolSource is not null) services.AddSingleton(SessionToolSource);
             if (UseQueuedPresenter)
             {
                 services.RemoveAll<IPresenter>();

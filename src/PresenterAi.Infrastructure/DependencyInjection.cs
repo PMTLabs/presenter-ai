@@ -173,7 +173,8 @@ public static class DependencyInjection
                         request.Voice,
                         request.Title,
                         request.Tools,
-                        request.DelegationInstructions))
+                        request.DelegationInstructions,
+                        request.HostedTools))
                     : null,
                 loader,
                 new PresenterSettings(
@@ -183,7 +184,15 @@ public static class DependencyInjection
                     toolsOptions?.MaxInlineTools ?? ToolsOptions.DefaultMaxInlineTools),
                 timeProvider,
                 toolRegistry,
-                attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel));
+                attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel),
+                routes.Upstreams.Any(route => !string.IsNullOrWhiteSpace(route.DelegationModel))
+                    && serviceProvider.GetRequiredService<IServiceProviderIsService>().IsService(typeof(ISessionToolSource))
+                    ? async (ownerId, ct) =>
+                    {
+                        await using var scope = serviceProvider.GetRequiredService<IServiceScopeFactory>().CreateAsyncScope();
+                        return await scope.ServiceProvider.GetRequiredService<ISessionToolSource>().LoadAsync(ownerId, ct).ConfigureAwait(false);
+                    } : null,
+                TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000));
         });
         return services;
     }

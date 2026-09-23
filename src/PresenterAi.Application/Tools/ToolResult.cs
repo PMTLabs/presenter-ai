@@ -29,6 +29,13 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
             ["message"] = Message
         };
 
+        if (Outcome is "confirmation_required" or "confirmation_pending" or "running")
+        {
+            node["status"] = Outcome;
+            if (Data is JsonObject data && data["question"] is { } question)
+                node["question"] = question.DeepClone();
+        }
+
         if (Data is not null)
         {
             node["data"] = Data.DeepClone();
