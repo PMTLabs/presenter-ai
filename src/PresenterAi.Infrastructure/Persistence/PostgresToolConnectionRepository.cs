@@ -8,18 +8,23 @@ namespace PresenterAi.Infrastructure.Persistence;
 public sealed class PostgresToolConnectionRepository(PresenterAiDbContext db) : IToolConnectionRepository
 {
     private IQueryable<ToolServer> Owned(string ownerId) => db.ToolServers.Where(server => server.OwnerId == ownerId);
-    private static ToolConnection View(ToolServer server) => new(server.Id, server.OwnerId, server.Name,
+    private static ToolConnection View(ToolServer server, bool hasCredential = false) => new(server.Id, server.OwnerId, server.Name,
         server.Slug, server.Url, server.AuthKind, server.Status, server.LastErrorCode, server.AlwaysAsk,
-        server.CreatedAt, server.UpdatedAt, server.LastConnectedAt);
+        server.CreatedAt, server.UpdatedAt, server.LastConnectedAt, hasCredential);
 
     public async Task<IReadOnlyList<ToolConnection>> ListAsync(string ownerId, CancellationToken cancellationToken = default) =>
-        (await Owned(ownerId).AsNoTracking().OrderBy(server => server.CreatedAt).ToListAsync(cancellationToken))
-        .Select(View).ToArray();
+        (await Owned(ownerId).AsNoTracking().OrderBy(server => server.CreatedAt)
+            .Select(server => new { Server = server, HasCredential = server.Credential != null })
+            .ToListAsync(cancellationToken))
+        .Select(x => View(x.Server, x.HasCredential)).ToArray();
 
     public async Task<ToolConnection?> GetAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default)
     {
-        var server = await Owned(ownerId).AsNoTracking().FirstOrDefaultAsync(server => server.Id == serverId, cancellationToken);
-        return server is null ? null : View(server);
+        var item = await Owned(ownerId).AsNoTracking()
+            .Where(server => server.Id == serverId)
+            .Select(server => new { Server = server, HasCredential = server.Credential != null })
+            .FirstOrDefaultAsync(cancellationToken);
+        return item is null ? null : View(item.Server, item.HasCredential);
     }
 
     public async Task<ToolConnection> AddAsync(string ownerId, string name, string url, CancellationToken cancellationToken = default)
@@ -28,27 +33,30 @@ public sealed class PostgresToolConnectionRepository(PresenterAiDbContext db) : 
         if (name.Length is < 1 or > 40 || url.Length is < 1 or > 2048)
             throw new ArgumentOutOfRangeException(nameof(name), "Invalid server name or URL length");
         // Serialise concurrent inserts for this owner, including the count check and slug allocation.
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        await db.Users.Where(user => user.Id == ownerId)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(user => user.UpdatedAt, user => user.UpdatedAt), cancellationToken);
-        var slugs = await Owned(ownerId).Select(server => server.Slug).ToListAsync(cancellationToken);
-        if (slugs.Count >= 10)
-            throw new InvalidOperationException("tools_server_limit");
-        var baseSlug = Regex.Replace(name.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-');
-        if (baseSlug.Length == 0) baseSlug = "server";
-        baseSlug = baseSlug[..Math.Min(16, baseSlug.Length)].TrimEnd('-');
-        var slug = baseSlug;
-        for (var suffix = 2; slugs.Contains(slug, StringComparer.Ordinal); suffix++)
+        return await db.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
         {
-            var end = $"-{suffix}";
-            slug = baseSlug[..Math.Min(baseSlug.Length, 16 - end.Length)].TrimEnd('-') + end;
-        }
-        var now = DateTimeOffset.UtcNow;
-        var row = new ToolServer { OwnerId = ownerId, Name = name, Slug = slug, Url = url, CreatedAt = now, UpdatedAt = now };
-        db.ToolServers.Add(row);
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return View(row);
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await db.Users.Where(user => user.Id == ownerId)
+                .ExecuteUpdateAsync(setters => setters.SetProperty(user => user.UpdatedAt, user => user.UpdatedAt), cancellationToken);
+            var slugs = await Owned(ownerId).Select(server => server.Slug).ToListAsync(cancellationToken);
+            if (slugs.Count >= 10)
+                throw new InvalidOperationException("tools_server_limit");
+            var baseSlug = Regex.Replace(name.ToLowerInvariant(), "[^a-z0-9]+", "-").Trim('-');
+            if (baseSlug.Length == 0) baseSlug = "server";
+            baseSlug = baseSlug[..Math.Min(16, baseSlug.Length)].TrimEnd('-');
+            var slug = baseSlug;
+            for (var suffix = 2; slugs.Contains(slug, StringComparer.Ordinal); suffix++)
+            {
+                var end = $"-{suffix}";
+                slug = baseSlug[..Math.Min(baseSlug.Length, 16 - end.Length)].TrimEnd('-') + end;
+            }
+            var now = DateTimeOffset.UtcNow;
+            var row = new ToolServer { OwnerId = ownerId, Name = name, Slug = slug, Url = url, CreatedAt = now, UpdatedAt = now };
+            db.ToolServers.Add(row);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return View(row);
+        });
     }
 
     public async Task<bool> UpdateAsync(string ownerId, Guid serverId, string? name, bool? alwaysAsk, CancellationToken cancellationToken = default)
@@ -63,12 +71,16 @@ public sealed class PostgresToolConnectionRepository(PresenterAiDbContext db) : 
         return true;
     }
 
-    public async Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken cancellationToken = default)
+    public Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken cancellationToken = default) =>
+        SetStatusAsync(ownerId, serverId, status, errorCode, null, cancellationToken);
+
+    public async Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, string? authKind, CancellationToken cancellationToken = default)
     {
         var row = await Owned(ownerId).FirstOrDefaultAsync(server => server.Id == serverId, cancellationToken);
         if (row is null) return false;
         row.Status = status;
         row.LastErrorCode = errorCode;
+        if (authKind is not null) row.AuthKind = authKind;
         row.UpdatedAt = DateTimeOffset.UtcNow;
         if (status == "connected") row.LastConnectedAt = row.UpdatedAt;
         await db.SaveChangesAsync(cancellationToken);

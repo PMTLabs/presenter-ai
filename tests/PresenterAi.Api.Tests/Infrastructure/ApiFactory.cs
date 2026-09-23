@@ -84,6 +84,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         // No web root by default: a test that wants the SPA served must opt in with WebRootFixture, so nothing
         // passes only because web/app/dist happens to be built on the developer's machine (CI never builds it).
         builder.UseSetting("Content:WebRoot", Path.Combine(Path.GetTempPath(), "presenter-ai-no-web-root"));
+        builder.UseSetting("Tools:CredentialKey", Convert.ToBase64String(new byte[32]));
 
         if (Overrides is not null)
         {
@@ -115,8 +116,20 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<TestSessionRecorderFactory>();
             services.AddSingleton<ISessionRecorderFactory>(serviceProvider =>
                 serviceProvider.GetRequiredService<TestSessionRecorderFactory>());
+            services.RemoveAll<IToolConnectionRepository>();
+            services.AddSingleton<TestToolConnectionRepository>();
+            services.AddSingleton<IToolConnectionRepository>(serviceProvider =>
+                serviceProvider.GetRequiredService<TestToolConnectionRepository>());
+
+            var mockRedis = new Moq.Mock<StackExchange.Redis.IConnectionMultiplexer>();
+            var mockDb = new Moq.Mock<StackExchange.Redis.IDatabase>();
+            mockRedis.Setup(r => r.GetDatabase(Moq.It.IsAny<int>(), Moq.It.IsAny<object>())).Returns(mockDb.Object);
+            services.RemoveAll<StackExchange.Redis.IConnectionMultiplexer>();
+            services.AddSingleton(mockRedis.Object);
         });
     }
+
+    public TestToolConnectionRepository ToolRepository => Services.GetRequiredService<TestToolConnectionRepository>();
 
     private static string FindRepositoryRoot()
     {

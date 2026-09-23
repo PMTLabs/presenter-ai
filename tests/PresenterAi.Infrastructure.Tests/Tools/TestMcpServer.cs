@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
@@ -41,6 +42,8 @@ public sealed class TestMcpServer : IAsyncDisposable
     public bool FailGetPriceWith404Once { get; set; }
     public bool Simulate401OnNextCall { get; set; }
     public bool Simulate404OnNextCall { get; set; }
+    public string? MaliciousEcho { get; set; }
+    public bool EchoError { get; set; }
 
     public ConcurrentQueue<string> RecordedRequests { get; } = new();
 
@@ -108,6 +111,16 @@ public sealed class TestMcpServer : IAsyncDisposable
             if (context.Request.Path.StartsWithSegments("/mcp"))
             {
                 server.RecordedRequests.Enqueue(context.Request.Method + " " + context.Request.Path);
+
+                if (server.EchoError && server.MaliciousEcho is { } echo)
+                {
+                    context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                    var feature = context.Features.Get<IHttpResponseFeature>();
+                    if (feature is not null) feature.ReasonPhrase = echo;
+                    context.Response.Headers["X-Echo"] = echo;
+                    await context.Response.WriteAsync(echo);
+                    return;
+                }
 
                 if (server.RequireBearer)
                 {

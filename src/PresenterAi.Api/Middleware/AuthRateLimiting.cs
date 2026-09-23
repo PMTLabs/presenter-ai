@@ -1,3 +1,5 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
@@ -16,6 +18,7 @@ public static class AuthRateLimiting
         public const string Callback = "auth-callback";
         public const string Token = "auth-token";
         public const string Refresh = "auth-refresh";
+        public const string Tools = "tools";
     }
 
     public sealed class Options { public bool Enabled { get; set; } = true; }
@@ -26,7 +29,8 @@ public static class AuthRateLimiting
         [Policies.Authorize] = 20,
         [Policies.Callback] = 20,
         [Policies.Token] = 30,
-        [Policies.Refresh] = 30
+        [Policies.Refresh] = 30,
+        [Policies.Tools] = 30
     };
 
     public static IServiceCollection AddAuthRateLimiting(this IServiceCollection services, IConfiguration configuration)
@@ -75,16 +79,23 @@ public static class AuthRateLimiting
         options.AddPolicy(name, context =>
         {
             var enabled = context.RequestServices.GetRequiredService<IOptions<Options>>().Value.Enabled;
-            return enabled
-                ? RateLimitPartition.GetFixedWindowLimiter(
-                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown-remote-ip",
-                    _ => new FixedWindowRateLimiterOptions
-                    {
-                        PermitLimit = limit,
-                        Window = Window,
-                        QueueLimit = 0
-                    })
-                : RateLimitPartition.GetNoLimiter("disabled");
+            if (!enabled) return RateLimitPartition.GetNoLimiter("disabled");
+
+            var key = name == Policies.Tools
+                ? (context.User.FindFirstValue(ClaimTypes.NameIdentifier)
+                   ?? context.User.FindFirstValue(JwtRegisteredClaimNames.Sub)
+                   ?? context.Connection.RemoteIpAddress?.ToString()
+                   ?? "unknown-user")
+                : (context.Connection.RemoteIpAddress?.ToString() ?? "unknown-remote-ip");
+
+            return RateLimitPartition.GetFixedWindowLimiter(
+                key,
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = limit,
+                    Window = Window,
+                    QueueLimit = 0
+                });
         });
     }
 

@@ -2,7 +2,8 @@ namespace PresenterAi.Application.Tools.External;
 
 public sealed record ToolConnection(Guid Id, string OwnerId, string Name, string Slug, string Url,
     string AuthKind, string Status, string? LastErrorCode, bool AlwaysAsk,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastConnectedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LastConnectedAt,
+    bool HasCredential = false);
 
 public sealed record ToolCredential(byte[] Ciphertext, string KeyId, DateTimeOffset? AccessExpiresAt, uint Version);
 
@@ -13,6 +14,7 @@ public interface IToolConnectionRepository
     Task<ToolConnection> AddAsync(string ownerId, string name, string url, CancellationToken cancellationToken = default);
     Task<bool> UpdateAsync(string ownerId, Guid serverId, string? name, bool? alwaysAsk, CancellationToken cancellationToken = default);
     Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken cancellationToken = default);
+    Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, string? authKind, CancellationToken cancellationToken = default);
     Task<bool> RemoveAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default);
     Task<ToolCredential?> GetCredentialAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default);
     Task<bool> SaveCredentialAsync(string ownerId, Guid serverId, byte[] ciphertext, string keyId,

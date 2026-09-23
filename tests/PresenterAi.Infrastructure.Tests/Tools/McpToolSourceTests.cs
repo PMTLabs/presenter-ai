@@ -836,14 +836,17 @@ public sealed class McpToolSourceTests
         public Task<bool> UpdateAsync(string ownerId, Guid serverId, string? name, bool? alwaysAsk, CancellationToken cancellationToken = default)
             => Task.FromResult(true);
 
-        public Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken cancellationToken = default)
+        public Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken cancellationToken = default) =>
+            SetStatusAsync(ownerId, serverId, status, errorCode, null, cancellationToken);
+
+        public Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, string? authKind, CancellationToken cancellationToken = default)
         {
             StatusUpdates.Add((ownerId, serverId, status, errorCode));
             var existing = Connections.FirstOrDefault(c => c.OwnerId == ownerId && c.Id == serverId);
             if (existing != null)
             {
                 Connections.Remove(existing);
-                Connections.Add(existing with { Status = status, LastErrorCode = errorCode });
+                Connections.Add(existing with { Status = status, LastErrorCode = errorCode, AuthKind = authKind ?? existing.AuthKind });
             }
             return Task.FromResult(true);
         }

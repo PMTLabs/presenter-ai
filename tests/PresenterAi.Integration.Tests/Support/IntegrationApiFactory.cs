@@ -3,6 +3,13 @@ using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using PresenterAi.Infrastructure.Tools.Mcp;
+using PresenterAi.Infrastructure.Tools;
+using System.Net;
 using Microsoft.IdentityModel.Tokens;
 
 namespace PresenterAi.Integration.Tests.Support;
@@ -14,6 +21,11 @@ public sealed class IntegrationApiFactory(
     string? fallbackEndpoint = null,
     string primaryModel = "gpt-live-1") : WebApplicationFactory<Program>
 {
+    public ILoggerProvider? ToolLogSink { get; set; }
+    public bool AllowLoopbackTools { get; set; }
+    public string? ToolCredentialKey { get; set; }
+    public string? ToolRedirectUri { get; set; }
+
     public HttpClient CreateAuthenticatedClient(string userId)
     {
         var client = CreateClient();
@@ -46,6 +58,23 @@ public sealed class IntegrationApiFactory(
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
+        if (ToolCredentialKey is not null) builder.UseSetting("Tools:CredentialKey", ToolCredentialKey);
+        if (ToolRedirectUri is not null) builder.UseSetting("Tools:OAuthRedirectUri", ToolRedirectUri);
+        if (ToolLogSink is not null)
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<ILoggerFactory>();
+                services.AddSingleton<ILoggerFactory>(_ => LoggerFactory.Create(logging =>
+                    logging.SetMinimumLevel(LogLevel.Trace).AddProvider(ToolLogSink)));
+            });
+        if (AllowLoopbackTools)
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IOutboundAddressPolicy>();
+                services.AddSingleton<IOutboundAddressPolicy, LoopbackToolPolicy>();
+            });
+        }
         builder.UseSetting("ConnectionStrings:Postgres", postgres.ConnectionString);
         builder.UseSetting("ConnectionStrings:Redis", redis.ConnectionString);
         builder.UseSetting("Upstream:Endpoint", upstreamEndpoint ?? "https://api.openai.com");
@@ -69,6 +98,11 @@ public sealed class IntegrationApiFactory(
         builder.UseSetting("Cors:AllowedOrigins:0", "https://app.example.test");
         builder.UseSetting("Content:RootDir", FindRepositoryRoot());
         builder.UseSetting("Content:WebRoot", Path.Combine(Path.GetTempPath(), "presenter-ai-no-web-root"));
+    }
+
+    private sealed class LoopbackToolPolicy : IOutboundAddressPolicy
+    {
+        public bool IsAllowed(IPAddress address) => IPAddress.IsLoopback(address);
     }
 
     private static string FindRepositoryRoot()
