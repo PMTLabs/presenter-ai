@@ -22,6 +22,7 @@ export type BridgeEventMap = {
   busy: [BridgeMessage];
   "taken-over": [];
   audio: [ArrayBuffer];
+  flush: []; // Server {type:"flush"}: discard queued playback audio.
 };
 export type BridgeMessage = { type: string; [key: string]: unknown };
 type Handler<T extends keyof BridgeEventMap> = (
@@ -186,7 +187,7 @@ export class BridgeClient {
   sendAudio(buffer: ArrayBuffer) {
     if (
       this.ws?.readyState === this.WebSocketImpl.OPEN &&
-      this.snapshot.state === "presenting"
+      (this.snapshot.state === "presenting" || this.snapshot.state === "paused")
     )
       this.ws.send(buffer);
   }
@@ -208,6 +209,9 @@ export class BridgeClient {
         this.snapshot = message as unknown as Snapshot;
         this.emit("state", this.snapshot);
         this.emit("accepted");
+        break;
+      case "flush":
+        this.emit("flush");
         break;
       case "slide":
         this.emit("slide", message.index as number);
