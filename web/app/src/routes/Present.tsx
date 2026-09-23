@@ -11,6 +11,7 @@ import { Transcript } from "../components/Transcript";
 import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
 import { LogPanel } from "../components/LogPanel";
+import { formatEndReason } from "../utils/endReasons";
 type Detail = components["schemas"]["PresentationDetail"];
 
 const startButtonClassName = [
@@ -82,12 +83,18 @@ export function Present() {
   const [error, setError] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [canTakeOver, setCanTakeOver] = useState(false);
+  const [selectedLength, setSelectedLength] = useState<number | undefined>(undefined);
+  const [countdown, setCountdown] = useState<number | null>(null);
   const ready = useAuthStore((state) => state.ready);
   const userId = useAuthStore((state) => state.user?.id ?? null);
   const snapshot = usePresenterStore((state) => state.snapshot);
   const bufferedMs = usePresenterStore((state) => state.bufferedMs);
   const transcript = usePresenterStore((state) => state.transcript);
   const logs = usePresenterStore((state) => state.logs);
+  const limitWarning = usePresenterStore((state) => state.limitWarning);
+  const upstreamStatus = usePresenterStore((state) => state.upstreamStatus);
+  const suspended = usePresenterStore((state) => state.suspended);
+  const endReason = usePresenterStore((state) => state.endReason);
   const applySnapshot = usePresenterStore((state) => state.applySnapshot);
   const message = usePresenterStore((state) => state.message);
   const log = usePresenterStore((state) => state.log);
@@ -132,6 +139,8 @@ export function Present() {
       "log",
       "error",
       "closed",
+      "limit_warning",
+      "upstream",
     ] as const)
       bridge.on(event, (eventMessage) => {
         message(eventMessage);
@@ -215,6 +224,20 @@ export function Present() {
       driver.current = null;
     };
   }, [id, log, ready, userId]);
+  useEffect(() => {
+    setSelectedLength(undefined);
+  }, [id]);
+  useEffect(() => {
+    if (!limitWarning || limitWarning.secondsLeft === null || limitWarning.secondsLeft === undefined) {
+      setCountdown(null);
+      return;
+    }
+    setCountdown(limitWarning.secondsLeft);
+    const timer = setInterval(() => {
+      setCountdown((prev) => (prev !== null && prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [limitWarning]);
   const begin = async () => {
     if (!ready || !userId || !presentation || snapshot.state !== "idle") return;
     stopAudio();
@@ -253,7 +276,11 @@ export function Present() {
       return;
     }
     audio.current = started;
-    client.current?.start(presentation.id);
+    if (selectedLength !== undefined) {
+      client.current?.start(presentation.id, undefined, selectedLength);
+    } else {
+      client.current?.start(presentation.id);
+    }
   };
   useEffect(() => {
     const keys = (e: KeyboardEvent) => {
@@ -308,8 +335,12 @@ export function Present() {
         logTail: logs.slice(-8),
         echo: echo.current,
         wsOpen: snapshot.state !== "idle",
+        limitWarning,
+        upstreamStatus,
+        suspended: snapshot.suspended === true || suspended || upstreamStatus === "suspended",
+        endReason,
       });
-  }, [presentation, snapshot, transcript, logs]);
+  }, [presentation, snapshot, transcript, logs, limitWarning, upstreamStatus, suspended, endReason]);
   const live = snapshot.state === "presenting" || snapshot.state === "paused";
   const pausedWarning = snapshot.state === "paused" ? warningSincePause(logs) : null;
   const isDesktop = useDesktopLayout();
@@ -318,6 +349,15 @@ export function Present() {
     storage: presenterStorage,
     onlySaveAfterUserInteractions: true,
   });
+  const isSuspended =
+    upstreamStatus === "live"
+      ? false
+      : snapshot.suspended === true || suspended || upstreamStatus === "suspended";
+  const isReconnecting = upstreamStatus === "reconnecting";
+  const endReasonText = formatEndReason(endReason);
+  const LENGTH_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 90] as const;
+  const defaultMinutes =
+    (presentation?.meta as { maxMinutes?: number } | undefined)?.maxMinutes ?? 60;
   return (
     <section
       className={[
@@ -346,6 +386,11 @@ export function Present() {
       {error && (
         <p className="mt-4 flex-none rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
           {error}
+        </p>
+      )}
+      {endReasonText && snapshot.state === "idle" && (
+        <p role="status" className="mt-4 flex-none rounded-lg bg-gray-100 p-4 text-gray-800 dark:bg-gray-800 dark:text-gray-200">
+          Talk ended: {endReasonText}
         </p>
       )}
       <div className="mt-3 flex flex-none flex-wrap gap-2">
@@ -377,7 +422,24 @@ export function Present() {
               "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
             ].join(" ")}
           >
-            {pausedWarning && (
+            {countdown !== null && limitWarning && (
+              <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-amber-50 p-3 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                {limitWarning.kind === "max_length"
+                  ? `Time limit warning: ${countdown}s remaining`
+                  : `Inactivity warning: ${countdown}s remaining`}
+              </p>
+            )}
+            {isReconnecting && (
+              <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-blue-50 p-3 text-blue-800 dark:bg-blue-950 dark:text-blue-200">
+                Reconnecting…
+              </p>
+            )}
+            {!isReconnecting && isSuspended && (
+              <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-amber-50 p-3 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                Paused — disconnected to save cost; Resume reconnects
+              </p>
+            )}
+            {!isSuspended && !isReconnecting && pausedWarning && (
               <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-amber-50 p-3 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
                 {pausedWarning.message}
               </p>
@@ -392,7 +454,7 @@ export function Present() {
                 ].join(" ")}
               />
             </div>
-            <div className="flex flex-none flex-wrap gap-2 p-3">
+            <div className="flex flex-none flex-wrap items-center gap-2 p-3">
               <button
                 className={startButtonClassName}
                 onClick={() => void begin()}
@@ -400,6 +462,25 @@ export function Present() {
               >
                 Start
               </button>
+              {snapshot.state === "idle" && (
+                <label className="flex items-center gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <span>Length</span>
+                  <select
+                    id="length-select"
+                    aria-label="Length"
+                    className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+                    value={selectedLength ?? ""}
+                    onChange={(e) => setSelectedLength(e.target.value ? Number(e.target.value) : undefined)}
+                  >
+                    <option value="">Default ({defaultMinutes} min)</option>
+                    {LENGTH_OPTIONS.map((m) => (
+                      <option key={m} value={m}>
+                        {m} min
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <button
                 className={actionButtonClassName}
                 onClick={() =>
