@@ -1,7 +1,7 @@
 # 009 — Upstream billing guards
 
 **Date:** 2026-09-23
-**Status:** Draft — awaiting approval
+**Status:** Approved (2026-09-23)
 **Size:** L (presenter event loop, live session, recorder + migration, `/ws` bridge, CLI, web Present page, docs).
 **Area:** `src/PresenterAi.{Application,Infrastructure,Api,Cli,Contracts}`, `web/app`, `docs/`.
 **Branch:** `feature/009-billing-guards` from `feature/008-mcp-external-tools` (worktree `.claude/worktrees/p009`);
@@ -728,4 +728,4 @@ None block approval. Decisions this plan made that the brief did not settle — 
 |---|---|---|
 | 2026-09-23 | Requirement brief confirmed (G1) | all six research gaps; decisions in §2 |
 | 2026-09-23 | External plan review r-p009 (codex gpt-6-sol/high, read-only) | 2 blockers (cap armed at connect; reconnect not cancellable by End/cap), vocabulary gap, MCP cancellation during refresh/reconnect, weak test oracles, missing `ApiFactory` clock seam; all folded into §4.1, §4.3, §4.4, §5, T3–T7, §9 |
-| | Plan approved (G2) | |
+| 2026-09-23 | Plan approved (G2) | approved with the review r-p009 fixes and the §9 decisions |
