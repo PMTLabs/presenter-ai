@@ -36,7 +36,7 @@ public sealed class ResumePresentationTool : ITool
         var after = _presenter.Snapshot();
         if (changed || !after.Paused)
         {
-            return ToolResult.Success(alreadyPresenting
+            return ToolResult.Success(alreadyPresenting && !changed
                 ? $"already presenting on slide {after.SlideIndex + 1} of {after.SlideCount}"
                 : $"resumed on slide {after.SlideIndex + 1} of {after.SlideCount}");
         }

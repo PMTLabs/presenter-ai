@@ -158,6 +158,35 @@ public sealed class PresenterToolTests
     }
 
     [Fact]
+    public async Task Resume_tool_after_check_in_no_restarts_slide_and_reports_resumed()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.Hear("question", 100, 150);
+        await harness.Flush();
+        session.Speak(startMs: 151, endMs: 200);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(701));
+        await harness.Flush();
+        session.Hear("no", 300, 320);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(701));
+        await harness.Flush();
+        session.RaiseToolCall("d", "resume_after_no", "resume_presentation", "{}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "resume_after_no");
+        Assert.True(ParseOutput(session, "resume_after_no").Ok);
+        Assert.StartsWith("resumed on slide 1", ParseOutput(session, "resume_after_no").Message);
+        Assert.Contains(session.Sent, s => s.EventId == "resume-1" && s.Content!.Contains("Resume slide"));
+        Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("slide-1-resume-") == true);
+        session.Speak(startMs: 321, endMs: 400);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(3100));
+        await harness.Flush();
+        Assert.Equal(1, harness.Presenter.Snapshot().SlideIndex);
+    }
+
+    [Fact]
     public async Task Already_presenting_resume_tool_clears_check_in_without_resume_bridge()
     {
         await using var harness = Create();
@@ -424,6 +453,25 @@ public sealed class PresenterToolTests
         Assert.Contains(logs, x => x.Contains("late tool fault") && x.Contains("InvalidOperationException"));
         Assert.DoesNotContain(logs, x => x.Contains("sensitive late value"));
         Assert.Single(session.Sent, s => s.Type == "tool_output" && s.EventId == "late");
+    }
+
+    [Fact]
+    public async Task Immediately_faulting_async_tool_has_no_late_fault_log()
+    {
+        var registry = new ToolRegistry();
+        registry.Register(new ImmediateAsyncFaultTool());
+        await using var harness = Create(toolRegistry: registry);
+        var logs = new List<string>();
+        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        await harness.Presenter.StartAsync("p");
+        var session = harness.Session();
+        session.RaiseToolCall("d", "failed", "async_fault", "{}");
+        await harness.WaitForSentAsync(s => s.Type == "tool_output" && s.EventId == "failed");
+        Assert.False(ParseOutput(session, "failed").Ok);
+        Assert.Equal("tool failed", ParseOutput(session, "failed").Message);
+        await Task.Delay(50);
+        await harness.Flush();
+        Assert.DoesNotContain(logs, x => x.Contains("late tool fault"));
     }
 
     [Fact]
@@ -853,6 +901,20 @@ public sealed class PresenterToolTests
         }
 
         public ValueTask DisposeAsync() => Presenter.DisposeAsync();
+    }
+
+    private sealed class ImmediateAsyncFaultTool : ITool
+    {
+        public string Name => "async_fault";
+        public string Description => "Fails asynchronously";
+        public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject() };
+        public IReadOnlyList<string> Tags => [];
+        public bool Pinned => false;
+        public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            throw new InvalidOperationException("immediate failure");
+        }
     }
 
     private sealed class LateReadingTool(Task gate) : ITool
