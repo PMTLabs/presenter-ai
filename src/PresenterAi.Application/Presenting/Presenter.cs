@@ -100,6 +100,7 @@ public sealed class Presenter : IPresenter
     private bool _utteranceTooLong;
     private bool _utteranceDuringSpeech;
     private bool _utteranceBeganDuringCarryOn;
+    private bool _utteranceBeganDuringWaiting;
     private readonly Queue<(long Start, long End)> _voicedIntervals = new();
     private long _lastVoicedAt;
     private long? _permitBarrierMs;
@@ -742,7 +743,16 @@ public sealed class Presenter : IPresenter
         {
             if (_state == PresenterState.Presenting)
             {
-                if (_interaction == Interaction.WaitingOnSlide) SetInteraction(Interaction.None);
+                if (_interaction == Interaction.WaitingOnSlide)
+                {
+                    if (_utterance.Length == 0)
+                    {
+                        _rangeReply = false;
+                        // Remember the waiting phase for a resume command after the transcript opens its hold.
+                        _utteranceBeganDuringWaiting = true;
+                    }
+                    SetInteraction(Interaction.None);
+                }
                 OpenOrExtendQuestionHold(transcript.EndMs);
             }
 
@@ -793,6 +803,7 @@ public sealed class Presenter : IPresenter
         _utteranceTooLong = false;
         _utteranceDuringSpeech = false;
         _utteranceBeganDuringCarryOn = false;
+        _utteranceBeganDuringWaiting = false;
     }
 
     private void CompleteUtterance()
@@ -804,6 +815,7 @@ public sealed class Presenter : IPresenter
 
         var phrase = _utterance;
         var newQuestionDuringCarryOn = _utteranceBeganDuringCarryOn;
+        var beganDuringWaiting = _utteranceBeganDuringWaiting;
         var end = _utteranceEndMs;
         var speaking = _utteranceDuringSpeech || DuringSpeech(_utteranceStartMs, end);
         var command = _utteranceTooLong || _timeProvider.GetElapsedTime(_utteranceOpenedAt).TotalMilliseconds > 6000
@@ -831,7 +843,7 @@ public sealed class Presenter : IPresenter
         }
 
         var keepHold = command is { Intent: VoiceCommandIntent.No } && _interaction == Interaction.AwaitingCarryOn;
-        if (command is not null && ExecuteVoiceCommand(command))
+        if (command is not null && ExecuteVoiceCommand(command, beganDuringWaiting))
         {
             if (!keepHold) ClearQuestionHold();
             LogMessage("info", $"voice: {command.Intent.ToString().ToLowerInvariant()} (instant)");
@@ -849,14 +861,14 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private bool ExecuteVoiceCommand(VoiceCommand command)
+    private bool ExecuteVoiceCommand(VoiceCommand command, bool beganDuringWaiting = false)
     {
         switch (command.Intent)
         {
             case VoiceCommandIntent.Pause:
                 return PauseCore();
             case VoiceCommandIntent.Resume:
-                return ResumeCore();
+                return ResumeCore(beganDuringWaiting);
             case VoiceCommandIntent.Next:
                 return NextCore();
             case VoiceCommandIntent.Previous:
@@ -1203,20 +1215,17 @@ public sealed class Presenter : IPresenter
                                 else
                                 {
                                     using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
+                                    var invocation = tool.InvokeAsync(doc.RootElement.Clone(), cts.Token);
                                     try
                                     {
-                                        var invocation = tool.InvokeAsync(doc.RootElement.Clone(), cts.Token);
+                                        result = await invocation.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cts.Token).ConfigureAwait(false);
+                                    }
+                                    catch (Exception error) when (error is TimeoutException || error is OperationCanceledException && cts.IsCancellationRequested)
+                                    {
+                                        // Only an abandoned invocation needs a late-fault observer.
                                         _ = invocation.ContinueWith(t =>
                                             QueueFromProducer(new BackgroundFailure("late tool fault", t.Exception!.GetBaseException().GetType().Name)),
                                             CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                                        result = await invocation.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cts.Token).ConfigureAwait(false);
-                                    }
-                                    catch (TimeoutException)
-                                    {
-                                        result = ToolResult.Failure("timed out");
-                                    }
-                                    catch (OperationCanceledException) when (cts.IsCancellationRequested)
-                                    {
                                         result = ToolResult.Failure("timed out");
                                     }
                                 }
@@ -1458,15 +1467,15 @@ public sealed class Presenter : IPresenter
         return true;
     }
 
-    private bool ResumeCore()
+    private bool ResumeCore(bool beganDuringWaiting = false)
     {
-        if (_state == PresenterState.Presenting)
+        if (_state == PresenterState.Presenting && _interaction != Interaction.WaitingOnSlide && !beganDuringWaiting)
         {
             ClearQuestionHold();
             SetInteraction(Interaction.None);
             return false;
         }
-        if (_state != PresenterState.Paused || _presentation is null)
+        if (_state is not (PresenterState.Presenting or PresenterState.Paused) || _presentation is null)
         {
             return false;
         }

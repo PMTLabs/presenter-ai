@@ -64,3 +64,7 @@ Round 3 is the escalation trigger in the review-convergence doctrine: only genui
 | D-04 rejection, correction paragraph | — | **Accepted** | No change. |
 
 Root cause across rounds 2–3: the new `WaitingOnSlide` phase (added in round 2) was wired into the entry paths but not into every exit path (resume, new question, range flag). The fix brief asks for tests on each exit, not only the entry.
+
+**Fix result (verified by the orchestrator):** all four fixed; the new tests failed before the fix. Mutations of the resume guard and of the range-flag reset each fail the new tests. All suites green.
+
+**Follow-up (not a round 4):** the `resume_presentation` tool resumes from `WaitingOnSlide` only while the presenter is still in that phase. If the audience says something that is not a recognised voice command (for example "let's move on") and the model answers with the tool, the transcript has already left `WaitingOnSlide`, so the tool reports "already presenting" and narration waits for the 15 s escape. A recognised "continue" is handled by the local voice path and is not affected. Revisit with the live run (plan 007 Task 8).

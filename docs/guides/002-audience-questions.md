@@ -122,7 +122,7 @@ GPT-Live ──► LiveSession.ReceiveLoopAsync ──► LiveSession.HandleEven
                                    ──► Presenter.OnDelegatedResponse: tool round, not an answer
                                         after all outputs: one response.create barrier, hold re-armed
   response.event (final response.completed / failed)
-                                   ──► Presenter.OnDelegatedResponse: backend answer ready / failed; unanswered deadline unchanged
+                                   ──► Presenter.OnDelegatedResponse: backend answer ready / failed; fresh 15 s unanswered window armed
   session.output_audio.delta       ──► Presenter.OnAudio: the backend answer, then the follow-up timer as above
 
 check-in quiet timer fires ──► Presenter.OnInteractionElapsed ──► ResumeAfterQuestion
@@ -155,7 +155,7 @@ a permitted reply may be voiced without this injected instruction, but other out
 
 | Timer | Default | Starts | Effect |
 |---|---|---|---|
-| Question hold | 15 s | question, delegation, tool call or tool round | unanswered escape; a tool round re-arms it |
+| Question hold | 15 s | question, delegation, tool call, tool round or final backend answer/failure | unanswered escape; tool rounds and final backend completion re-arm a fresh window |
 | Answer quiet / check-in | 700 ms then `Presenter:FollowUpWaitMs` (5 s) | voiced answer | `InteractionElapsed` enters AwaitingCarryOn, then resumes after quiet unless yes/no or a new question intervenes |
 | Advance silence | `Presenter:AdvanceSilenceMs` (3 s) | each piece of narration audio | next slide (or wrap-up close) |
 | Part gap | min(2.5 s, 80 % of advance silence) | each piece of narration audio while parts remain | sends the next narration part |

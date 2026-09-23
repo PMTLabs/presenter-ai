@@ -102,6 +102,60 @@ public sealed class PresenterVoiceCommandTests
     }
 
     [Fact]
+    public async Task Range_reply_does_not_suppress_check_in_for_next_question()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            session.Hear("slide 40", 100, 150);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Speak(startMs: 151, endMs: 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Hear("What is this?", 300, 350);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Speak(startMs: 351, endMs: 400);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Hear("yes", 500, 550);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Contains(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+        }
+    }
+
+    [Fact]
+    public async Task Continue_after_check_in_no_restarts_slide_narration()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            var logs = new List<string>();
+            presenter.Log += entry => logs.Add(entry.Message);
+            session.Hear("What is this?", 100, 150);
+            await presenter.WaitUntilIdleAsync();
+            session.Speak(startMs: 151, endMs: 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Hear("no", 300, 320);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Hear("continue", 400, 450);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Contains(session.Sent, s => s.EventId == "resume-1" && s.Content!.Contains("slide"));
+            Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("slide-1-resume-") == true);
+            Assert.Contains(logs, s => s.Contains("voice: resume (instant)"));
+            session.Speak(startMs: 451, endMs: 500);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 3100);
+            Assert.Equal(1, presenter.Snapshot().SlideIndex);
+        }
+    }
+
+    [Fact]
     public async Task Single_seven_second_delta_is_not_an_instant_command()
     {
         var (presenter, session, clock) = await Start();
