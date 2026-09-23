@@ -261,7 +261,7 @@ public static class ToolEndpoints
         }
         catch (McpConnectorException mex)
         {
-            await repository.SetStatusAsync(ownerId, id, "error", mex.Code, "header", cancellationToken);
+            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(mex.Code), mex.Code, "header", cancellationToken);
         }
         catch (Exception)
         {
@@ -295,6 +295,7 @@ public static class ToolEndpoints
         IToolConnectionRepository repository,
         IOptions<ExternalToolsOptions> options,
         McpOAuthService oauthService,
+        McpConnector connector,
         HttpContext context,
         CancellationToken cancellationToken)
     {
@@ -303,21 +304,28 @@ public static class ToolEndpoints
         if (server is null)
             return Problems.NotFound(context, ErrorCodes.ToolsServerNotFound, "The tool server was not found.");
 
-        if (string.IsNullOrEmpty(options.Value.CredentialKey))
-            return Problems.Create(context, ErrorCodes.ToolsCredentialsUnavailable, StatusCodes.Status503ServiceUnavailable, "Tool credentials protection is unavailable.");
-
         try
         {
             var challenge = await oauthService.ProbeChallengeAsync(server.Url, cancellationToken);
             if (challenge is null)
             {
+                await using var connection = await connector.ConnectAsync(ownerId, server with { AuthKind = "none" }, null,
+                    cancellationToken: cancellationToken);
+                await connection.Client.ListToolsAsync(cancellationToken: cancellationToken);
                 await repository.SetStatusAsync(ownerId, id, "connected", null, "none", cancellationToken);
                 var updated = await repository.GetAsync(ownerId, id, cancellationToken);
                 return Results.Ok(new ToolOAuthStartResponse(Server: ToView(updated!)));
             }
 
+            if (string.IsNullOrEmpty(options.Value.CredentialKey))
+                return Problems.Create(context, ErrorCodes.ToolsCredentialsUnavailable, StatusCodes.Status503ServiceUnavailable, "Tool credentials protection is unavailable.");
             var startResult = await oauthService.StartAsync(ownerId, id, challenge, request?.ClientId, request?.ClientSecret, cancellationToken);
             return Results.Ok(new ToolOAuthStartResponse(AuthorizationUrl: startResult.AuthorizationUrl));
+        }
+        catch (McpConnectorException ex)
+        {
+            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(ex.Code), ex.Code, cancellationToken);
+            return Problems.Create(context, McpFailure.ProblemCode(ex.Code), McpFailure.HttpStatus(ex.Code), "Tool server connection failed.");
         }
         catch (McpOAuthException ex)
         {
@@ -390,7 +398,7 @@ public static class ToolEndpoints
         }
         catch (McpConnectorException mex)
         {
-            await repository.SetStatusAsync(ownerId, id, "error", mex.Code, cancellationToken);
+            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(mex.Code), mex.Code, cancellationToken);
             return Results.Ok(new TestToolServerResponse(Ok: false, ToolCount: 0, ErrorCode: mex.Code));
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -432,8 +440,7 @@ public static class ToolEndpoints
             var views = tools.Select(t =>
             {
                 var isReadOnly = t.ProtocolTool.Annotations?.ReadOnlyHint == true;
-                var hasOverride = overrides.TryGetValue(t.Name, out var ov);
-                var alwaysAsk = hasOverride ? ov : (!isReadOnly || server.AlwaysAsk);
+                var alwaysAsk = !isReadOnly || server.AlwaysAsk || (overrides.TryGetValue(t.Name, out var ov) && ov);
                 return new ToolItemView(
                     t.Name,
                     t.Title,
@@ -444,13 +451,10 @@ public static class ToolEndpoints
 
             return Results.Ok(views);
         }
-        catch (McpConnectorException mex) when (mex.Code == "auth")
+        catch (McpConnectorException mex)
         {
-            return Problems.Create(context, ErrorCodes.ToolsAuth, StatusCodes.Status401Unauthorized, "Tool server authentication failed.");
-        }
-        catch (McpConnectorException)
-        {
-            return Problems.Create(context, ErrorCodes.ToolsUnreachable, StatusCodes.Status502BadGateway, "Tool server is unreachable.");
+            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(mex.Code), mex.Code, cancellationToken);
+            return Problems.Create(context, McpFailure.ProblemCode(mex.Code), McpFailure.HttpStatus(mex.Code), "Tool server connection failed.");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

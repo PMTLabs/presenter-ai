@@ -252,10 +252,10 @@ public sealed class ToolEndpointTests(ApiFactory factory) : IClassFixture<ApiFac
         credResp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
         (await credResp.Content.ReadAsStringAsync()).Should().Contain(ErrorCodes.ToolsCredentialsUnavailable);
 
-        // 2. Start OAuth
+        // OAuth start probes first; this unreachable fixture fails before it could require credential storage.
         var startResp = await client.PostAsJsonAsync($"/v1/tools/servers/{serverId}/oauth/start", new StartToolOAuthRequest());
-        startResp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        (await startResp.Content.ReadAsStringAsync()).Should().Contain(ErrorCodes.ToolsCredentialsUnavailable);
+        startResp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await startResp.Content.ReadAsStringAsync()).Should().Contain(ErrorCodes.ToolsUnreachable);
 
         // 3. Complete OAuth
         var completeResp = await client.PostAsJsonAsync("/v1/tools/oauth/complete",

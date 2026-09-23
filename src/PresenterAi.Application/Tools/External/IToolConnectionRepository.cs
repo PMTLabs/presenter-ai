@@ -15,6 +15,7 @@ public interface IToolConnectionRepository
     Task<bool> UpdateAsync(string ownerId, Guid serverId, string? name, bool? alwaysAsk, CancellationToken cancellationToken = default);
     Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, CancellationToken cancellationToken = default);
     Task<bool> SetStatusAsync(string ownerId, Guid serverId, string status, string? errorCode, string? authKind, CancellationToken cancellationToken = default);
+    Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint version, string status, string? errorCode, CancellationToken cancellationToken = default);
     Task<bool> RemoveAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default);
     Task<ToolCredential?> GetCredentialAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default);
     Task<bool> SaveCredentialAsync(string ownerId, Guid serverId, byte[] ciphertext, string keyId,

@@ -2149,6 +2149,16 @@
       "status": 401
     },
     {
+      "code": "tools_credential_key_changed",
+      "title": "Tool credential key changed",
+      "status": 401
+    },
+    {
+      "code": "tools_credential_unreadable",
+      "title": "Tool credential unreadable",
+      "status": 401
+    },
+    {
       "code": "tools_credentials_unavailable",
       "title": "Tool credentials unavailable",
       "status": 503

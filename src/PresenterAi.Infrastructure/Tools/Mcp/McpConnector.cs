@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Http.Headers;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -178,7 +177,8 @@ public sealed class McpConnector(
                     }
                     catch (Exception ex)
                     {
-                        await UpdateStatusAsync(ownerId, server.Id, "needs_reconnect", "auth", cancellationToken);
+                        // RefreshAsync owns the version-checked status transition.
+                        // A concurrent winner must not be overwritten.
                         throw new McpConnectorException("auth", ex);
                     }
                 }
@@ -193,7 +193,14 @@ public sealed class McpConnector(
 
             Func<string, CancellationToken, Task> setStatusFunc = async (status, ct) =>
             {
-                await UpdateStatusAsync(ownerId, server.Id, status, "auth", ct);
+                if (server.AuthKind == "oauth" && rawCredential != null && status == "needs_reconnect")
+                {
+                    using var scope = scopeFactory.CreateScope();
+                    var repo = scope.ServiceProvider.GetRequiredService<IToolConnectionRepository>();
+                    await repo.SetStatusIfCredentialVersionAsync(
+                        ownerId, server.Id, rawCredential.Version, status, "auth", ct);
+                }
+                else await UpdateStatusAsync(ownerId, server.Id, status, "auth", ct);
             };
 
             return new McpConnection(server, client, tokenState, reconnectFunc, setStatusFunc);
@@ -316,7 +323,7 @@ public sealed class McpHttpAuthHandler : DelegatingHandler
         var response = await base.SendAsync(request, cancellationToken);
         if (response.StatusCode == HttpStatusCode.Unauthorized && _tokenState != null && _onUnauthorized != null)
         {
-            if (!IsToolCall(contentBytes))
+            if (IsSafeToRetry(contentBytes))
             {
                 try
                 {
@@ -335,11 +342,22 @@ public sealed class McpHttpAuthHandler : DelegatingHandler
         return response;
     }
 
-    private static bool IsToolCall(byte[]? contentBytes)
+    private static bool IsSafeToRetry(byte[]? contentBytes)
     {
-        if (contentBytes == null || contentBytes.Length == 0) return false;
-        var text = Encoding.UTF8.GetString(contentBytes);
-        return text.Contains("\"tools/call\"");
+        if (contentBytes is null || contentBytes.Length == 0) return false;
+        try
+        {
+            using var document = JsonDocument.Parse(contentBytes);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            var methods = root.EnumerateObject().Where(p => p.Name == "method").ToArray();
+            return methods.Length == 1 && methods[0].Value.ValueKind == JsonValueKind.String &&
+                methods[0].Value.GetString() is "initialize" or "tools/list";
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private void AttachAuth(HttpRequestMessage request)

@@ -60,6 +60,8 @@ public static class ErrorCodes
     [Description("Tool OAuth state invalid")] public const string ToolsOAuthStateInvalid = "tools_oauth_state_invalid";
     [Description("Tool OAuth failed")] public const string ToolsOAuthFailed = "tools_oauth_failed";
     [Description("Tool server authentication failed")] public const string ToolsAuth = "tools_auth";
+    [Description("Tool credential key changed")] public const string ToolsCredentialKeyChanged = "tools_credential_key_changed";
+    [Description("Tool credential unreadable")] public const string ToolsCredentialUnreadable = "tools_credential_unreadable";
     [Description("Tool response too large")] public const string ToolsResponseTooLarge = "tools_response_too_large";
     [Description("Tool OAuth invalid grant")] public const string ToolsOAuthInvalidGrant = "tools_oauth_invalid_grant";
 
@@ -120,6 +122,8 @@ public static class ErrorCodes
             [ToolsOAuthStateInvalid] = new(ToolsOAuthStateInvalid, "Tool OAuth state invalid", 400),
             [ToolsOAuthFailed] = new(ToolsOAuthFailed, "Tool OAuth failed", 400),
             [ToolsAuth] = new(ToolsAuth, "Tool server authentication failed", 401),
+            [ToolsCredentialKeyChanged] = new(ToolsCredentialKeyChanged, "Tool credential key changed", 401),
+            [ToolsCredentialUnreadable] = new(ToolsCredentialUnreadable, "Tool credential unreadable", 401),
             [ToolsResponseTooLarge] = new(ToolsResponseTooLarge, "Tool response too large", 502),
             [ToolsOAuthInvalidGrant] = new(ToolsOAuthInvalidGrant, "Tool OAuth invalid grant", 400)
         };

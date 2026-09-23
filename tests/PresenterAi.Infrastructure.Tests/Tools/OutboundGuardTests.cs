@@ -151,6 +151,67 @@ public class OutboundGuardTests
         Assert.NotNull(factory.CreateClient("mcp-oauth"));
     }
 
+    [Theory]
+    [InlineData("mcp")]
+    [InlineData("mcp-oauth")]
+    public async Task Named_client_actual_pipeline_blocks_dns_refuses_redirect_caps_response_and_disables_proxy(string name)
+    {
+        await using var fake = await StrictFakeAuthServer.StartAsync();
+        var port = new Uri(fake.Url).Port;
+        var connector = new LoopbackSocketConnector();
+        var resolver = new MutableResolver();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<IOutboundDnsResolver>(resolver);
+        services.AddSingleton<ISocketConnector>(connector);
+        services.AddExternalTools();
+        using var provider = services.BuildServiceProvider();
+        var handler = provider.GetRequiredService<SocketsHttpHandler>();
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+        Assert.False(handler.UseProxy);
+        Assert.False(handler.AllowAutoRedirect);
+        using var client = provider.GetRequiredService<IHttpClientFactory>().CreateClient(name);
+        var url = $"https://public.example:{port}";
+        resolver.Address = IPAddress.Loopback;
+        var blocked = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync(url + "/guard-ok"));
+        Assert.Equal("tools_url_blocked", Assert.IsType<OutboundGuardException>(blocked.InnerException).Code);
+        Assert.Equal(0, connector.Calls);
+        resolver.Address = IPAddress.Parse("8.8.8.8");
+        using var ok = await client.GetAsync(url + "/guard-ok");
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        Assert.Equal(1, connector.Calls);
+        var refused = await Assert.ThrowsAsync<OutboundGuardException>(() => client.GetAsync(url + "/guard-redirect"));
+        Assert.Equal("tools_redirect_refused", refused.Code);
+        Assert.Equal(1, connector.Calls);
+        var error = await Assert.ThrowsAsync<OutboundGuardException>(() => client.GetAsync(url + "/guard-oversize"));
+        Assert.Equal("tools_response_too_large", error.Code);
+        Assert.Equal(1, connector.Calls);
+    }
+
+    private sealed class MutableResolver : IOutboundDnsResolver
+    {
+        public IPAddress Address { get; set; } = IPAddress.Loopback;
+        public Task<IPAddress[]> ResolveAllAsync(string host, CancellationToken ct) => Task.FromResult(new[] { Address });
+        public Task<IPAddress[]> ResolveAAsync(string host, CancellationToken ct) => Task.FromResult(new[] { Address });
+    }
+
+    private sealed class LoopbackSocketConnector : ISocketConnector
+    {
+        public int Calls;
+        public async ValueTask<Stream> ConnectAsync(IPAddress address, int port, CancellationToken ct)
+        {
+            Interlocked.Increment(ref Calls);
+            var socket = new System.Net.Sockets.Socket(AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Stream,
+                System.Net.Sockets.ProtocolType.Tcp);
+            try
+            {
+                await socket.ConnectAsync(IPAddress.Loopback, port, ct);
+                return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+            }
+            catch { socket.Dispose(); throw; }
+        }
+    }
+
     private static HttpClient Client(HttpMessageHandler handler, long cap) => new(new OutboundRequestHandler(new StrictOutboundAddressPolicy(), cap) { InnerHandler = handler });
 
     private sealed class FakeResolver(IPAddress[] all, IPAddress[] a) : IOutboundDnsResolver
