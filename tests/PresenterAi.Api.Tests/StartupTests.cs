@@ -68,6 +68,61 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
             .Which.Settings.FollowUpWaitMs.Should().Be(9000);
     }
 
+    [Theory]
+    [InlineData("Presenter:MaxTalkMinutes", "4", "Presenter:MaxTalkMinutes")]
+    [InlineData("Presenter:MaxTalkMinutes", "121", "Presenter:MaxTalkMinutes")]
+    [InlineData("Presenter:MaxTalkCeilingMinutes", "4", "Presenter:MaxTalkCeilingMinutes")]
+    [InlineData("Presenter:MaxTalkCeilingMinutes", "241", "Presenter:MaxTalkCeilingMinutes")]
+    [InlineData("Presenter:MaxTalkCeilingMinutes", "50", "Presenter:MaxTalkMinutes")]
+    [InlineData("Presenter:PauseGraceSeconds", "29", "Presenter:PauseGraceSeconds")]
+    [InlineData("Presenter:PauseGraceSeconds", "901", "Presenter:PauseGraceSeconds")]
+    [InlineData("Presenter:IdleTimeoutSeconds", "119", "Presenter:IdleTimeoutSeconds")]
+    [InlineData("Presenter:IdleTimeoutSeconds", "1801", "Presenter:IdleTimeoutSeconds")]
+    [InlineData("Session:HeartbeatIntervalSeconds", "4", "Session:HeartbeatIntervalSeconds")]
+    [InlineData("Session:HeartbeatIntervalSeconds", "61", "Session:HeartbeatIntervalSeconds")]
+    [InlineData("Session:HeartbeatTimeoutSeconds", "29", "Session:HeartbeatTimeoutSeconds")]
+    [InlineData("Session:HeartbeatTimeoutSeconds", "301", "Session:HeartbeatTimeoutSeconds")]
+    public void Out_of_range_talk_limit_fails_startup(string key, string value, string expectedError)
+    {
+        using var localFactory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                [key] = value
+            }
+        };
+
+        var createClient = () => localFactory.CreateClient();
+
+        createClient.Should().Throw<Exception>()
+            .Which.ToString().Should().Contain(expectedError);
+    }
+
+    [Fact]
+    public void Talk_limit_settings_reach_the_presenter()
+    {
+        using var localFactory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Presenter:MaxTalkCeilingMinutes"] = "180",
+                ["Presenter:MaxTalkMinutes"] = "90",
+                ["Presenter:PauseGraceSeconds"] = "240",
+                ["Presenter:IdleTimeoutSeconds"] = "600"
+            }
+        };
+
+        var presenter = localFactory.Services.GetRequiredService<PresenterAi.Application.Presenting.IPresenter>();
+
+        var settings = presenter.Should().BeOfType<PresenterAi.Application.Presenting.Presenter>()
+            .Which.Settings;
+
+        settings.MaxTalkCeilingMinutes.Should().Be(180);
+        settings.MaxTalkMinutes.Should().Be(90);
+        settings.PauseGraceSeconds.Should().Be(240);
+        settings.IdleTimeoutSeconds.Should().Be(600);
+    }
+
     [Fact]
     public async Task Missing_upstream_key_exits_cleanly_in_production()
     {

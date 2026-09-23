@@ -11,10 +11,14 @@ public interface IPresenter : IAsyncDisposable
     event Action<PresenterClosed>? Closed;
     event Action<PresenterLog>? Log;
     event Action<PresenterUpstreamError>? UpstreamError;
+    event Action<PresenterLimitWarning>? LimitWarning { add { } remove { } }
+    event Action<PresenterUpstreamStatus>? UpstreamStatus { add { } remove { } }
 
     PresenterSnapshot Snapshot();
 
     Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default);
+    Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, int? maxMinutes, CancellationToken cancellationToken = default) =>
+        StartAsync(id, fromIndex, ownerId, cancellationToken);
     Task<bool> NextAsync(CancellationToken cancellationToken = default);
     Task<bool> PrevAsync(CancellationToken cancellationToken = default);
     Task<bool> GotoAsync(int index, CancellationToken cancellationToken = default);
@@ -25,4 +29,7 @@ public interface IPresenter : IAsyncDisposable
     Task<bool> UnmuteAsync(CancellationToken cancellationToken = default);
     Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default);
     Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default);
+    Task<bool> EndAsync(string endReason, bool resumable = false, CancellationToken cancellationToken = default) =>
+        EndAsync(resumable, cancellationToken);
+    void AbortPendingStart() { }
 }

@@ -230,6 +230,8 @@ try
         throw new InvalidOperationException("Missing required setting: ConnectionStrings:Redis");
     _ = app.Services.GetRequiredService<IOptions<JwtSettings>>().Value;
     _ = app.Services.GetRequiredService<IOptions<OAuthSettings>>().Value;
+    _ = app.Services.GetRequiredService<IOptions<PresenterOptions>>().Value;
+    _ = app.Services.GetRequiredService<IOptions<PresenterAi.Infrastructure.Redis.SessionRedisOptions>>().Value;
     app.Run();
 }
 catch (OptionsValidationException ex) when (!isTesting)

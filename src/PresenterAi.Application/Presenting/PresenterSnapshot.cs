@@ -12,4 +12,5 @@ public sealed record PresenterSnapshot(
     string? SessionId,
     long? ExpiresAt,
     double UsageSeconds,
-    int AdvanceSilenceMs);
+    int AdvanceSilenceMs,
+    bool Suspended = false);

@@ -157,6 +157,8 @@ public sealed class Presenter : IPresenter
     public event Action<PresenterClosed>? Closed;
     public event Action<PresenterLog>? Log;
     public event Action<PresenterUpstreamError>? UpstreamError;
+    public event Action<PresenterLimitWarning>? LimitWarning { add { } remove { } }
+    public event Action<PresenterUpstreamStatus>? UpstreamStatus { add { } remove { } }
 
     public static int PartGapFor(int advanceSilenceMs) => Math.Min(PartGapMs, (int)Math.Round(advanceSilenceMs * 0.8));
 
@@ -175,6 +177,14 @@ public sealed class Presenter : IPresenter
         await WriteAsync(command, cancellationToken).ConfigureAwait(false);
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
+
+    public Task<PresenterStartResult> StartAsync(
+        string id,
+        int? fromIndex,
+        string ownerId,
+        int? maxMinutes,
+        CancellationToken cancellationToken = default) =>
+        StartAsync(id, fromIndex, ownerId, cancellationToken);
 
     public Task<bool> NextAsync(CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new NextCommand(), cancellationToken);
@@ -205,6 +215,11 @@ public sealed class Presenter : IPresenter
 
     public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new EndCommand(resumable), cancellationToken);
+
+    public Task<bool> EndAsync(string endReason, bool resumable = false, CancellationToken cancellationToken = default) =>
+        EndAsync(resumable, cancellationToken);
+
+    public void AbortPendingStart() { }
 
     /// <summary>Test hook that completes after all currently queued producer events have been consumed.</summary>
     public async Task WaitUntilIdleAsync(CancellationToken cancellationToken = default)
