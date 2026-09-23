@@ -81,6 +81,12 @@ Server status is one of `not_connected`, `connected`, `needs_reconnect`, or `err
 or an unreadable encrypted credential. Disconnect removes the saved credential; add it again to reconnect with a
 header, or run OAuth again.
 
+Status is the last observed outcome, not a gate: every enabled server is tried at talk start whatever its status.
+A status write that follows a connection attempt only lands if the credential the attempt read is still current, so
+a newer credential save is not overwritten. Two narrow races remain (review 016): a no-auth probe or discovery that
+finishes after a disconnect can show `connected` again, and a failure after a successful token refresh can leave
+`connected` shown. The next Test or talk corrects the status.
+
 | Symptom / code | Meaning and action |
 |---|---|
 | `tools_url_invalid` | URL must be a valid absolute HTTPS URL without user-info or fragment. |
