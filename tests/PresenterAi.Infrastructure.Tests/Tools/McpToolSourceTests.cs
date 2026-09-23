@@ -59,6 +59,32 @@ public sealed class McpToolSourceTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Talk_start_stale_outcome_cannot_replace_new_credential_status(bool succeeds)
+    {
+        await using var server = await TestMcpServer.StartAsync(requireAuth: false);
+        var repo = new FakeToolConnectionRepository();
+        var id = Guid.NewGuid();
+        repo.Connections.Add(new ToolConnection(id, "user-1", "Test", "test", server.Endpoint,
+            succeeds ? "none" : "header", "not_connected", null, false,
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
+        if (!succeeds)
+            repo.Credentials[id] = new ToolCredential([1, 2, 3], "invalid", null, 1);
+        repo.AfterCredentialRead = () =>
+        {
+            repo.Credentials[id] = new ToolCredential([4, 5, 6], "replacement", null, 2);
+            repo.SetStatusAsync("user-1", id, succeeds ? "needs_reconnect" : "connected", null).Wait();
+        };
+        using var provider = BuildServices(server.Certificate, repo);
+        using var scope = provider.CreateScope();
+        await using var set = await scope.ServiceProvider.GetRequiredService<ISessionToolSource>()
+            .LoadAsync("user-1");
+        Assert.Equal(succeeds ? "needs_reconnect" : "connected",
+            repo.Connections.Single(c => c.Id == id).Status);
+    }
+
+    [Theory]
     [InlineData(true, false, false, false)]
     [InlineData(false, false, false, true)]
     [InlineData(null, false, false, true)]
@@ -862,6 +888,7 @@ public sealed class McpToolSourceTests
         public Dictionary<(Guid, string), bool> Overrides { get; } = new();
         public bool WebSearchEnabled { get; set; }
         public List<(string OwnerId, Guid ServerId, string Status, string? ErrorCode)> StatusUpdates { get; } = new();
+        public Action? AfterCredentialRead { get; set; }
 
         public Task<IReadOnlyList<ToolConnection>> ListAsync(string ownerId, CancellationToken cancellationToken = default)
             => Task.FromResult<IReadOnlyList<ToolConnection>>(Connections.Where(c => c.OwnerId == ownerId).ToList());
@@ -894,9 +921,11 @@ public sealed class McpToolSourceTests
             return Task.FromResult(true);
         }
 
-        public Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint version, string status, string? errorCode, CancellationToken cancellationToken = default) =>
-            Credentials.TryGetValue(serverId, out var credential) && credential.Version == version
-                ? SetStatusAsync(ownerId, serverId, status, errorCode, cancellationToken)
+        public Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint? version,
+            string status, string? errorCode, CancellationToken cancellationToken = default, string? authKind = null) =>
+            (Credentials.TryGetValue(serverId, out var credential)
+                ? version == credential.Version : version is null)
+                ? SetStatusAsync(ownerId, serverId, status, errorCode, authKind, cancellationToken)
                 : Task.FromResult(false);
 
         public Task<bool> RemoveAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default)
@@ -905,6 +934,9 @@ public sealed class McpToolSourceTests
         public Task<ToolCredential?> GetCredentialAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default)
         {
             Credentials.TryGetValue(serverId, out var cred);
+            var afterRead = AfterCredentialRead;
+            AfterCredentialRead = null;
+            afterRead?.Invoke();
             return Task.FromResult(cred);
         }
 

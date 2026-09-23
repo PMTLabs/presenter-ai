@@ -250,22 +250,26 @@ public static class ToolEndpoints
         var payload = JsonSerializer.Serialize(new { kind = "header", name = request.HeaderName, value = request.HeaderValue });
         var encrypted = protector.Protect(ownerId, id, payload);
         await repository.SaveCredentialAsync(ownerId, id, encrypted.Ciphertext, encrypted.KeyId, cancellationToken: cancellationToken);
+        var savedCredential = await repository.GetCredentialAsync(ownerId, id, cancellationToken);
 
         var updatedServer = server with { AuthKind = "header" };
-        var rawCred = new ToolCredential(encrypted.Ciphertext, encrypted.KeyId, null, 1);
+        var rawCred = savedCredential!;
         try
         {
             await using var connection = await connector.ConnectAsync(ownerId, updatedServer, rawCred, cancellationToken: cancellationToken);
             await connection.Client.ListToolsAsync(cancellationToken: cancellationToken);
-            await repository.SetStatusAsync(ownerId, id, "connected", null, "header", cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, rawCred.Version,
+                "connected", null, cancellationToken, "header");
         }
         catch (McpConnectorException mex)
         {
-            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(mex.Code), mex.Code, "header", cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, rawCred.Version,
+                McpFailure.Status(mex.Code), mex.Code, cancellationToken, "header");
         }
         catch (Exception)
         {
-            await repository.SetStatusAsync(ownerId, id, "error", "unreachable", "header", cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, rawCred.Version,
+                "error", "unreachable", cancellationToken, "header");
         }
 
         var finalServer = await repository.GetAsync(ownerId, id, cancellationToken);
@@ -312,7 +316,8 @@ public static class ToolEndpoints
                 await using var connection = await connector.ConnectAsync(ownerId, server with { AuthKind = "none" }, null,
                     cancellationToken: cancellationToken);
                 await connection.Client.ListToolsAsync(cancellationToken: cancellationToken);
-                await repository.SetStatusAsync(ownerId, id, "connected", null, "none", cancellationToken);
+                await repository.SetStatusIfCredentialVersionAsync(ownerId, id, null,
+                    "connected", null, cancellationToken, "none");
                 var updated = await repository.GetAsync(ownerId, id, cancellationToken);
                 return Results.Ok(new ToolOAuthStartResponse(Server: ToView(updated!)));
             }
@@ -324,7 +329,8 @@ public static class ToolEndpoints
         }
         catch (McpConnectorException ex)
         {
-            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(ex.Code), ex.Code, cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, null,
+                McpFailure.Status(ex.Code), ex.Code, cancellationToken);
             return Problems.Create(context, McpFailure.ProblemCode(ex.Code), McpFailure.HttpStatus(ex.Code), "Tool server connection failed.");
         }
         catch (McpOAuthException ex)
@@ -383,6 +389,7 @@ public static class ToolEndpoints
 
         var credential = await repository.GetCredentialAsync(ownerId, id, cancellationToken);
         var overrides = await repository.GetOverridesAsync(ownerId, id, cancellationToken);
+        var version = credential?.Version;
 
         try
         {
@@ -393,22 +400,26 @@ public static class ToolEndpoints
             var tools = await connection.Client.ListToolsAsync(cancellationToken: cts.Token);
             var toolCount = tools.Count;
 
-            await repository.SetStatusAsync(ownerId, id, "connected", null, cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, version,
+                "connected", null, cancellationToken);
             return Results.Ok(new TestToolServerResponse(Ok: true, ToolCount: toolCount));
         }
         catch (McpConnectorException mex)
         {
-            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(mex.Code), mex.Code, cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, version,
+                McpFailure.Status(mex.Code), mex.Code, cancellationToken);
             return Results.Ok(new TestToolServerResponse(Ok: false, ToolCount: 0, ErrorCode: mex.Code));
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            await repository.SetStatusAsync(ownerId, id, "error", "timeout", cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, version,
+                "error", "timeout", cancellationToken);
             return Results.Ok(new TestToolServerResponse(Ok: false, ToolCount: 0, ErrorCode: "timeout"));
         }
         catch (Exception)
         {
-            await repository.SetStatusAsync(ownerId, id, "error", "unreachable", cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, version,
+                "error", "unreachable", cancellationToken);
             return Results.Ok(new TestToolServerResponse(Ok: false, ToolCount: 0, ErrorCode: "unreachable"));
         }
     }
@@ -428,6 +439,7 @@ public static class ToolEndpoints
 
         var credential = await repository.GetCredentialAsync(ownerId, id, cancellationToken);
         var overrides = await repository.GetOverridesAsync(ownerId, id, cancellationToken);
+        var version = credential?.Version;
 
         try
         {
@@ -453,7 +465,8 @@ public static class ToolEndpoints
         }
         catch (McpConnectorException mex)
         {
-            await repository.SetStatusAsync(ownerId, id, McpFailure.Status(mex.Code), mex.Code, cancellationToken);
+            await repository.SetStatusIfCredentialVersionAsync(ownerId, id, version,
+                McpFailure.Status(mex.Code), mex.Code, cancellationToken);
             return Problems.Create(context, McpFailure.ProblemCode(mex.Code), McpFailure.HttpStatus(mex.Code), "Tool server connection failed.");
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)

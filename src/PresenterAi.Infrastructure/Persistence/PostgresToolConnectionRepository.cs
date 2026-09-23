@@ -87,12 +87,22 @@ public sealed class PostgresToolConnectionRepository(PresenterAiDbContext db) : 
         return true;
     }
 
-    public async Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint version, string status, string? errorCode, CancellationToken cancellationToken = default) =>
-        await Owned(ownerId).Where(server => server.Id == serverId &&
-            db.ToolServerCredentials.Any(credential => credential.ServerId == server.Id && credential.Version == version))
+    public async Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint? version,
+        string status, string? errorCode, CancellationToken cancellationToken = default, string? authKind = null)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return await Owned(ownerId).Where(server => server.Id == serverId &&
+            (version.HasValue
+                ? db.ToolServerCredentials.Any(c => c.ServerId == server.Id && c.Version == version.Value)
+                : !db.ToolServerCredentials.Any(c => c.ServerId == server.Id)))
             .ExecuteUpdateAsync(setters => setters.SetProperty(server => server.Status, status)
                 .SetProperty(server => server.LastErrorCode, errorCode)
-                .SetProperty(server => server.UpdatedAt, DateTimeOffset.UtcNow), cancellationToken) != 0;
+                .SetProperty(server => server.UpdatedAt, now)
+                .SetProperty(server => server.LastConnectedAt,
+                    server => status == "connected" ? now : server.LastConnectedAt)
+                .SetProperty(server => server.AuthKind,
+                    server => authKind ?? server.AuthKind), cancellationToken) != 0;
+    }
 
     public async Task<bool> RemoveAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default) =>
         await Owned(ownerId).Where(server => server.Id == serverId).ExecuteDeleteAsync(cancellationToken) != 0;
