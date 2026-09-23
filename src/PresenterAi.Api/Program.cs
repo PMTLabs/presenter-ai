@@ -60,6 +60,7 @@ builder.Services.AddFileContent(builder.Configuration, builder.Environment.Conte
 builder.Services.AddLiveSessions();
 builder.Services.AddPresenter();
 builder.Services.AddPresenterBridge();
+builder.Services.AddHostedService<PresenterShutdownService>();
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>() ?? new JwtSettings();
 var jwtSigningKey = Encoding.UTF8.GetBytes(jwtSettings.SecretKey);
 if (jwtSigningKey.Length < 32)

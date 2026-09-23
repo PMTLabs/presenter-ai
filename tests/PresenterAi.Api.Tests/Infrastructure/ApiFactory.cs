@@ -3,6 +3,9 @@ using System.Security.Claims;
 using System.Text;
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Time.Testing;
+using PresenterAi.Api.Realtime;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -23,6 +26,23 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     public string EnvironmentName { get; set; } = "Testing";
     public bool UseQueuedPresenter { get; set; }
     public ISessionToolSource? SessionToolSource { get; set; }
+    private FakeTimeProvider? _fakeClock;
+
+    public FakeTimeProvider UseFakeClock() => _fakeClock ??= new FakeTimeProvider();
+
+    public async Task AdvanceAndSettleAsync(TimeSpan span)
+    {
+        var clock = _fakeClock ?? throw new InvalidOperationException("Call UseFakeClock before creating the host.");
+        clock.Advance(span);
+        if (Services.GetRequiredService<IPresenter>() is Presenter presenter)
+        {
+            // A timer callback may queue a close, which in turn queues the upstream's closed event.
+            await presenter.WaitUntilIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        var bridge = Services.GetRequiredService<PresenterBridge>();
+        var release = bridge.CurrentReleasedForTestAsync();
+        if (release.IsCompleted) await release;
+    }
 
     public HttpClient CreateAuthenticatedClient(string? userId = null, string? email = null, string role = "user")
     {
@@ -94,8 +114,13 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             }
         }
 
-        builder.ConfigureServices(services =>
+        builder.ConfigureTestServices(services =>
         {
+            if (_fakeClock is not null)
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton<TimeProvider>(_fakeClock);
+            }
             // The real MCP source reads Postgres, which these tests do not run; a test that needs external tools
             // supplies its own source.
             services.RemoveAll<ISessionToolSource>();
@@ -274,6 +299,7 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
     public int EndCount { get; private set; }
     public bool BeginBeforeEnd { get; private set; }
     public bool ClosedBeforeEnd { get; private set; }
+    public PresenterClosed? LastClosed { get; private set; }
 
     public void Attach(IPresenter presenter)
     {
@@ -281,8 +307,9 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
         _slide = _ => { };
         _transcript = _ => { };
         _usage = _ => { };
-        _closed = _ =>
+        _closed = closed =>
         {
+            LastClosed = closed;
             if (Volatile.Read(ref _ended) == 0) ClosedBeforeEnd = true;
         };
         presenter.Slide += _slide;
