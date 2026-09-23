@@ -5,11 +5,15 @@ namespace PresenterAi.Application.Tests.Presenting;
 
 internal sealed class FakeSession : ILiveSession
 {
-    public List<(string Type, string? Content, string? EventId)> Sent { get; } = [];
+    public List<(string Type, string? Content, string? EventId, string? DelegationId)> Sent { get; } = [];
 
     public bool FailConnect { get; set; }
 
     public bool ThrowOnClose { get; set; }
+
+    public string? WarnOnConnect { get; set; }
+
+    public SessionRequest? Request { get; set; }
 
     public int DisposeCount { get; private set; }
 
@@ -28,6 +32,8 @@ internal sealed class FakeSession : ILiveSession
     public event Action<double, double?>? Usage;
     public event Action<JsonElement>? Delegation;
     public event Action<JsonElement>? UpstreamError;
+    public event Action<string>? Warning;
+    public event Action<string, string>? DelegatedResponseFinished;
     public event Action<string, double?>? Closed;
 
     public Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
@@ -37,39 +43,44 @@ internal sealed class FakeSession : ILiveSession
             throw new LiveStartupException("invalid_model", Error("invalid_model", "startup error"), "startup error");
         }
 
+        if (WarnOnConnect is not null)
+        {
+            Warning?.Invoke(WarnOnConnect);
+        }
+
         State = LiveSessionState.Open;
         var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"));
         Started?.Invoke(session);
         return Task.FromResult(session);
     }
 
-    public string? AppendInstructions(string content, string? eventId = null, string? delegationId = null) => Append("instructions", content, eventId);
+    public string? AppendInstructions(string content, string? eventId = null, string? delegationId = null) => Append("instructions", content, eventId, delegationId);
 
-    public string? AppendThinking(string content, string? eventId = null, string? delegationId = null) => Append("thinking", content, eventId);
+    public string? AppendThinking(string content, string? eventId = null, string? delegationId = null) => Append("thinking", content, eventId, delegationId);
 
-    public string? AppendCommentary(string content, string? eventId = null, string? delegationId = null) => Append("commentary", content, eventId);
+    public string? AppendCommentary(string content, string? eventId = null, string? delegationId = null) => Append("commentary", content, eventId, delegationId);
 
     public bool Mute()
     {
-        Sent.Add(("mute", null, null));
+        Sent.Add(("mute", null, null, null));
         return true;
     }
 
     public bool Unmute()
     {
-        Sent.Add(("unmute", null, null));
+        Sent.Add(("unmute", null, null, null));
         return true;
     }
 
     public bool SendAudio(ReadOnlyMemory<byte> pcm16)
     {
-        Sent.Add(("audio", null, null));
+        Sent.Add(("audio", null, null, null));
         return true;
     }
 
     public Task<LiveCloseResult> CloseAsync()
     {
-        Sent.Add(("close", null, null));
+        Sent.Add(("close", null, null, null));
         if (ThrowOnClose)
         {
             throw new InvalidOperationException("close failed");
@@ -92,11 +103,12 @@ internal sealed class FakeSession : ILiveSession
         State = LiveSessionState.Closed;
     }
 
-    public void Speak(int milliseconds = 100) => Audio?.Invoke(AudioLevelTests.VoicedFrame(milliseconds * 48), 0, milliseconds);
+    public void Speak(int milliseconds = 100, long? startMs = 0, long? endMs = null) =>
+        Audio?.Invoke(AudioLevelTests.VoicedFrame(milliseconds * 48), startMs, endMs ?? milliseconds);
 
     public void Silence(int milliseconds = 100) => Audio?.Invoke(new byte[milliseconds * 48], 0, milliseconds);
 
-    public void Hear(string text = "hi") => Transcript?.Invoke("user", text, 0, 100);
+    public void Hear(string text = "hi", long? startMs = 0, long? endMs = 100) => Transcript?.Invoke("user", text, startMs, endMs);
 
     public void Drop() => Closed?.Invoke("connection_lost", null);
 
@@ -107,11 +119,17 @@ internal sealed class FakeSession : ILiveSession
     public void RaiseUpstreamError(string code, string message, string? clientEventId = null) =>
         UpstreamError?.Invoke(Error(code, message, clientEventId));
 
-    public void RaiseDelegation() => Delegation?.Invoke(Json("{}"));
+    public void RaiseWarning(string message) => Warning?.Invoke(message);
 
-    private string? Append(string type, string content, string? eventId)
+    public void RaiseDelegation(string target = "client", string id = "delegation_test") =>
+        Delegation?.Invoke(Json($"{{\"type\":\"session.delegation.created\",\"offset_ms\":1000,\"delegation\":{{\"id\":\"{id}\",\"type\":\"delegation\",\"target\":\"{target}\"}}}}"));
+
+    public void RaiseDelegatedResponse(string id, string type = "response.completed") =>
+        DelegatedResponseFinished?.Invoke(id, type);
+
+    private string? Append(string type, string content, string? eventId, string? delegationId)
     {
-        Sent.Add((type, content, eventId));
+        Sent.Add((type, content, eventId, delegationId));
         Appended?.Invoke(type, eventId, Json("{}"));
         return eventId;
     }

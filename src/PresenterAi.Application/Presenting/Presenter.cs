@@ -4,7 +4,7 @@ using PresenterAi.Application.Scripts;
 
 namespace PresenterAi.Application.Presenting;
 
-public sealed record SessionRequest(string Instructions, string Voice);
+public sealed record SessionRequest(string Instructions, string Voice, string Title);
 
 public sealed record LoadedPresentation(
     string Id,
@@ -20,6 +20,8 @@ public sealed class Presenter : IPresenter
 {
     public const int NudgeMs = 15_000;
     public const int WrapUpFallbackMs = 15_000;
+    public const int QuestionHoldMs = 15_000;
+    public const int DefaultFollowUpWaitMs = 5_000;
     public const int MaxUpstreamAttempts = 4;
     public const int PartGapMs = 2_500;
 
@@ -44,8 +46,12 @@ public sealed class Presenter : IPresenter
     private int _slideIndex;
     private bool _muted;
     private bool _heardOutput;
-    private bool _nudged;
+    private int _nudgeCount;
     private bool _wrappingUp;
+    private int _outputFrames;
+    private int _voicedOutputFrames;
+    private int _userTranscriptCharacters;
+    private bool _slideDiagnosticsActive;
     private IReadOnlyList<string> _parts = Array.Empty<string>();
     private int _partsSent;
     private double _usageSeconds;
@@ -54,9 +60,17 @@ public sealed class Presenter : IPresenter
     private ITimer? _silenceTimer;
     private ITimer? _nudgeTimer;
     private ITimer? _wrapUpTimer;
+    private ITimer? _questionTimer;
     private long _silenceGeneration;
     private long _nudgeGeneration;
     private long _wrapUpGeneration;
+    private long _questionGeneration;
+    private bool _questionHoldOpen;
+    private bool _answerVoiced;
+    private long _questionOpenedAt;
+    private long? _latestQuestionEndMs;
+    private string? _pendingBackendDelegation;
+    private int _resumeSequence;
     private PresenterSnapshot _snapshot;
     private int _disposed;
 
@@ -284,6 +298,20 @@ public sealed class Presenter : IPresenter
                         _wrapUpTimer = null;
                         OnWrapUpFallback();
                         break;
+                    case QuestionHoldElapsed question when question.Generation == _questionGeneration:
+                        _questionTimer = null;
+                        OnQuestionHoldElapsed();
+                        break;
+                    case DelegatedResponseReceived response:
+                        OnDelegatedResponse(response);
+                        break;
+                    case SessionWarning warning:
+                        if (ReferenceEquals(warning.Session, _session))
+                        {
+                            LogMessage("warn", warning.Message);
+                        }
+
+                        break;
                     case Barrier barrier:
                         barrier.Completion.TrySetResult();
                         break;
@@ -375,7 +403,7 @@ public sealed class Presenter : IPresenter
         string? upstream = null;
         for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
         {
-            var candidate = _createSession(new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice), attempt);
+            var candidate = _createSession(new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice, presentation.Meta.Title), attempt);
             if (candidate is null)
             {
                 break;
@@ -384,6 +412,7 @@ public sealed class Presenter : IPresenter
             var label = candidate.Name ?? $"upstream #{attempt + 1}";
             try
             {
+                WireSession(candidate);
                 sessionInfo = await candidate.ConnectAsync(_lifetime.Token).ConfigureAwait(false);
                 session = candidate;
                 upstream = label;
@@ -410,7 +439,6 @@ public sealed class Presenter : IPresenter
 
         _session = session;
         _sessionInfo = sessionInfo;
-        WireSession(session);
         var startAt = fromIndex
             ?? (_lastRun is { EndedNormally: false } last && last.Id == id ? last.Index : 0);
         startAt = Math.Clamp(startAt, 0, Math.Max(0, presentation.Slides.Count - 1));
@@ -430,6 +458,8 @@ public sealed class Presenter : IPresenter
         session.Usage += (seconds, ratio) => QueueFromProducer(new UsageReceived(session, seconds, ratio));
         session.Delegation += raw => QueueFromProducer(new DelegationReceived(session, raw.Clone()));
         session.UpstreamError += raw => QueueFromProducer(new UpstreamErrorReceived(session, raw.Clone()));
+        session.Warning += message => QueueFromProducer(new SessionWarning(session, message));
+        session.DelegatedResponseFinished += (id, type) => QueueFromProducer(new DelegatedResponseReceived(session, id, type));
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
     }
 
@@ -440,11 +470,13 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        CompleteSlideDiagnostics();
         ClearTimers();
         _slideIndex = index;
         _heardOutput = false;
-        _nudged = false;
+        _nudgeCount = 0;
         _wrappingUp = false;
+        StartSlideDiagnostics();
         var slide = _presentation.Slides[index];
         LogMessage("info", $"slide {index + 1}/{SlideCount}{(slide.Title.Length > 0 ? $" — {slide.Title}" : string.Empty)}");
         Slide?.Invoke(index);
@@ -505,7 +537,17 @@ public sealed class Presenter : IPresenter
         }
 
         Audio?.Invoke(new PresenterAudio(audio.Bytes, audio.StartMs, audio.EndMs));
-        if (_state is not (PresenterState.Presenting or PresenterState.Paused) || !AudioLevel.IsVoiced(audio.Bytes))
+        var voiced = AudioLevel.IsVoiced(audio.Bytes);
+        if (_slideDiagnosticsActive)
+        {
+            _outputFrames++;
+            if (voiced)
+            {
+                _voicedOutputFrames++;
+            }
+        }
+
+        if (_state is not (PresenterState.Presenting or PresenterState.Paused) || !voiced)
         {
             return;
         }
@@ -518,7 +560,27 @@ public sealed class Presenter : IPresenter
 
         if (_state == PresenterState.Presenting)
         {
-            ArmAfterVoice();
+            // While a backend answer is pending, speech is filler ("One moment."), not the answer.
+            if (_questionHoldOpen && _pendingBackendDelegation is null && IsAfterLatestQuestion(audio))
+            {
+                if (!_answerVoiced)
+                {
+                    _answerVoiced = true;
+                    // The follow-up window takes over from here; the 15 s timer must not cut a long answer short.
+                    ClearQuestionTimer();
+                    var elapsed = (long)_timeProvider.GetElapsedTime(_questionOpenedAt).TotalMilliseconds;
+                    LogMessage("info", $"question: answered after {elapsed} ms");
+                }
+            }
+
+            if (_questionHoldOpen && _answerVoiced)
+            {
+                SetSilenceTimer(FollowUpWaitMs, partGap: false);
+            }
+            else
+            {
+                ArmAfterVoice();
+            }
         }
     }
 
@@ -530,9 +592,14 @@ public sealed class Presenter : IPresenter
         }
 
         Transcript?.Invoke(new PresenterTranscript(transcript.Role, transcript.Delta, transcript.StartMs, transcript.EndMs));
-        if (transcript.Role == "user" && _state == PresenterState.Presenting && _heardOutput)
+        if (transcript.Role == "user" && _slideDiagnosticsActive)
         {
-            ArmAfterVoice();
+            _userTranscriptCharacters += transcript.Delta.Length;
+        }
+
+        if (transcript.Role == "user" && _state == PresenterState.Presenting && !string.IsNullOrWhiteSpace(transcript.Delta))
+        {
+            OpenOrExtendQuestionHold(transcript.EndMs);
         }
     }
 
@@ -555,7 +622,65 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        LogMessage("info", $"delegation created ({JsonString(delegation.Raw, "target")}) id={JsonString(delegation.Raw, "id")} — ignored (client delegation carries no task text)");
+        var payload = delegation.Raw.ValueKind == JsonValueKind.Object
+            && delegation.Raw.TryGetProperty("delegation", out var nested)
+            ? nested
+            : default;
+        var target = JsonString(payload, "target");
+        var id = JsonString(payload, "id");
+        if (target is "client" or "responses")
+        {
+            LogMessage("info", $"question: delegated ({(target == "client" ? "client" : "backend")})");
+        }
+
+        // A delegation that arrives while paused, ending or closed must not make the model talk through that state.
+        // A late one after navigation still holds the new slide: GPT-Live speaks its answer regardless (there is no
+        // cancel), and the hold keeps the next part from talking over it.
+        if (_state != PresenterState.Presenting)
+        {
+            return;
+        }
+
+        OpenOrExtendQuestionHold(null);
+        if (target == "responses")
+        {
+            _pendingBackendDelegation = id ?? string.Empty;
+        }
+        else if (target == "client")
+        {
+            _session?.AppendInstructions(
+                PromptBuilder.ClientDelegationAnswerNowInstruction(),
+                $"question-{id ?? "client"}-answer-now",
+                id);
+        }
+    }
+
+    private void OnDelegatedResponse(DelegatedResponseReceived response)
+    {
+        if (!ReferenceEquals(response.Session, _session)
+            || _pendingBackendDelegation is null
+            || (_pendingBackendDelegation.Length > 0 && _pendingBackendDelegation != response.DelegationId))
+        {
+            return;
+        }
+
+        FinishBackendDelegation(response.Type);
+    }
+
+    private void FinishBackendDelegation(string type)
+    {
+        _pendingBackendDelegation = null;
+        if (type == "response.completed")
+        {
+            LogMessage("info", "question: backend answer ready");
+        }
+        else
+        {
+            LogMessage("warn", $"question: backend answer failed ({type})");
+        }
+
+        // Give the live model a fresh window to speak the injected answer.
+        ArmQuestionHold();
     }
 
     private void OnUpstreamError(UpstreamErrorReceived error)
@@ -570,10 +695,21 @@ public sealed class Presenter : IPresenter
         var message = JsonString(error.Raw, "message") ?? "unknown";
         LogMessage("error", $"upstream error{(clientEventId is null ? string.Empty : $" for {clientEventId}")}: {code ?? string.Empty} {message}".Trim());
         UpstreamError?.Invoke(new PresenterUpstreamError(message, code, clientEventId));
+
+        // A delegated backend can also fail with a top-level error that names no delegation; it ends the pending one.
+        if (code == "backend_error" && _pendingBackendDelegation is not null)
+        {
+            FinishBackendDelegation(code);
+        }
     }
 
     private void OnPartGap()
     {
+        if (HoldBlocksProgress())
+        {
+            return;
+        }
+
         if (_state == PresenterState.Presenting && PartsPending)
         {
             SendNextPart();
@@ -582,6 +718,11 @@ public sealed class Presenter : IPresenter
 
     private void OnSilence()
     {
+        if (HoldBlocksProgress())
+        {
+            return;
+        }
+
         if (_state != PresenterState.Presenting || !_heardOutput || PartsPending)
         {
             return;
@@ -607,21 +748,45 @@ public sealed class Presenter : IPresenter
 
     private void OnNudge()
     {
-        if (_state != PresenterState.Presenting || _heardOutput || _nudged || _presentation is null)
+        if (_state != PresenterState.Presenting || _heardOutput || _presentation is null)
         {
             return;
         }
 
-        _nudged = true;
         var slide = _presentation.Slides[_slideIndex];
-        LogMessage("warn", $"no output audio {NudgeMs} ms after slide {_slideIndex + 1} was sent; nudging the model");
-        _session?.AppendInstructions(
-            PromptBuilder.NudgeInstruction(_slideIndex, SlideCount, slide.Title),
-            $"slide-{_slideIndex + 1}-nudge");
+        switch (_nudgeCount)
+        {
+            case 0:
+                _nudgeCount = 1;
+                LogMessage("warn", $"no output audio {NudgeMs} ms after slide {_slideIndex + 1} was sent; nudging the model");
+                _session?.AppendInstructions(
+                    PromptBuilder.NudgeInstruction(_slideIndex, SlideCount, slide.Title),
+                    $"slide-{_slideIndex + 1}-nudge");
+                ArmNudge();
+                break;
+            case 1:
+                _nudgeCount = 2;
+                LogMessage("warn", $"no output audio {NudgeMs * 2} ms after slide {_slideIndex + 1} was sent; nudging the model again");
+                _session?.AppendInstructions(
+                    PromptBuilder.NudgeInstruction(_slideIndex, SlideCount, slide.Title),
+                    $"slide-{_slideIndex + 1}-nudge-2");
+                ArmNudge();
+                break;
+            default:
+                CompleteSlideDiagnostics();
+                PauseCore();
+                LogMessage("warn", $"The model stopped responding on slide {_slideIndex + 1} — Resume or End.");
+                break;
+        }
     }
 
     private void OnWrapUpFallback()
     {
+        if (_questionHoldOpen)
+        {
+            return;
+        }
+
         if (_state == PresenterState.Presenting && _wrappingUp && !_heardOutput)
         {
             LogMessage("warn", "no wrap-up audio; ending session");
@@ -636,6 +801,7 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        CompleteSlideDiagnostics();
         ClearTimers();
         _wrappingUp = true;
         _parts = Array.Empty<string>();
@@ -726,7 +892,13 @@ public sealed class Presenter : IPresenter
 
         var slide = _presentation.Slides[_slideIndex];
         _heardOutput = false;
-        _nudged = false;
+        _nudgeCount = 0;
+        if (!_slideDiagnosticsActive)
+        {
+            // A stall pause closed this slide's counts; the resumed part of the slide gets its own line.
+            StartSlideDiagnostics();
+        }
+
         SetState(PresenterState.Presenting);
         if (_wrappingUp)
         {
@@ -777,6 +949,7 @@ public sealed class Presenter : IPresenter
             return false;
         }
 
+        CompleteSlideDiagnostics();
         ClearTimers();
         var session = _session;
         SetState(PresenterState.Ending);
@@ -820,6 +993,7 @@ public sealed class Presenter : IPresenter
 
     private void OnClosed(string reason, double? seconds)
     {
+        CompleteSlideDiagnostics();
         ClearTimers();
         var endedNormally = IsNormalClose(reason);
         if (_presentation is not null)
@@ -839,6 +1013,71 @@ public sealed class Presenter : IPresenter
             $"closed: reason={reason} usage={(seconds.HasValue ? seconds.Value.ToString() : "unconfirmed")} s{(endedNormally ? string.Empty : $" (Start resumes at slide {_slideIndex + 1})")}");
         Closed?.Invoke(new PresenterClosed(reason, seconds));
         SetState(PresenterState.Idle);
+    }
+
+    private void StartSlideDiagnostics()
+    {
+        _outputFrames = 0;
+        _voicedOutputFrames = 0;
+        _userTranscriptCharacters = 0;
+        _slideDiagnosticsActive = true;
+    }
+
+    private void CompleteSlideDiagnostics()
+    {
+        if (!_slideDiagnosticsActive)
+        {
+            return;
+        }
+
+        LogMessage(
+            "info",
+            $"slide {_slideIndex + 1}: output {_outputFrames} frames ({_voicedOutputFrames} voiced), user transcript {_userTranscriptCharacters} chars");
+        _slideDiagnosticsActive = false;
+    }
+
+    private void OnQuestionHoldElapsed()
+    {
+        if (!_questionHoldOpen)
+        {
+            return;
+        }
+
+        ResumeAfterQuestion("question: released after 15 s without an answer");
+    }
+
+    // An open hold never lets a timer advance. Once the answer has been followed by FollowUpWaitMs of quiet, the
+    // model is told to resume the slide; the ordinary timers take over from there.
+    private bool HoldBlocksProgress()
+    {
+        if (!_questionHoldOpen)
+        {
+            return false;
+        }
+
+        if (_answerVoiced)
+        {
+            ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
+        }
+
+        return true;
+    }
+
+    private void ResumeAfterQuestion(string message)
+    {
+        LogMessage("info", message);
+        ClearQuestionHold();
+        if (_heardOutput)
+        {
+            _session?.AppendInstructions(
+                PromptBuilder.ResumeAfterQuestionInstruction(),
+                $"slide-{_slideIndex + 1}-resume-{++_resumeSequence}");
+            ArmAfterVoice();
+        }
+        else if (_wrappingUp)
+        {
+            ArmWrapUpFallback();
+        }
     }
 
     private void ArmAfterVoice()
@@ -877,6 +1116,17 @@ public sealed class Presenter : IPresenter
             Timeout.InfiniteTimeSpan);
     }
 
+    private void ArmQuestionHold()
+    {
+        ClearQuestionTimer();
+        var generation = ++_questionGeneration;
+        _questionTimer = _timeProvider.CreateTimer(
+            _ => QueueFromProducer(new QuestionHoldElapsed(generation)),
+            null,
+            TimeSpan.FromMilliseconds(QuestionHoldMs),
+            Timeout.InfiniteTimeSpan);
+    }
+
     private void SetSilenceTimer(int milliseconds, bool partGap)
     {
         ClearSilenceTimer();
@@ -893,6 +1143,7 @@ public sealed class Presenter : IPresenter
         ClearSilenceTimer();
         ClearNudgeTimer();
         ClearWrapUpTimer();
+        ClearQuestionHold();
     }
 
     private void ClearSilenceTimer()
@@ -916,6 +1167,41 @@ public sealed class Presenter : IPresenter
         _wrapUpTimer = null;
     }
 
+    private void OpenOrExtendQuestionHold(long? endMs)
+    {
+        if (!_questionHoldOpen)
+        {
+            _questionHoldOpen = true;
+            LogMessage("info", "question: hold opened");
+        }
+
+        _answerVoiced = false;
+        _latestQuestionEndMs = endMs;
+        _questionOpenedAt = _timeProvider.GetTimestamp();
+        ClearSilenceTimer();
+        ClearWrapUpTimer();
+        ArmQuestionHold();
+    }
+
+    private void ClearQuestionHold()
+    {
+        _questionHoldOpen = false;
+        _answerVoiced = false;
+        _latestQuestionEndMs = null;
+        _pendingBackendDelegation = null;
+        ClearQuestionTimer();
+    }
+
+    private void ClearQuestionTimer()
+    {
+        _questionGeneration++;
+        _questionTimer?.Dispose();
+        _questionTimer = null;
+    }
+
+    private bool IsAfterLatestQuestion(AudioReceived audio) =>
+        _latestQuestionEndMs is null || audio.EndMs is null || audio.EndMs >= _latestQuestionEndMs;
+
     private bool CanNavigate() => _state is PresenterState.Presenting or PresenterState.Paused;
 
     private void LeavePauseForNavigation()
@@ -938,6 +1224,10 @@ public sealed class Presenter : IPresenter
     private int SlideCount => _presentation?.Slides.Count ?? 0;
 
     private int AdvanceSilenceMs => _presentation?.Meta.AdvanceSilenceMs ?? _settings.AdvanceSilenceMs;
+
+    private int FollowUpWaitMs => _settings.FollowUpWaitMs;
+
+    public PresenterSettings Settings => _settings;
 
     private void SetState(PresenterState state)
     {
@@ -1015,10 +1305,13 @@ public sealed class Presenter : IPresenter
     private sealed record AppendedReceived(ILiveSession Session, string Kind, string? ClientEventId, JsonElement Raw) : PresenterEvent;
     private sealed record DelegationReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
     private sealed record UpstreamErrorReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
+    private sealed record DelegatedResponseReceived(ILiveSession Session, string DelegationId, string Type) : PresenterEvent;
+    private sealed record SessionWarning(ILiveSession Session, string Message) : PresenterEvent;
     private sealed record SessionClosed(ILiveSession Session, string Reason, double? Seconds) : PresenterEvent;
     private sealed record SilenceElapsed(long Generation, bool PartGap) : PresenterEvent;
     private sealed record NudgeElapsed(long Generation) : PresenterEvent;
     private sealed record WrapUpFallbackElapsed(long Generation) : PresenterEvent;
+    private sealed record QuestionHoldElapsed(long Generation) : PresenterEvent;
     private sealed record Barrier(TaskCompletionSource Completion) : PresenterEvent;
     private sealed record Shutdown(TaskCompletionSource Completion) : PresenterEvent;
     private sealed record LastRun(string Id, int Index, bool EndedNormally);

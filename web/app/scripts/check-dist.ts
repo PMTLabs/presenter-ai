@@ -13,10 +13,21 @@ for (const worklet of ["capture-processor", "playback-processor"]) {
     failures.push(`missing worklet chunk dist/assets/${worklet}-*.js`);
   }
 }
+const captureChunk = files.find(
+  (file) => file.startsWith("capture-processor-") && file.endsWith(".js"),
+);
+if (
+  !captureChunk ||
+  !readFileSync(join(assets, captureChunk), "utf8").includes("presenter-echo-gate-v1")
+)
+  failures.push("capture worklet chunk does not bundle the echo-gate sentinel");
 for (const file of files.filter((name) => name.endsWith(".js"))) {
   const source = readFileSync(join(assets, file), "utf8");
   if (source.includes("data:video/mp2t")) {
     failures.push(`${file} inlines a .ts asset as data:video/mp2t`);
+  }
+  if (source.includes("react-dom.development.js") || source.includes("react-dom-client.development.js")) {
+    failures.push(`${file} contains a development React bundle`);
   }
 }
 

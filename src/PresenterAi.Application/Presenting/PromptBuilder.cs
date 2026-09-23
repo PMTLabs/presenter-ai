@@ -37,8 +37,9 @@ public static class PromptBuilder
             "- Long narrations arrive in numbered parts. Continue from one part to the next immediately, without a break.",
             string.Empty,
             "Audience interaction (you can hear the audience):",
-            "- If someone speaks to you, stop, listen, and answer briefly, in one to three sentences, using the narration and the background context. If the answer is not in your material, say so honestly.",
-            "- After answering, say a short bridge such as \"Back to the slide\" and resume the current slide's narration from where you left off.",
+            "- If someone speaks to you, stop and listen. When the narration or background context covers the answer, answer immediately in one to three sentences; otherwise delegate the question.",
+            "- Never say that you checked, looked up, or found something before a result arrives. While waiting, at most say \"One moment.\" Do not resume the narration until the question is answered.",
+            "- After answering, stop and stay silent in case there is a follow-up question. You will be told when to continue.",
             "- Never start the next slide on your own.",
             string.Empty,
             "Speak in the same language as the narration.",
@@ -116,6 +117,12 @@ public static class PromptBuilder
 
     public static string PauseInstruction() =>
         "Pause now. Stay silent and do not speak until you are told to resume.";
+
+    public static string ClientDelegationAnswerNowInstruction() =>
+        "No lookup is available. Answer now in one to three sentences from the narration and background context, or say plainly that the material does not cover it; then stop and stay silent until you are told to continue.";
+
+    public static string ResumeAfterQuestionInstruction() =>
+        "No more questions. Say a short bridge such as \"Back to the slide\", then continue this slide's narration by restarting the sentence you were in when you were interrupted, so the audience can follow. If you had already finished this slide's narration, say only the bridge.";
 
     public static string NudgeInstruction(int index, int total, string title) =>
         $"Begin presenting {SlideLabel(index, total, title)} now, using the narration you were given.";

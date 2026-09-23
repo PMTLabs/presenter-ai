@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using FluentAssertions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using PresenterAi.Application.Presenting;
@@ -26,6 +27,153 @@ public sealed class LiveSessionTests
         start["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
         (await EventuallyAsync(() => server.Headers))!["Authorization"].Should().Be("Bearer test");
         server.Headers!["api-key"].Should().Be("test");
+    }
+
+    [Fact]
+    public async Task Session_start_sends_responses_delegation_when_a_model_is_set()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna", presentationTitle: "Roadmap");
+
+        await session.ConnectAsync();
+
+        var delegation = (await EventuallyAsync(() => server.ReceivedSnapshot().SingleOrDefault(EventTypeIs("session.start"))))!["session"]!["delegation"]!.AsObject();
+        delegation.ToJsonString().Should().Be("{\"type\":\"responses\",\"responses\":{\"model\":\"gpt-5.6-luna\",\"instructions\":\"Answer audience questions about the talk titled Roadmap in one to three short spoken sentences; if unsure, say so.\",\"reasoning\":{\"effort\":\"low\"},\"service_tier\":\"priority\",\"text\":{\"verbosity\":\"low\"}}}");
+    }
+
+    [Fact]
+    public async Task Empty_delegation_model_sends_client_delegation()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: " ");
+
+        await session.ConnectAsync();
+
+        var start = await EventuallyAsync(() => server.ReceivedSnapshot().SingleOrDefault(EventTypeIs("session.start")));
+        start!["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
+    }
+
+    [Fact]
+    public async Task Rejected_delegation_retries_once_with_client_delegation()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        server.DelegationStartRejections = 1;
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+        var warnings = new List<string>();
+        session.Warning += warnings.Add;
+        var errors = new List<string>();
+        session.UpstreamError += error => errors.Add(error.GetRawText());
+
+        await session.ConnectAsync();
+
+        var starts = server.ReceivedSnapshot().Where(EventTypeIs("session.start")).ToArray();
+        starts.Should().HaveCount(2);
+        starts[0]["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("responses");
+        starts[1]["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
+        warnings.Should().ContainSingle().Which.Should().Be("delegation: backend unavailable (delegation_unavailable); answering from the deck only");
+        errors.Should().BeEmpty("the recovered rejection is reported only as the warning");
+    }
+
+    [Fact]
+    public async Task Rejected_delegation_followed_by_a_close_still_retries()
+    {
+        for (var run = 0; run < 5; run++)
+        {
+            await using var server = await FakeLiveServer.StartAsync();
+            server.DelegationStartRejections = 1;
+            server.CloseAfterDelegationRejection = true;
+            await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+            var closed = new List<string>();
+            session.Closed += (reason, _) => closed.Add(reason);
+
+            await session.ConnectAsync();
+
+            session.State.Should().Be(LiveSessionState.Open);
+            closed.Should().BeEmpty();
+            server.ReceivedSnapshot().Where(EventTypeIs("session.start")).Last()["session"]!["delegation"]!["type"]!
+                .GetValue<string>().Should().Be("client");
+        }
+    }
+
+    [Fact]
+    public async Task Rejected_delegation_a_second_time_does_not_retry_again()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        server.DelegationStartRejections = 2;
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+        var errors = new List<string>();
+        session.UpstreamError += error => errors.Add(error.GetRawText());
+
+        var action = async () => await session.ConnectAsync();
+
+        await action.Should().ThrowAsync<LiveStartupException>();
+        server.ReceivedSnapshot().Count(EventTypeIs("session.start")).Should().Be(2);
+        errors.Should().ContainSingle("only the unrecovered second rejection is an upstream error");
+    }
+
+    [Fact]
+    public async Task Other_startup_errors_do_not_retry()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), model: "bad-model", delegationModel: "gpt-5.6-luna");
+
+        var action = async () => await session.ConnectAsync();
+
+        await action.Should().ThrowAsync<LiveStartupException>();
+        server.ReceivedSnapshot().Count(EventTypeIs("session.start")).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Delegation_event_preserves_id_target_and_offset()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider());
+        var delegations = new List<System.Text.Json.JsonElement>();
+        session.Delegation += delegations.Add;
+        await session.ConnectAsync();
+
+        await server.SendEventAsync(new JsonObject
+        {
+            ["type"] = "session.delegation.created",
+            ["event_id"] = "event-1",
+            ["offset_ms"] = 1234,
+            ["delegation"] = new JsonObject { ["id"] = "delegation-1", ["type"] = "delegation", ["target"] = "client" }
+        });
+        await EventuallyAsync(() => delegations.Count == 1);
+
+        delegations.Single().GetProperty("offset_ms").GetInt64().Should().Be(1234);
+        delegations.Single().GetProperty("delegation").GetProperty("id").GetString().Should().Be("delegation-1");
+        delegations.Single().GetProperty("delegation").GetProperty("target").GetString().Should().Be("client");
+    }
+
+    [Fact]
+    public async Task Response_event_completion_and_error_are_logged()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        var logger = new RecordingLogger<LiveSession>();
+        await using var session = Create(server, new FakeTimeProvider(), logger: logger);
+        var finished = new List<string>();
+        session.DelegatedResponseFinished += (id, type) => finished.Add($"{id}:{type}");
+        await session.ConnectAsync();
+
+        await server.SendEventAsync(new JsonObject
+        {
+            ["type"] = "response.event",
+            ["delegation_id"] = "delegation-1",
+            ["event"] = new JsonObject { ["type"] = "response.completed" }
+        });
+        await server.SendEventAsync(new JsonObject
+        {
+            ["type"] = "response.event",
+            ["delegation_id"] = "delegation-2",
+            ["event"] = new JsonObject { ["type"] = "response.failed" }
+        });
+        await EventuallyAsync(() => logger.Messages.Count == 2 ? logger.Messages : null);
+
+        logger.Messages.Should().Contain(message => message.Contains("Delegated response completed: id=delegation-1", StringComparison.Ordinal));
+        logger.Messages.Should().Contain(message => message.Contains("Delegated response failed: id=delegation-2 type=response.failed", StringComparison.Ordinal));
+        await EventuallyAsync(() => finished.Count == 2 ? true : false);
+        finished.Should().Equal("delegation-1:response.completed", "delegation-2:response.failed");
     }
 
     [Fact]
@@ -227,13 +375,16 @@ public sealed class LiveSessionTests
         string model = "test-model",
         IReadOnlyDictionary<string, string>? headers = null,
         bool silencePump = true,
-        TimeSpan? closeTimeout = null)
+        TimeSpan? closeTimeout = null,
+        string delegationModel = "",
+        string? presentationTitle = null,
+        ILogger<LiveSession>? logger = null)
     {
         return new LiveSession(
-            new UpstreamRoute("azure-like", new Uri(server.Url), headers ?? new Dictionary<string, string> { ["Authorization"] = "Bearer test" }, model),
-            new LiveSessionConfig(model, "test instructions", "test-voice"),
+            new UpstreamRoute("azure-like", new Uri(server.Url), headers ?? new Dictionary<string, string> { ["Authorization"] = "Bearer test" }, model, delegationModel),
+            new LiveSessionConfig(model, "test instructions", "test-voice", presentationTitle),
             clock,
-            NullLogger<LiveSession>.Instance,
+            logger ?? NullLogger<LiveSession>.Instance,
             new LiveSessionOptions { SilencePump = silencePump, CloseTimeout = closeTimeout ?? TimeSpan.FromSeconds(5) });
     }
 
@@ -304,6 +455,23 @@ public sealed class LiveSessionTests
         }
 
         throw new TimeoutException("Timed out waiting for fake live server observation.");
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<string> Messages { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Information && formatter(state, exception).StartsWith("Delegated response", StringComparison.Ordinal))
+            {
+                Messages.Add(formatter(state, exception));
+            }
+        }
     }
 
     private static async Task<bool> EventuallyAsync(Func<bool> condition, int timeoutMs = 2000)

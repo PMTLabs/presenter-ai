@@ -10,6 +10,8 @@ export type BridgeEventMap = {
   open: [];
   close: [];
   state: [Snapshot];
+  /** A server state frame arrived, so the ticket was accepted; the synthetic idle state on close does not count. */
+  accepted: [];
   slide: [number];
   transcript: [BridgeMessage];
   usage: [BridgeMessage];
@@ -95,7 +97,6 @@ export class BridgeClient {
     ws.binaryType = "arraybuffer";
     ws.addEventListener("open", () => {
       if (this.ws !== ws) return;
-      this.retry = 0;
       ws.send(JSON.stringify({ type: "auth", ticket }));
       this.emit("open");
     });
@@ -103,19 +104,21 @@ export class BridgeClient {
       if (this.ws !== ws) return;
       this.receive(event.data);
     });
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (event) => {
       if (this.ws !== ws) return;
       this.ws = null;
       this.snapshot = { ...this.snapshot, state: "idle" };
       this.emit("state", this.snapshot);
       this.emit("close");
-      this.scheduleReconnect();
+      this.scheduleReconnect(event.code === 1013);
     });
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(busy = false) {
     this.connecting = false;
-    const delay = Math.min(10_000, 500 * 2 ** this.retry++);
+    const delay = busy
+      ? Math.min(30_000, 5_000 * 2 ** this.retry++)
+      : Math.min(10_000, 500 * 2 ** this.retry++);
     this.reconnectTimer = setTimeout(() => this.connect(), delay);
   }
 
@@ -182,8 +185,11 @@ export class BridgeClient {
     }
     switch (message.type) {
       case "state":
+        // The initial state frame follows a successful ticket authentication, unlike the WebSocket open event.
+        this.retry = 0;
         this.snapshot = message as unknown as Snapshot;
         this.emit("state", this.snapshot);
+        this.emit("accepted");
         break;
       case "slide":
         this.emit("slide", message.index as number);
@@ -200,6 +206,7 @@ export class BridgeClient {
       case "upstream-error":
       case "error":
         this.emit("error", message);
+        if (message.code === "busy") this.emit("busy", message);
         break;
       case "closed":
         this.emit("closed", message);

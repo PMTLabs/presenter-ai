@@ -3,6 +3,7 @@ import {
   createAudioContext,
   resumeWithTimeout,
 } from "./playback";
+import { createEchoReference } from "./echoReference";
 // See playback.ts: `?worker&url` is the form Vite compiles for audioWorklet.addModule.
 import captureProcessorUrl from "./worklets/capture-processor.ts?worker&url";
 
@@ -19,6 +20,10 @@ export async function startAudio(
     onLevel?: (level: number) => void;
     onBuffered?: (ms: number) => void;
     onMicReady?: (ready: boolean) => void;
+    onBargeIn?: () => void;
+    onEchoStats?: (stats: { gateOpenRatio: number; coupling: number }) => void;
+    onReference?: (reference: "loopback" | "fallback", reason?: string) => void;
+    echoGate?: boolean;
     signal?: AbortSignal;
   } = {},
 ): Promise<StartedAudio> {
@@ -27,10 +32,18 @@ export async function startAudio(
     context,
     onBuffered: options.onBuffered,
   });
+  // This runs synchronously from the Start click, before audioWorklet loading awaits.
+  const reference = createEchoReference({
+    context,
+    onReference: options.onReference ?? (() => undefined),
+    onFallback: () => playback.useDestination(),
+  });
+  playback.setReference(reference);
   try {
     await resumeWithTimeout(context);
-    await playback.start();
+    await playback.start(reference?.destination);
   } catch (error) {
+    playback.stop();
     void context.close();
     throw error;
   }
@@ -38,6 +51,10 @@ export async function startAudio(
     context,
     onFrame: options.onFrame,
     onLevel: options.onLevel,
+    onBargeIn: options.onBargeIn,
+    onEchoStats: options.onEchoStats,
+    echoGate: options.echoGate,
+    connectFarLevels: (port) => playback.connectFarLevels(port),
   });
   const audio: StartedAudio = { context, playback, capture, micReady: false };
   void capture
@@ -64,6 +81,10 @@ export class AudioCapture {
       context: AudioContext;
       onFrame?: (buffer: ArrayBuffer) => void;
       onLevel?: (value: number) => void;
+      onBargeIn?: () => void;
+      onEchoStats?: (stats: { gateOpenRatio: number; coupling: number }) => void;
+      echoGate?: boolean;
+      connectFarLevels?: (port: MessagePort) => void;
     },
   ) {}
   async start(signal?: AbortSignal) {
@@ -103,7 +124,19 @@ export class AudioCapture {
       const msg = event.data;
       if (msg.type === "frame") this.options.onFrame?.(msg.buffer);
       else if (msg.type === "level") this.options.onLevel?.(msg.value);
+      else if (msg.type === "barge-in") this.options.onBargeIn?.();
+      else if (msg.type === "echo-stats")
+        this.options.onEchoStats?.({
+          gateOpenRatio: msg.gateOpenRatio,
+          coupling: msg.coupling,
+        });
     };
+    this.node.port.postMessage({ type: "echo-gate", enabled: this.options.echoGate !== false });
+    if (typeof MessageChannel !== "undefined") {
+      const channel = new MessageChannel();
+      this.options.connectFarLevels?.(channel.port1);
+      this.node.port.postMessage({ type: "far-level-port", port: channel.port2 }, [channel.port2]);
+    }
     this.source.connect(this.node);
     this.setMuted(this.muted);
   }

@@ -5,6 +5,9 @@ import playbackProcessorUrl from "./worklets/playback-processor.ts?worker&url";
 
 export class AudioPlayback {
   private node: AudioWorkletNode | null = null;
+  private output: AudioNode | null = null;
+  private reference: { close: () => void } | null = null;
+  private fellBack = false;
   bufferedMs = 0;
   constructor(
     private options: {
@@ -12,7 +15,10 @@ export class AudioPlayback {
       onBuffered?: (ms: number) => void;
     },
   ) {}
-  async start() {
+  async start(output: AudioNode = this.options.context.destination) {
+    // The echo reference can fall back before start is called (its 2 s timer runs while the context resumes);
+    // the fallback wins over the loopback destination the caller captured earlier.
+    this.output = this.fellBack ? this.options.context.destination : output;
     await this.options.context.audioWorklet.addModule(playbackProcessorUrl);
     this.node = new AudioWorkletNode(
       this.options.context,
@@ -25,7 +31,31 @@ export class AudioPlayback {
         this.options.onBuffered?.(this.bufferedMs);
       }
     };
-    this.node.connect(this.options.context.destination);
+    this.connectOutput();
+  }
+  setReference(reference: { close: () => void } | null) {
+    this.reference = reference;
+  }
+  useDestination() {
+    this.fellBack = true;
+    this.output = this.options.context.destination;
+    this.connectOutput();
+  }
+  connectFarLevels(port: MessagePort) {
+    if (!this.node) {
+      port.close();
+      return;
+    }
+    this.node.port.postMessage({ type: "far-level-port", port }, [port]);
+  }
+  private connectOutput() {
+    if (!this.node || !this.output) return;
+    try {
+      this.node.disconnect();
+    } catch {
+      /* not connected yet */
+    }
+    this.node.connect(this.output);
   }
   enqueue(buffer: ArrayBuffer) {
     if (!this.node) return;
@@ -36,12 +66,15 @@ export class AudioPlayback {
     this.node?.port.postMessage({ type: "flush" });
   }
   stop() {
+    this.reference?.close();
+    this.reference = null;
     try {
       this.node?.disconnect();
     } catch {
       /* noop */
     }
     this.node = null;
+    this.output = null;
   }
 }
 export function createAudioContext() {

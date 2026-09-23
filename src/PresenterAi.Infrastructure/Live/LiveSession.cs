@@ -21,12 +21,14 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<LiveSession> _logger;
     private readonly LiveSessionOptions _options;
-    private readonly ClientWebSocket _socket = new();
+    private ClientWebSocket _socket = new();
     private readonly CancellationTokenSource _lifetime = new();
+    private CancellationTokenSource _connection = new();
     private readonly Channel<OutboundFrame> _outbound = Channel.CreateUnbounded<OutboundFrame>(
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     private readonly TaskCompletionSource<LiveSessionInfo> _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<LiveCloseResult> _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource<LiveStartupException> _delegationRejected = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private Task? _sendLoop;
     private Task? _receiveLoop;
@@ -40,6 +42,8 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     private int _finished;
     private int _eventSequence;
     private int _audioDeltas;
+    private bool _useClientDelegation;
+    private bool _delegationRetryUsed;
 
     public LiveSession(
         UpstreamRoute route,
@@ -62,6 +66,8 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<double, double?>? Usage;
     public event Action<JsonElement>? Delegation;
     public event Action<JsonElement>? UpstreamError;
+    public event Action<string>? Warning;
+    public event Action<string, string>? DelegatedResponseFinished;
     public event Action<string, double?>? Closed;
 
     public LiveSessionState State => (LiveSessionState)Volatile.Read(ref _state);
@@ -80,25 +86,26 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
             throw new InvalidOperationException($"LiveSession.ConnectAsync: state is {State}");
         }
 
-        using var connectCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, cancellationToken);
         try
         {
-            foreach (var header in _route.Headers)
+            await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            while (true)
             {
-                _socket.Options.SetRequestHeader(header.Key, header.Value);
+                var completed = await Task.WhenAny(_started.Task, _delegationRejected.Task)
+                    .WaitAsync(_options.HandshakeTimeout, _timeProvider, cancellationToken)
+                    .ConfigureAwait(false);
+                if (completed == _started.Task)
+                {
+                    return await _started.Task.ConfigureAwait(false);
+                }
+
+                var rejection = await _delegationRejected.Task.ConfigureAwait(false);
+                _delegationRetryUsed = true;
+                _useClientDelegation = true;
+                Warning?.Invoke($"delegation: backend unavailable ({rejection.Code}); answering from the deck only");
+                await ResetConnectionForDelegationRetryAsync().ConfigureAwait(false);
+                await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
             }
-
-            await _socket.ConnectAsync(_route.LiveUrl, connectCancellation.Token)
-                .WaitAsync(_options.HandshakeTimeout, _timeProvider, cancellationToken)
-                .ConfigureAwait(false);
-
-            _logger.LogInformation("Upstream socket open, sending session.start");
-            _sendLoop = SendLoopAsync();
-            _receiveLoop = ReceiveLoopAsync();
-            Enqueue(new JsonFrame(CreateStartEvent(), AllowConnecting: true));
-
-            return await _started.Task.WaitAsync(_options.HandshakeTimeout, _timeProvider, cancellationToken)
-                .ConfigureAwait(false);
         }
         catch (TimeoutException) when (_started.Task.IsCompleted is false)
         {
@@ -116,6 +123,44 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
 
             throw;
         }
+    }
+
+    private async Task OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        using var connectCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, _connection.Token, cancellationToken);
+        foreach (var header in _route.Headers)
+        {
+            _socket.Options.SetRequestHeader(header.Key, header.Value);
+        }
+
+        await _socket.ConnectAsync(_route.LiveUrl, connectCancellation.Token)
+            .WaitAsync(_options.HandshakeTimeout, _timeProvider, cancellationToken)
+            .ConfigureAwait(false);
+
+        _logger.LogInformation("Upstream socket open, sending session.start");
+        _sendLoop = SendLoopAsync(_connection.Token);
+        _receiveLoop = ReceiveLoopAsync(_connection.Token);
+        Enqueue(new JsonFrame(CreateStartEvent(), AllowConnecting: true));
+    }
+
+    private async Task ResetConnectionForDelegationRetryAsync()
+    {
+        _connection.Cancel();
+        _socket.Abort();
+        var loops = new[] { _sendLoop, _receiveLoop }.Where(task => task is not null).Cast<Task>();
+        try
+        {
+            await Task.WhenAll(loops).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        _socket.Dispose();
+        _connection.Dispose();
+        _socket = new ClientWebSocket();
+        _connection = new CancellationTokenSource();
+        _delegationRejected = new TaskCompletionSource<LiveStartupException>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     public string? AppendInstructions(string content, string? eventId = null, string? delegationId = null)
@@ -211,14 +256,16 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
 
         _pump?.Dispose();
         _socket.Dispose();
+        _connection.Dispose();
         _lifetime.Dispose();
     }
 
-    private async Task SendLoopAsync()
+    private async Task SendLoopAsync(CancellationToken connectionToken)
     {
         try
         {
-            await foreach (var frame in _outbound.Reader.ReadAllAsync(_lifetime.Token).ConfigureAwait(false))
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, connectionToken);
+            await foreach (var frame in _outbound.Reader.ReadAllAsync(cancellation.Token).ConfigureAwait(false))
             {
                 if (_socket.State != WebSocketState.Open)
                 {
@@ -239,28 +286,32 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 }
             }
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || connectionToken.IsCancellationRequested)
         {
         }
-        catch (WebSocketException exception)
+        catch (WebSocketException exception) when (!connectionToken.IsCancellationRequested)
         {
             _logger.LogInformation(exception, "Upstream socket send failed");
             Finish("connection_lost", null);
         }
+        catch (WebSocketException) when (connectionToken.IsCancellationRequested)
+        {
+        }
     }
 
-    private async Task ReceiveLoopAsync()
+    private async Task ReceiveLoopAsync(CancellationToken connectionToken)
     {
         try
         {
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, connectionToken);
             var buffer = new byte[16 * 1024];
-            while (!_lifetime.IsCancellationRequested)
+            while (!cancellation.IsCancellationRequested)
             {
                 using var message = new MemoryStream();
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), _lifetime.Token).ConfigureAwait(false);
+                    result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellation.Token).ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         Finish("connection_lost", null);
@@ -274,6 +325,12 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
                     HandleEvent(message.ToArray());
+                    if (_delegationRejected.Task.IsCompleted)
+                    {
+                        // ConnectAsync reconnects in client mode; a close that follows the rejection must not finish
+                        // the session first.
+                        return;
+                    }
                 }
                 else if (result.MessageType == WebSocketMessageType.Binary)
                 {
@@ -281,18 +338,24 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 }
             }
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested || connectionToken.IsCancellationRequested)
         {
         }
-        catch (WebSocketException exception)
+        catch (WebSocketException exception) when (!connectionToken.IsCancellationRequested)
         {
             _logger.LogInformation(exception, "Upstream socket receive failed");
             Finish("connection_lost", null);
         }
-        catch (Exception exception)
+        catch (WebSocketException) when (connectionToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (!connectionToken.IsCancellationRequested)
         {
             _logger.LogWarning(exception, "Upstream receive loop failed");
             Finish("connection_lost", null);
+        }
+        catch (Exception) when (connectionToken.IsCancellationRequested)
+        {
         }
     }
 
@@ -431,19 +494,36 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 Usage?.Invoke(GetDouble(usage, "seconds") ?? 0, GetDouble(contextWindow, "usage_ratio"));
                 break;
             case "session.delegation.created":
-                Delegation?.Invoke(GetProperty(message, "delegation") ?? message);
+                Delegation?.Invoke(message);
+                break;
+            case "response.event":
+                HandleResponseEvent(message);
                 break;
             case "error":
                 var error = GetProperty(message, "error") ?? message;
                 _logger.LogWarning("Upstream error: {Error}", error.GetRawText());
-                UpstreamError?.Invoke(error);
+                LiveStartupException? startup = null;
                 if (State == LiveSessionState.Connecting)
                 {
+                    var code = GetString(error, "code") ?? "connect";
                     var upstreamMessage = GetString(error, "message") ?? "unknown";
+                    startup = new LiveStartupException(code, error, $"GPT-Live startup error: {upstreamMessage}");
+                    if (!_useClientDelegation && !_delegationRetryUsed && IsDelegationStartupError(error))
+                    {
+                        // The client-mode retry recovers this and reports it as a warning, so it is not raised as an
+                        // upstream error.
+                        _delegationRejected.TrySetResult(startup);
+                        break;
+                    }
+                }
+
+                UpstreamError?.Invoke(error);
+                if (startup is not null)
+                {
                     // Finish (with the startup failure) before ConnectAsync is woken: its catch block finishes
                     // with "connection_lost" when nothing has finished yet, and it may resume on another thread.
                     _socket.Abort();
-                    Finish("startup_error", null, new LiveStartupException(GetString(error, "code") ?? "connect", error, $"GPT-Live startup error: {upstreamMessage}"));
+                    Finish("startup_error", null, startup);
                 }
 
                 break;
@@ -465,6 +545,39 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         _logger.LogInformation("Session started: id={Id} model={Model} expires_at={ExpiresAt}", info.Id, info.Model, info.ExpiresAt);
         Started?.Invoke(info);
         _started.TrySetResult(info);
+    }
+
+    private void HandleResponseEvent(JsonElement envelope)
+    {
+        var delegationId = GetString(envelope, "delegation_id") ?? "unknown";
+        var responseEvent = GetProperty(envelope, "event");
+        var type = responseEvent is { } nested ? GetString(nested, "type") : null;
+        if (type == "response.completed")
+        {
+            _logger.LogInformation("Delegated response completed: id={DelegationId}", delegationId);
+            DelegatedResponseFinished?.Invoke(delegationId, type);
+        }
+        else if (type is not null && (type.Contains("error", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("failed", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("incomplete", StringComparison.OrdinalIgnoreCase)))
+        {
+            _logger.LogWarning("Delegated response failed: id={DelegationId} type={Type}", delegationId, type);
+            DelegatedResponseFinished?.Invoke(delegationId, type);
+        }
+    }
+
+    private static bool IsDelegationStartupError(JsonElement error)
+    {
+        var param = GetString(error, "param");
+        if (param?.StartsWith("session.delegation", StringComparison.Ordinal) is true)
+        {
+            return true;
+        }
+
+        var code = GetString(error, "code") ?? string.Empty;
+        var message = GetString(error, "message") ?? string.Empty;
+        return code.Contains("delegation", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("delegation", StringComparison.OrdinalIgnoreCase);
     }
 
     private string? Append(string kind, string content, string? eventId, string? delegationId)
@@ -507,7 +620,28 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 ["model"] = _config.Model,
                 ["instructions"] = _config.Instructions,
                 ["audio"] = new JsonObject { ["output"] = new JsonObject { ["voice"] = _config.Voice } },
-                ["delegation"] = new JsonObject { ["type"] = "client" }
+                ["delegation"] = CreateDelegation()
+            }
+        };
+    }
+
+    private JsonObject CreateDelegation()
+    {
+        if (_useClientDelegation || string.IsNullOrWhiteSpace(_route.DelegationModel))
+        {
+            return new JsonObject { ["type"] = "client" };
+        }
+
+        return new JsonObject
+        {
+            ["type"] = "responses",
+            ["responses"] = new JsonObject
+            {
+                ["model"] = _route.DelegationModel,
+                ["instructions"] = $"Answer audience questions about the talk titled {_config.PresentationTitle ?? "the presentation"} in one to three short spoken sentences; if unsure, say so.",
+                ["reasoning"] = new JsonObject { ["effort"] = "low" },
+                ["service_tier"] = "priority",
+                ["text"] = new JsonObject { ["verbosity"] = "low" }
             }
         };
     }

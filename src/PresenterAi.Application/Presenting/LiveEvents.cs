@@ -11,7 +11,7 @@ public enum LiveSessionState
     Closed
 }
 
-public sealed record LiveSessionConfig(string Model, string Instructions, string Voice);
+public sealed record LiveSessionConfig(string Model, string Instructions, string Voice, string? PresentationTitle = null);
 
 public sealed record LiveSessionInfo(string? Id, string? Model, long? ExpiresAt, JsonElement Raw);
 

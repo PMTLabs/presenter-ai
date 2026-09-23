@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using FluentAssertions;
+using Microsoft.Extensions.DependencyInjection;
 using PresenterAi.Api.Tests.Infrastructure;
 
 namespace PresenterAi.Api.Tests;
@@ -29,6 +30,42 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
 
         createClient.Should().Throw<Exception>()
             .Which.ToString().Should().Contain("Missing required setting: Upstream:Key");
+    }
+
+    [Theory]
+    [InlineData("2499")]
+    [InlineData("60001")]
+    public void Out_of_range_follow_up_wait_fails_startup(string value)
+    {
+        using var factory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Presenter:FollowUpWaitMs"] = value
+            }
+        };
+
+        var createClient = () => factory.CreateClient();
+
+        createClient.Should().Throw<Exception>()
+            .Which.ToString().Should().Contain("Presenter:FollowUpWaitMs must be between 2500 and 60000");
+    }
+
+    [Fact]
+    public void Follow_up_wait_setting_reaches_the_presenter()
+    {
+        using var factory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Presenter:FollowUpWaitMs"] = "9000"
+            }
+        };
+
+        var presenter = factory.Services.GetRequiredService<PresenterAi.Application.Presenting.IPresenter>();
+
+        presenter.Should().BeOfType<PresenterAi.Application.Presenting.Presenter>()
+            .Which.Settings.FollowUpWaitMs.Should().Be(9000);
     }
 
     [Fact]

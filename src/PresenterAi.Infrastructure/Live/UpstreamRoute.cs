@@ -4,7 +4,8 @@ public sealed record UpstreamRoute(
     string Name,
     Uri LiveUrl,
     IReadOnlyDictionary<string, string> Headers,
-    string Model);
+    string Model,
+    string DelegationModel = "");
 
 public sealed record UpstreamRoutes(IReadOnlyList<UpstreamRoute> Upstreams, string Voice)
 {
@@ -27,6 +28,7 @@ public sealed record UpstreamRoutes(IReadOnlyList<UpstreamRoute> Upstreams, stri
             options.Endpoint.Trim(),
             options.Key.Trim(),
             options.Model,
+            options.DelegationModel,
             "gpt-live-1");
 
         var routes = new List<UpstreamRoute> { primary };
@@ -42,6 +44,7 @@ public sealed record UpstreamRoutes(IReadOnlyList<UpstreamRoute> Upstreams, stri
                 fallbackEndpoint,
                 fallbackKey,
                 fallbackOptions.Model,
+                fallbackOptions.DelegationModel,
                 "gpt-live-1"));
         }
 
@@ -53,6 +56,7 @@ public sealed record UpstreamRoutes(IReadOnlyList<UpstreamRoute> Upstreams, stri
         string endpoint,
         string key,
         string? model,
+        string? delegationModel,
         string defaultModel)
     {
         var liveUrl = LiveUrlResolver.Resolve(endpoint);
@@ -60,7 +64,8 @@ public sealed record UpstreamRoutes(IReadOnlyList<UpstreamRoute> Upstreams, stri
             name,
             liveUrl,
             UpstreamAuth.Headers(key, liveUrl),
-            Normalise(model, defaultModel));
+            Normalise(model, defaultModel),
+            delegationModel?.Trim() ?? string.Empty);
     }
 
     private static string Normalise(string? value, string defaultValue)

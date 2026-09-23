@@ -32,6 +32,7 @@ public sealed class UpstreamRoutesTests
 
         Assert.Equal("wss://api.openai.com/v1/live/sessions", routes.Upstreams[0].LiveUrl.ToString());
         Assert.Equal("gpt-live-1", routes.Upstreams[0].Model);
+        Assert.Equal("gpt-5.6-luna", routes.Upstreams[0].DelegationModel);
         Assert.Equal("marin", routes.Voice);
         Assert.Equal("Bearer k", routes.Upstreams[0].Headers["Authorization"]);
     }
@@ -45,6 +46,7 @@ public sealed class UpstreamRoutesTests
         var defaults = new PresenterOptions();
         defaultConfig.GetSection("Presenter").Bind(defaults);
         Assert.Equal(3000, defaults.AdvanceSilenceMs);
+        Assert.Equal(5000, defaults.FollowUpWaitMs);
         Assert.False(defaults.LogEvents);
 
         var configured = new PresenterOptions();
@@ -52,13 +54,33 @@ public sealed class UpstreamRoutesTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Presenter:AdvanceSilenceMs"] = "1500",
+                ["Presenter:FollowUpWaitMs"] = "9000",
                 ["Presenter:LogEvents"] = "true"
             })
             .Build()
             .GetSection("Presenter")
             .Bind(configured);
         Assert.Equal(1500, configured.AdvanceSilenceMs);
+        Assert.Equal(9000, configured.FollowUpWaitMs);
         Assert.True(configured.LogEvents);
+    }
+
+    [Fact]
+    public void Empty_delegation_models_select_client_delegation()
+    {
+        var options = Bind(new Dictionary<string, string?>
+        {
+            ["Upstream:Endpoint"] = "https://api.openai.com",
+            ["Upstream:Key"] = "k",
+            ["Upstream:DelegationModel"] = "   ",
+            ["Upstream:Fallback:Key"] = "fallback",
+            ["Upstream:Fallback:DelegationModel"] = "   "
+        });
+
+        var routes = UpstreamRoutes.From(options);
+
+        Assert.Equal(string.Empty, routes.Upstreams[0].DelegationModel);
+        Assert.Equal(string.Empty, routes.Upstreams[1].DelegationModel);
     }
 
     [Fact]
