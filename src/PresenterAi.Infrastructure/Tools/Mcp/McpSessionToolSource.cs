@@ -178,9 +178,7 @@ public sealed class McpSessionToolSource(
                 _ => "unreachable"
             };
 
-            string status = code is "auth" or "oauth_invalid_grant" or "credential_unreadable" or "credential_key_changed"
-                ? "needs_reconnect"
-                : "error";
+            string status = McpFailure.Status(code);
 
             notes.Add($"tools: {UntrustedLogText.Sanitize(server.Name)} skipped ({code})");
             await UpdateStatusAsync(ownerId, server.Id, status, code, cancellationToken);

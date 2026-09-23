@@ -370,6 +370,28 @@ public sealed class McpToolSourceTests
         Assert.True(result.Ok);
         Assert.Equal("ok", result.Outcome);
         Assert.Equal("123.45", result.Message);
+        Assert.Equal(2, server.GetPriceRequests);
+        Assert.Equal(1, server.GetPriceCalls);
+    }
+
+    [Fact]
+    public async Task Second_404_on_read_only_call_is_not_replayed()
+    {
+        await using var server = await TestMcpServer.StartAsync(requireAuth: false);
+        server.GetPrice404Remaining = 2;
+        var repo = new FakeToolConnectionRepository();
+        var serverId = Guid.NewGuid();
+        repo.Connections.Add(new ToolConnection(serverId, "user-1", "Test Server", "test-srv", server.Endpoint,
+            "none", "connected", null, false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null));
+        using var provider = BuildServices(server.Certificate, repo);
+        using var scope = provider.CreateScope();
+        await using var set = await scope.ServiceProvider.GetRequiredService<ISessionToolSource>().LoadAsync("user-1");
+        var price = set.Tools.First(t => t.Name.EndsWith("__get_price", StringComparison.Ordinal));
+        using var doc = JsonDocument.Parse("{\"symbol\":\"MSFT\"}");
+        var result = await price.InvokeAsync(doc.RootElement);
+        Assert.False(result.Ok);
+        Assert.Equal(2, server.GetPriceRequests);
+        Assert.Equal(0, server.GetPriceCalls);
     }
 
     [Fact]
@@ -871,6 +893,11 @@ public sealed class McpToolSourceTests
             }
             return Task.FromResult(true);
         }
+
+        public Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint version, string status, string? errorCode, CancellationToken cancellationToken = default) =>
+            Credentials.TryGetValue(serverId, out var credential) && credential.Version == version
+                ? SetStatusAsync(ownerId, serverId, status, errorCode, cancellationToken)
+                : Task.FromResult(false);
 
         public Task<bool> RemoveAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default)
             => Task.FromResult(true);

@@ -36,6 +36,8 @@ export const errorMessages: Record<ErrorCode, string> = {
   'session.slots_busy': 'No presenter slot is available right now.',
   'session.ticket_invalid': 'The presenter session ticket is invalid.',
   'tools_auth': 'Tool server authentication failed.',
+  'tools_credential_key_changed': 'The tool credential key changed. Reconnect this server.',
+  'tools_credential_unreadable': 'The tool credential cannot be read. Reconnect this server.',
   'tools_credentials_unavailable': 'Tool credential encryption is unavailable.',
   'tools_header_invalid': 'The header name or value is invalid.',
   'tools_name_invalid': 'The server name is invalid.',

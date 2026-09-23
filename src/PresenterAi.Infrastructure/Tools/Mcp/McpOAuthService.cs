@@ -58,6 +58,10 @@ public sealed class McpOAuthService(
             if (response.IsSuccessStatusCode) return null;
             throw new McpOAuthException("tools_unreachable");
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new McpOAuthException("tools_unreachable");
+        }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             throw Safe(exception);
@@ -74,6 +78,19 @@ public sealed class McpOAuthService(
             var repo = scope.ServiceProvider.GetRequiredService<IToolConnectionRepository>();
             var server = await repo.GetAsync(ownerId, serverId, cancellationToken) ?? throw new McpOAuthException("tools_server_not_found");
             var resource = OutboundUrlValidator.Validate(server.Url, policy).AbsoluteUri;
+            if (string.IsNullOrWhiteSpace(clientId) && clientSecret is null && server.AuthKind == "oauth" && server.Status == "needs_reconnect")
+            {
+                var stored = await repo.GetCredentialAsync(ownerId, serverId, cancellationToken);
+                if (stored is not null)
+                {
+                    var previous = Decode(stored, ownerId, serverId);
+                    if (previous.Registration == "pre-registered")
+                    {
+                        clientId = previous.ClientId;
+                        clientSecret = previous.ClientSecret;
+                    }
+                }
+            }
             using var http = clients.CreateClient("mcp-oauth");
             JsonElement protectedResource = default;
             var metadataUrl = ChallengeValue(challenge, "resource_metadata");
@@ -181,7 +198,21 @@ public sealed class McpOAuthService(
             var encrypted = protector.Protect(ownerId, saved.ServerId, JsonSerializer.Serialize(credential));
             if (!await repo.SaveCredentialAsync(ownerId, saved.ServerId, encrypted.Ciphertext, encrypted.KeyId,
                 credential.ExpiresAt, cancellationToken: cancellationToken)) throw new McpOAuthException("tools_oauth_failed");
-            await repo.SetStatusAsync(ownerId, saved.ServerId, "connected", null, "oauth", cancellationToken);
+            var server = (await repo.GetAsync(ownerId, saved.ServerId, cancellationToken))! with { AuthKind = "oauth" };
+            var stored = await repo.GetCredentialAsync(ownerId, saved.ServerId, cancellationToken);
+            try
+            {
+                var connector = scope.ServiceProvider.GetRequiredService<McpConnector>();
+                await using var connection = await connector.ConnectAsync(ownerId, server, stored, cancellationToken: cancellationToken);
+                await connection.Client.ListToolsAsync(cancellationToken: cancellationToken);
+                await repo.SetStatusAsync(ownerId, saved.ServerId, "connected", null, "oauth", cancellationToken);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                var failureCode = exception is McpConnectorException mcp ? mcp.Code : "auth";
+                await repo.SetStatusAsync(ownerId, saved.ServerId, "needs_reconnect", failureCode, "oauth", cancellationToken);
+                throw new McpOAuthException("tools_oauth_failed");
+            }
             return saved.ServerId;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -235,7 +266,12 @@ public sealed class McpOAuthService(
                 {
                     var winner = await FreshAsync(ownerId, serverId, original.Version, cancellationToken);
                     if (winner is not null) return winner;
-                    await repo.SetStatusAsync(ownerId, serverId, "needs_reconnect", "oauth_invalid_grant", cancellationToken);
+                    if (!await repo.SetStatusIfCredentialVersionAsync(ownerId, serverId, original.Version,
+                        "needs_reconnect", "oauth_invalid_grant", cancellationToken))
+                    {
+                        winner = await FreshAsync(ownerId, serverId, original.Version, cancellationToken);
+                        if (winner is not null) return winner;
+                    }
                     throw Safe(exception);
                 }
                 var replacement = await FreshAsync(ownerId, serverId, original.Version, cancellationToken);

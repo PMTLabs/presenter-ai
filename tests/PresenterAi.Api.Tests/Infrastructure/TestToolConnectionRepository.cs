@@ -110,6 +110,11 @@ public sealed class TestToolConnectionRepository : IToolConnectionRepository
         return Task.FromResult(true);
     }
 
+    public Task<bool> SetStatusIfCredentialVersionAsync(string ownerId, Guid serverId, uint version, string status, string? errorCode, CancellationToken cancellationToken = default) =>
+        _credentials.TryGetValue(serverId, out var credential) && credential.Version == version
+            ? SetStatusAsync(ownerId, serverId, status, errorCode, cancellationToken)
+            : Task.FromResult(false);
+
     public Task<bool> RemoveAsync(string ownerId, Guid serverId, CancellationToken cancellationToken = default)
     {
         if (!_connections.TryGetValue(serverId, out var conn) || conn.OwnerId != ownerId)

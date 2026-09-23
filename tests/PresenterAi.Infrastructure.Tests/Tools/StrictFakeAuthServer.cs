@@ -33,6 +33,9 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
     public int SecondRefreshDelayMs { get; set; }
     public bool RejectRefresh { get; set; }
     public bool RejectCode { get; set; }
+    public bool RejectMcpToken { get; set; }
+    public int ExpiresIn { get; set; } = 3600;
+    public int ToolsListCount;
     public string? ErrorDescription { get; set; }
     public string? RegistrationSecret { get; set; }
     public string? AuthorizationCode { get; set; }
@@ -90,12 +93,32 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
 
     private void Map()
     {
-        _app.MapPost("/mcp", (HttpContext ctx) =>
+        _app.MapPost("/mcp", async (HttpContext ctx) =>
         {
-            Challenges.Enqueue(ChallengeHeader);
-            ctx.Response.Headers.WWWAuthenticate = ChallengeHeader;
-            return Results.Unauthorized();
+            if (RejectMcpToken || !ctx.Request.Headers.Authorization.ToString().StartsWith($"Bearer {AccessToken ?? "access-"}", StringComparison.Ordinal))
+            {
+                Challenges.Enqueue(ChallengeHeader);
+                ctx.Response.Headers.WWWAuthenticate = ChallengeHeader;
+                return Results.Unauthorized();
+            }
+            using var body = await System.Text.Json.JsonDocument.ParseAsync(ctx.Request.Body);
+            var method = body.RootElement.GetProperty("method").GetString();
+            if (method == "tools/list") Interlocked.Increment(ref ToolsListCount);
+            var id = body.RootElement.TryGetProperty("id", out var requestId) ? requestId.Clone() : default;
+            if (id.ValueKind == System.Text.Json.JsonValueKind.Undefined) return Results.Accepted();
+            object result = method switch
+            {
+                "discover" => new { supportedVersions = new[] { "2025-06-18", "2026-07-28" }, capabilities = new { tools = new { } } },
+                "initialize" => new { protocolVersion = "2025-06-18", supportedVersions = new[] { "2025-06-18", "2026-07-28" }, capabilities = new { tools = new { } },
+                    serverInfo = new { name = "fake", version = "1" } },
+                "tools/list" => new { tools = Array.Empty<object>() },
+                _ => new { supportedVersions = new[] { "2025-06-18", "2026-07-28" }, capabilities = new { tools = new { } } }
+            };
+            return Results.Json(new { jsonrpc = "2.0", id, result });
         });
+        _app.MapGet("/guard-ok", () => Results.Text("ok"));
+        _app.MapGet("/guard-redirect", () => Results.Redirect("/guard-ok", permanent: false));
+        _app.MapGet("/guard-oversize", () => Results.Text(new string('x', 1024 * 1024 + 1)));
         _app.MapGet("/.well-known/oauth-protected-resource/mcp", (HttpContext ctx) => Protected(ctx, PathMetadata));
         _app.MapGet("/.well-known/oauth-protected-resource", (HttpContext ctx) => Protected(ctx, RootMetadata));
         _app.MapGet("/.well-known/oauth-authorization-server", (HttpContext ctx) => AuthMetadata(ctx, !OidcOnly));
@@ -201,7 +224,7 @@ public sealed class StrictFakeAuthServer : IAsyncDisposable
             var refresh = RefreshToken ?? "refresh-" + serial;
             _refresh[refresh] = true;
             return Results.Json(new { access_token = AccessToken ?? "access-" + serial, refresh_token = refresh,
-                token_type = "Bearer", expires_in = 1, scope = "read write" });
+                token_type = "Bearer", expires_in = ExpiresIn, scope = "read write" });
         });
     }
 

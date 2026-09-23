@@ -27,6 +27,8 @@ public sealed class TestMcpServer : IAsyncDisposable
     public HashSet<string> ValidTokens { get; } = new(StringComparer.Ordinal);
 
     public int GetPriceCalls;
+    public int GetPriceRequests;
+    public int GetPrice404Remaining;
     public int CreateNoteCalls;
     public int SlowCalls;
     public int FailCalls;
@@ -182,6 +184,13 @@ public sealed class TestMcpServer : IAsyncDisposable
                     }
                     if (body.Contains("\"get_price\""))
                     {
+                        Interlocked.Increment(ref server.GetPriceRequests);
+                        if (server.GetPrice404Remaining > 0)
+                        {
+                            server.GetPrice404Remaining--;
+                            context.Response.StatusCode = StatusCodes.Status404NotFound;
+                            return;
+                        }
                         if (server.FailGetPriceWith401Once)
                         {
                             server.FailGetPriceWith401Once = false;

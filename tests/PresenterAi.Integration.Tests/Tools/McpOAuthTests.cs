@@ -119,6 +119,7 @@ public sealed class McpOAuthTests(RedisFixture redis, PostgresFixture postgres)
         var (credential, state) = await harness.ConnectAsync(clientId: clientId, clientSecret: secret);
         Assert.Equal(registration, credential.Registration);
         Assert.Equal(fake.Resource, credential.Resource);
+        Assert.Equal(1, fake.ToolsListCount);
         Assert.Single(fake.Challenges);
         Assert.Single(fake.CodeChallenges);
         Assert.Single(fake.TokenGrants);
@@ -132,6 +133,36 @@ public sealed class McpOAuthTests(RedisFixture redis, PostgresFixture postgres)
             harness.Owner, harness.ServerId, stored).Payload!));
         Assert.Equal(registration == "dynamic" ? 1 : 0, fake.RegistrationCount);
         Assert.Equal(registration == "metadata document" ? 1 : 0, fake.MetadataFetchCount);
+    }
+
+    [Fact]
+    public async Task Reconnect_reuses_protected_pre_registered_client_when_registration_is_unavailable()
+    {
+        await using var fake = await StrictFakeAuthServer.StartAsync();
+        await using var harness = await Harness.CreateAsync(fake, postgres, redis);
+        await harness.ConnectAsync("registered-client", "registered-secret");
+        await harness.Repository.SetStatusAsync(harness.Owner, harness.ServerId, "needs_reconnect", "auth");
+        fake.ClientMetadata = false;
+        fake.Registration = false;
+        var (credential, _) = await harness.ConnectAsync();
+        Assert.Equal("pre-registered", credential.Registration);
+        Assert.Equal("registered-client", credential.ClientId);
+        Assert.Equal("registered-secret", credential.ClientSecret);
+        Assert.Equal(0, fake.RegistrationCount);
+    }
+
+    [Fact]
+    public async Task Completion_refuses_a_token_rejected_by_mcp_without_returning_remote_details()
+    {
+        await using var fake = await StrictFakeAuthServer.StartAsync();
+        await using var harness = await Harness.CreateAsync(fake, postgres, redis);
+        var (_, code, state, iss) = await harness.BeginAsync();
+        fake.RejectMcpToken = true;
+        var error = await Assert.ThrowsAsync<McpOAuthException>(() =>
+            harness.Service.CompleteAsync(harness.Owner, code, state, iss));
+        Assert.Equal("tools_oauth_failed", error.Code);
+        Assert.Equal("needs_reconnect", (await harness.Repository.GetAsync(harness.Owner, harness.ServerId))!.Status);
+        Assert.Equal(0, fake.ToolsListCount);
     }
 
     [Fact]
@@ -275,6 +306,22 @@ public sealed class McpOAuthTests(RedisFixture redis, PostgresFixture postgres)
             second.RefreshAsync(harness.Owner, harness.ServerId));
         Assert.Equal(1, fake.RefreshCount);
         Assert.Equal(results[0].RefreshToken, results[1].RefreshToken);
+        Assert.Equal("connected", (await harness.Repository.GetAsync(harness.Owner, harness.ServerId))!.Status);
+    }
+
+    [Fact]
+    public async Task Failure_status_compare_and_swap_does_not_overwrite_a_new_credential()
+    {
+        await using var fake = await StrictFakeAuthServer.StartAsync();
+        await using var harness = await Harness.CreateAsync(fake, postgres, redis);
+        await harness.ConnectAsync();
+        var stale = (await harness.Repository.GetCredentialAsync(harness.Owner, harness.ServerId))!;
+        var winner = harness.Protector.Protect(harness.Owner, harness.ServerId,
+            JsonSerializer.Serialize(harness.ReadStored() with { AccessToken = "winner-token" }));
+        Assert.True(await harness.Repository.SaveCredentialAsync(harness.Owner, harness.ServerId,
+            winner.Ciphertext, winner.KeyId, expectedVersion: stale.Version));
+        Assert.False(await harness.Repository.SetStatusIfCredentialVersionAsync(harness.Owner, harness.ServerId,
+            stale.Version, "needs_reconnect", "oauth_invalid_grant"));
         Assert.Equal("connected", (await harness.Repository.GetAsync(harness.Owner, harness.ServerId))!.Status);
     }
 

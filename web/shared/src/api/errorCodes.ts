@@ -36,6 +36,8 @@ export type ErrorCode =
   | "session.slots_busy"
   | "session.ticket_invalid"
   | "tools_auth"
+  | "tools_credential_key_changed"
+  | "tools_credential_unreadable"
   | "tools_credentials_unavailable"
   | "tools_header_invalid"
   | "tools_name_invalid"
@@ -94,6 +96,8 @@ export const ERROR_CODES = {
   "session.slots_busy": { status: 429, title: "Session slots busy" },
   "session.ticket_invalid": { status: 401, title: "Invalid session ticket" },
   "tools_auth": { status: 401, title: "Tool server authentication failed" },
+  "tools_credential_key_changed": { status: 401, title: "Tool credential key changed" },
+  "tools_credential_unreadable": { status: 401, title: "Tool credential unreadable" },
   "tools_credentials_unavailable": { status: 503, title: "Tool credentials unavailable" },
   "tools_header_invalid": { status: 400, title: "Tool header is invalid" },
   "tools_name_invalid": { status: 400, title: "Tool server name is invalid" },

@@ -69,6 +69,8 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
             ["tools_oauth_state_invalid"] = 400,
             ["tools_oauth_failed"] = 400,
             ["tools_auth"] = 401,
+            ["tools_credential_key_changed"] = 401,
+            ["tools_credential_unreadable"] = 401,
             ["tools_response_too_large"] = 502,
             ["tools_oauth_invalid_grant"] = 400,
         };
