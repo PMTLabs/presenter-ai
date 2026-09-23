@@ -502,18 +502,24 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
             case "error":
                 var error = GetProperty(message, "error") ?? message;
                 _logger.LogWarning("Upstream error: {Error}", error.GetRawText());
-                UpstreamError?.Invoke(error);
+                LiveStartupException? startup = null;
                 if (State == LiveSessionState.Connecting)
                 {
                     var code = GetString(error, "code") ?? "connect";
                     var upstreamMessage = GetString(error, "message") ?? "unknown";
-                    var startup = new LiveStartupException(code, error, $"GPT-Live startup error: {upstreamMessage}");
+                    startup = new LiveStartupException(code, error, $"GPT-Live startup error: {upstreamMessage}");
                     if (!_useClientDelegation && !_delegationRetryUsed && IsDelegationStartupError(error))
                     {
+                        // The client-mode retry recovers this and reports it as a warning, so it is not raised as an
+                        // upstream error.
                         _delegationRejected.TrySetResult(startup);
                         break;
                     }
+                }
 
+                UpstreamError?.Invoke(error);
+                if (startup is not null)
+                {
                     // Finish (with the startup failure) before ConnectAsync is woken: its catch block finishes
                     // with "connection_lost" when nothing has finished yet, and it may resume on another thread.
                     _socket.Abort();

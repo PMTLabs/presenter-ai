@@ -728,14 +728,21 @@ public sealed class PresenterTests
     {
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
-        harness.Session().Speak(startMs: 0, endMs: 100);
         harness.Session().Hear("question", startMs: 101, endMs: 200);
         await harness.Flush();
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(3000));
+        // Delivered after the question opened the hold, but it was spoken before the question ended.
+        harness.Session().Speak(startMs: 0, endMs: 100);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 1));
         await harness.Flush();
 
         Assert.Equal([0], harness.Slides);
         Assert.DoesNotContain(harness.Logs, log => log.Message.StartsWith("question: answered", StringComparison.Ordinal));
+        Assert.DoesNotContain(harness.Session().Sent, IsResume);
+
+        harness.Session().Speak(startMs: 201, endMs: 300);
+        await harness.Flush();
+        Assert.Contains(harness.Logs, log => log.Message.StartsWith("question: answered", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -882,6 +889,48 @@ public sealed class PresenterTests
 
         Assert.Contains(new PresenterLog("warn", "question: backend answer failed (response.failed)"), harness.Logs);
         Assert.Equal([0, 1], harness.Slides);
+    }
+
+    [Fact]
+    public async Task Client_delegation_while_paused_does_not_tell_the_model_to_answer()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        await harness.Presenter.PauseAsync();
+        harness.Session().RaiseDelegation("client", "delegation-12");
+        await harness.Flush();
+
+        Assert.Contains(new PresenterLog("info", "question: delegated (client)"), harness.Logs);
+        Assert.DoesNotContain(harness.Session().Sent, item => item.EventId == "question-delegation-12-answer-now");
+        Assert.DoesNotContain(new PresenterLog("info", "question: hold opened"), harness.Logs);
+    }
+
+    [Fact]
+    public async Task Top_level_backend_error_ends_the_pending_backend_answer()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        harness.Session().Speak();
+        await harness.Flush();
+        harness.Session().Hear("question");
+        harness.Session().RaiseDelegation("responses", "delegation-13");
+        await harness.Flush();
+
+        // Any other error leaves the backend pending, so the next speech is still filler.
+        harness.Session().RaiseUpstreamError("rate_limit_exceeded", "slow down");
+        harness.Session().Speak(startMs: 101, endMs: 200);
+        await harness.Flush();
+        Assert.DoesNotContain(harness.Logs, log => log.Message.StartsWith("question: answered", StringComparison.Ordinal));
+
+        harness.Session().RaiseUpstreamError("backend_error", "Responses backend execution failed");
+        await harness.Flush();
+        Assert.Contains(new PresenterLog("warn", "question: backend answer failed (backend_error)"), harness.Logs);
+        harness.Session().Speak(startMs: 201, endMs: 300);
+        await harness.Flush();
+        await harness.EndFollowUp();
+
+        Assert.Contains(harness.Logs, log => log.Message.StartsWith("question: answered", StringComparison.Ordinal));
+        Assert.Single(harness.Session().Sent, IsResume);
     }
 
     [Fact]

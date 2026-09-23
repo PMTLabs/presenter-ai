@@ -14,7 +14,8 @@ when something goes wrong. Design and decisions: plan 005 §4.5 (amendment A1); 
    *delegation model*, `gpt-5.6-luna` by default). The AI says at most "One moment." and speaks the backend's answer
    when it arrives.
 4. **Follow-up window.** After answering, the AI stays silent for the follow-up wait (5 s by default). A new question
-   in that window starts again at step 1.
+   in that window starts again at step 1. If a backend answer is still on its way when the next question comes, the
+   hold also waits for that answer, because GPT-Live speaks it anyway.
 5. **Resume.** When the window passes quietly, the presenter tells the AI to say a short bridge ("Back to the slide")
    and restart the sentence it was in when it was interrupted. Normal slide timing then takes over.
 
@@ -129,8 +130,8 @@ These appear in the Log panel of the Present page.
 | `question: hold opened` | Audience speech heard; the slide is held. |
 | `question: delegated (backend)` | GPT-Live sent the question to the delegation model. |
 | `question: backend answer ready` | The delegation model finished; its answer is being spoken. |
-| `question: backend answer failed (<type>)` (warn) | The backend call failed; the AI answers without it. |
-| `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material. |
+| `question: backend answer failed (<type>)` (warn) | The backend call failed (a failed `response.event`, or a top-level `backend_error`); the AI answers without it. |
+| `question: delegated (client)` | Deck-only mode; the AI was told to answer from the material (only while presenting; while paused nothing is sent). |
 | `question: answered after N ms` | First answer audio, N ms after the question. |
 | `question: no follow-up after N ms; resuming` | The follow-up window passed; the AI was told to resume. |
 | `question: released after 15 s without an answer` | Nothing answered; the talk carries on. |

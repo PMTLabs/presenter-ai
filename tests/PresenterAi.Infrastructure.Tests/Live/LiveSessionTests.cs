@@ -61,6 +61,8 @@ public sealed class LiveSessionTests
         await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
         var warnings = new List<string>();
         session.Warning += warnings.Add;
+        var errors = new List<string>();
+        session.UpstreamError += error => errors.Add(error.GetRawText());
 
         await session.ConnectAsync();
 
@@ -69,6 +71,7 @@ public sealed class LiveSessionTests
         starts[0]["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("responses");
         starts[1]["session"]!["delegation"]!["type"]!.GetValue<string>().Should().Be("client");
         warnings.Should().ContainSingle().Which.Should().Be("delegation: backend unavailable (delegation_unavailable); answering from the deck only");
+        errors.Should().BeEmpty("the recovered rejection is reported only as the warning");
     }
 
     [Fact]
@@ -98,11 +101,14 @@ public sealed class LiveSessionTests
         await using var server = await FakeLiveServer.StartAsync();
         server.DelegationStartRejections = 2;
         await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+        var errors = new List<string>();
+        session.UpstreamError += error => errors.Add(error.GetRawText());
 
         var action = async () => await session.ConnectAsync();
 
         await action.Should().ThrowAsync<LiveStartupException>();
         server.ReceivedSnapshot().Count(EventTypeIs("session.start")).Should().Be(2);
+        errors.Should().ContainSingle("only the unrecovered second rejection is an upstream error");
     }
 
     [Fact]

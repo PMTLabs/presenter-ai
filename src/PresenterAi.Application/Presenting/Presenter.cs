@@ -628,26 +628,30 @@ public sealed class Presenter : IPresenter
             : default;
         var target = JsonString(payload, "target");
         var id = JsonString(payload, "id");
-        if (_state == PresenterState.Presenting)
+        if (target is "client" or "responses")
         {
-            OpenOrExtendQuestionHold(null);
-            if (target == "responses")
-            {
-                _pendingBackendDelegation = id ?? string.Empty;
-            }
+            LogMessage("info", $"question: delegated ({(target == "client" ? "client" : "backend")})");
         }
 
-        if (target == "client")
+        // A delegation that arrives while paused, ending or closed must not make the model talk through that state.
+        // A late one after navigation still holds the new slide: GPT-Live speaks its answer regardless (there is no
+        // cancel), and the hold keeps the next part from talking over it.
+        if (_state != PresenterState.Presenting)
         {
-            LogMessage("info", "question: delegated (client)");
+            return;
+        }
+
+        OpenOrExtendQuestionHold(null);
+        if (target == "responses")
+        {
+            _pendingBackendDelegation = id ?? string.Empty;
+        }
+        else if (target == "client")
+        {
             _session?.AppendInstructions(
                 PromptBuilder.ClientDelegationAnswerNowInstruction(),
                 $"question-{id ?? "client"}-answer-now",
                 id);
-        }
-        else if (target == "responses")
-        {
-            LogMessage("info", "question: delegated (backend)");
         }
     }
 
@@ -660,14 +664,19 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        FinishBackendDelegation(response.Type);
+    }
+
+    private void FinishBackendDelegation(string type)
+    {
         _pendingBackendDelegation = null;
-        if (response.Type == "response.completed")
+        if (type == "response.completed")
         {
             LogMessage("info", "question: backend answer ready");
         }
         else
         {
-            LogMessage("warn", $"question: backend answer failed ({response.Type})");
+            LogMessage("warn", $"question: backend answer failed ({type})");
         }
 
         // Give the live model a fresh window to speak the injected answer.
@@ -686,6 +695,12 @@ public sealed class Presenter : IPresenter
         var message = JsonString(error.Raw, "message") ?? "unknown";
         LogMessage("error", $"upstream error{(clientEventId is null ? string.Empty : $" for {clientEventId}")}: {code ?? string.Empty} {message}".Trim());
         UpstreamError?.Invoke(new PresenterUpstreamError(message, code, clientEventId));
+
+        // A delegated backend can also fail with a top-level error that names no delegation; it ends the pending one.
+        if (code == "backend_error" && _pendingBackendDelegation is not null)
+        {
+            FinishBackendDelegation(code);
+        }
     }
 
     private void OnPartGap()

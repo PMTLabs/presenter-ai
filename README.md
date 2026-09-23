@@ -203,7 +203,7 @@ Things learned from the live service that the code relies on:
 | Start does nothing, log stops at "requesting microphone…" | Chrome is showing the mic permission prompt; the narration still plays, the mic joins when you allow it. |
 | `audio output did not start within 4000 ms` | The default output device could not be opened; pick another output device in Windows and reload. |
 | Slides advance mid-narration | Raise `advanceSilenceMs` (frontmatter or `.env`). |
-| Model goes quiet and nothing happens | After 15 s the app nudges it once; press → to re-inject the slide. |
+| Model goes quiet and nothing happens | The app nudges it after 15 s and again after 30 s; at 45 s it pauses the talk with a warning. Press Resume, → to re-inject the slide, or End. |
 | Deck not driven (`deck adapter: none matched`) | Deck is not same-origin or has no `show()`/`Reveal`/`section.slide`; set `driver:` explicitly or adapt the deck. |
 | Echo / the model answers itself | Use headphones or press M while it speaks. |
 | Rate limit on Azure (10 RPM) | Set `FALLBACK_OPENAI_KEY`; the app fails over automatically at session start. |

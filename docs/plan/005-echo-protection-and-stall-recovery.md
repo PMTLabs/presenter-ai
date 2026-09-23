@@ -95,6 +95,9 @@ server PCM ─► AudioPlayback worklet ─► MediaStreamAudioDestinationNode
   2. **Coupling estimate:** while the far end is active and the gate is closed, track `c`, the running low percentile
      of `near / far` over 2 s. It starts at 0.5 and is floored at 0.01. With headphones `c` falls quickly, so speech
      passes; on loudspeakers `c` settles at the room's echo level.
+     *As built (review round 1):* `c` is updated only after the far end has been above the floor for the whole 250 ms
+     tail. Before the delayed echo reaches the mic, and right after a pause in the far end, the mic is quiet against a
+     loud far level; learning from those frames drove `c` to its floor and let the echo that followed through.
   3. **Open:** when `near > max(0.01, 4 · c · far)` (12 dB above the estimated echo) for 2 consecutive frames (40 ms).
      *As built:* `far` is the loudest far-end level of the last 250 ms, not the current 20 ms, because the echo
      reaches the mic after playout; otherwise a loud syllable heard during a quiet one could open the gate.
@@ -153,6 +156,7 @@ reasoning effort, priority tier, low verbosity).
   happens only at start.
   *As built:* the rule also accepts a `code` or `message` that names delegation. After a rejection, the receive loop
   stops reading, so if the server closes the socket right after the error, the session doesn't finish before the retry.
+  A rejection that the retry recovers is reported only by that warn line, not as an upstream error.
 - **Deck first:** the live model already has the deck (`instructions` plus per-slide notes as `thinking`).
   `PromptBuilder`'s audience rules change to: answer immediately from the narration and background context when they
   cover it; otherwise delegate; never say that you checked or found something before a result arrives (at most "One
@@ -166,6 +170,8 @@ reasoning effort, priority tier, low verbosity).
   immediately appends a delegation-scoped instruction (`AppendInstructions(..., delegationId)`): "No lookup is
   available. Answer now in one to three sentences from the narration and background context, or say plainly that the
   material does not cover it; then continue the current slide."
+  *As built:* only while presenting; a delegation that arrives while paused or ending is logged and nothing is
+  appended, so it cannot make the model talk through the pause.
 - **Question hold** (`Presenter`, single event loop):
   - a non-blank `user` transcript delta while presenting or wrapping up opens or extends the hold: it clears the
     silence/part-gap timer and the wrap-up fallback, resets `answerVoiced`, and (re)arms a 15 s question timer; the
@@ -175,7 +181,11 @@ reasoning effort, priority tier, low verbosity).
   - `session.delegation.created` resets `answerVoiced` (so "One moment." is not the answer) and re-arms the 15 s timer;
     *as built:* this happens only while presenting. For a `responses` delegation, no speech counts as the answer until
     that delegation's terminal `response.event` arrives (info `question: backend answer ready`, or warn `question:
-    backend answer failed (<type>)`), and that event re-arms the 15 s timer. Otherwise "One moment." spoken after the
+    backend answer failed (<type>)`), and that event re-arms the 15 s timer. A top-level `error` with code
+    `backend_error` (the other documented failure envelope, which names no delegation) ends the pending delegation the
+    same way. A second question while a backend answer is pending does not drop it: GPT-Live speaks that answer
+    anyway (there is no cancel), so the hold waits for it, still bounded by the 15 s timer. A delegation that arrives
+    after navigation holds the new slide for the same reason. Otherwise "One moment." spoken after the
     delegation event, followed by a backend that takes longer than the silence window, would still advance the slide;
   - a silence or part-gap expiry while the hold is open is ignored until `answerVoiced`; after that it releases the
     hold and does its normal action (next part, next slide, wrap-up close);

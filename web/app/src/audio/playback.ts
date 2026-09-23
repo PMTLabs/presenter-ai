@@ -7,6 +7,7 @@ export class AudioPlayback {
   private node: AudioWorkletNode | null = null;
   private output: AudioNode | null = null;
   private reference: { close: () => void } | null = null;
+  private fellBack = false;
   bufferedMs = 0;
   constructor(
     private options: {
@@ -15,7 +16,9 @@ export class AudioPlayback {
     },
   ) {}
   async start(output: AudioNode = this.options.context.destination) {
-    this.output = output;
+    // The echo reference can fall back before start is called (its 2 s timer runs while the context resumes);
+    // the fallback wins over the loopback destination the caller captured earlier.
+    this.output = this.fellBack ? this.options.context.destination : output;
     await this.options.context.audioWorklet.addModule(playbackProcessorUrl);
     this.node = new AudioWorkletNode(
       this.options.context,
@@ -34,6 +37,7 @@ export class AudioPlayback {
     this.reference = reference;
   }
   useDestination() {
+    this.fellBack = true;
     this.output = this.options.context.destination;
     this.connectOutput();
   }

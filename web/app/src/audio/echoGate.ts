@@ -62,7 +62,12 @@ export class EchoGate {
     let open = this.hangover > 0;
 
     if (!open) {
-      this.updateCoupling(near, activeFar);
+      // Learn only once the far end has played for the whole tail window. Before the delayed echo reaches the mic,
+      // and just after a pause in the far end, the mic is quiet against a loud far level, which would drive the
+      // coupling to its floor and let the echo that follows through.
+      const farSteady =
+        this.farHistory.length === farTailFrames && Math.min(...this.farHistory) >= FAR_FLOOR_RMS;
+      if (farSteady) this.updateCoupling(near, activeFar);
       if (aboveThreshold) this.openingFrames++;
       else this.openingFrames = 0;
       if (this.openingFrames >= OPEN_CONSECUTIVE_FRAMES) {
