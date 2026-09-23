@@ -10,6 +10,8 @@ export type BridgeEventMap = {
   open: [];
   close: [];
   state: [Snapshot];
+  /** A server state frame arrived, so the ticket was accepted; the synthetic idle state on close does not count. */
+  accepted: [];
   slide: [number];
   transcript: [BridgeMessage];
   usage: [BridgeMessage];
@@ -187,6 +189,7 @@ export class BridgeClient {
         this.retry = 0;
         this.snapshot = message as unknown as Snapshot;
         this.emit("state", this.snapshot);
+        this.emit("accepted");
         break;
       case "slide":
         this.emit("slide", message.index as number);

@@ -1,10 +1,10 @@
 import { StrictMode } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAuthSession, setAuthSession, useAuthStore } from "@presenter/shared";
 
-const { bridgeConnect, bridgeDisconnect, captureStop, close, deckLogs, dispose, get, load, playbackStop, post, startAudio } = vi.hoisted(() => ({
+const { bridgeConnect, bridgeDisconnect, bridgeHandlers, captureStop, close, deckLogs, dispose, get, load, playbackStop, post, startAudio } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   load: vi.fn().mockResolvedValue({ adapter: "sections", count: 1 }),
@@ -16,6 +16,7 @@ const { bridgeConnect, bridgeDisconnect, captureStop, close, deckLogs, dispose, 
   startAudio: vi.fn(),
   bridgeConnect: vi.fn(),
   bridgeDisconnect: vi.fn(),
+  bridgeHandlers: new Map<string, ((...args: unknown[]) => void)[]>(),
 }));
 vi.mock("@presenter/shared/api", () => ({ default: { GET: get, POST: post } }));
 vi.mock("../deck/deckDriver", () => ({
@@ -37,7 +38,9 @@ vi.mock("../ws/bridgeClient", () => ({
       _webSocket: undefined,
       private readonly ticketProvider: () => string | Promise<string>,
     ) {}
-    on() {}
+    on(event: string, handler: (...args: unknown[]) => void) {
+      bridgeHandlers.set(event, [...(bridgeHandlers.get(event) ?? []), handler]);
+    }
     connect() {
       bridgeConnect();
       void this.ticketProvider();
@@ -53,6 +56,10 @@ const user = { id: "usr_test", email: "test@example.invalid", displayName: null,
 
 function signIn() {
   useAuthStore.setState({ ready: true, user });
+}
+
+function emitBridge(event: string, ...args: unknown[]) {
+  act(() => bridgeHandlers.get(event)?.forEach((handler) => handler(...args)));
 }
 
 function renderPresent() {
@@ -76,6 +83,7 @@ describe("Present", () => {
     startAudio.mockClear();
     bridgeConnect.mockClear();
     bridgeDisconnect.mockClear();
+    bridgeHandlers.clear();
     clearAuthSession();
     useAuthStore.setState({ ready: false });
     post.mockResolvedValue({ data: { ticket: "ticket" } });
@@ -200,5 +208,27 @@ describe("Present", () => {
     expect(dispose).toHaveBeenCalled();
     expect(await screen.findByText("Please sign in to continue.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+  });
+
+  it("keeps the busy notice through the close until a server state frame is accepted", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await vi.waitFor(() => expect(bridgeConnect).toHaveBeenCalled());
+    const notice = "The presenter is in use in another tab.";
+
+    emitBridge("busy", { type: "error", code: "busy" });
+    // A busy close makes the client report a synthetic idle state; that must not clear the notice.
+    emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 0, muted: false });
+    emitBridge("close");
+    expect(screen.getByText(notice)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+
+    emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 0, muted: false });
+    emitBridge("accepted");
+    expect(screen.queryByText(notice)).toBeNull();
+    expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false);
   });
 });

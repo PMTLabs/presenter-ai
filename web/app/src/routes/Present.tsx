@@ -110,10 +110,8 @@ export function Present() {
       return data.ticket;
     });
     client.current = bridge;
-    bridge.on("state", (serverSnapshot) => {
-      applySnapshot(serverSnapshot);
-      setBusyMessage(null);
-    });
+    bridge.on("state", applySnapshot);
+    bridge.on("accepted", () => setBusyMessage(null));
     bridge.on("slide", (index) => {
       driver.current?.goto(index);
       message({ type: "slide", index });
@@ -348,7 +346,7 @@ export function Present() {
               <button
                 className={startButtonClassName}
                 onClick={() => void begin()}
-                disabled={!ready || !userId || !presentation || snapshot.state !== "idle"}
+                disabled={!ready || !userId || !presentation || busyMessage !== null || snapshot.state !== "idle"}
               >
                 Start
               </button>

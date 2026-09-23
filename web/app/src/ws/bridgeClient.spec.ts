@@ -126,6 +126,26 @@ describe("BridgeClient", () => {
     c.disconnect();
   });
 
+  it("emits accepted for a server state frame but not for the idle state reported on close", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    const events: string[] = [];
+    c.on("state", (snapshot) => events.push(`state:${snapshot.state}`));
+    c.on("accepted", () => events.push("accepted"));
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.fire("message", { data: JSON.stringify({ type: "error", code: "busy" }) });
+    ws.fire("close", { code: 1013 });
+    expect(events).toEqual(["state:idle"]);
+
+    c.disconnect();
+    c.connect();
+    FakeSocket.instances.at(-1)!.fire("message", {
+      data: JSON.stringify({ type: "state", state: "presenting", slideIndex: 0, slideCount: 1, muted: false }),
+    });
+    expect(events).toEqual(["state:idle", "state:presenting", "accepted"]);
+    c.disconnect();
+  });
+
   it("snapshot → idle after reconnect", () => {
     const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
