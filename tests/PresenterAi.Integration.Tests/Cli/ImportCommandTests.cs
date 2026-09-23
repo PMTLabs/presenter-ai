@@ -159,6 +159,59 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task Invalid_max_minutes_fails_that_file_with_a_clear_error()
+    {
+        var owner = await SeedUserAsync();
+        var root = Path.Combine(Path.GetTempPath(), "presenter-ai-invalid-max-minutes", Guid.NewGuid().ToString("N"));
+        var presentations = Path.Combine(root, "presentations");
+        Directory.CreateDirectory(presentations);
+        await File.WriteAllTextAsync(Path.Combine(presentations, "invalid.md"),
+            "---\ndeck: decks/sample/index.html\nmaxMinutes: 12abc\n---\n## Slide 1\nHello.");
+        try
+        {
+            var output = new StringWriter();
+            var exit = await PresenterAi.Cli.Program.RunAsync(
+                ["import", Path.Combine(presentations, "invalid.md"), "--owner", owner.Email, "--content-root", root],
+                Configuration(), output, new StringWriter(), CancellationToken.None);
+
+            exit.Should().Be(1);
+            output.ToString().Should().Contain("maxMinutes must be a positive whole number of minutes");
+            await using var context = CreateContext();
+            (await context.Presentations.CountAsync(presentation => presentation.OwnerId == owner.Id)).Should().Be(0);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Imported_frontmatter_contains_max_minutes()
+    {
+        var owner = await SeedUserAsync();
+        var root = Path.Combine(Path.GetTempPath(), "presenter-ai-max-minutes", Guid.NewGuid().ToString("N"));
+        var presentations = Path.Combine(root, "presentations");
+        Directory.CreateDirectory(presentations);
+        await File.WriteAllTextAsync(Path.Combine(presentations, "limited.md"),
+            "---\ndeck: decks/sample/index.html\nmaxMinutes: 35\n---\n## Slide 1\nHello.");
+        try
+        {
+            var exit = await PresenterAi.Cli.Program.RunAsync(
+                ["import", Path.Combine(presentations, "limited.md"), "--owner", owner.Email, "--content-root", root],
+                Configuration(), new StringWriter(), new StringWriter(), CancellationToken.None);
+
+            exit.Should().Be(0);
+            await using var context = CreateContext();
+            var row = await context.Presentations.SingleAsync(presentation => presentation.OwnerId == owner.Id);
+            row.Frontmatter!.RootElement.GetProperty("maxMinutes").GetInt32().Should().Be(35);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task A_bad_script_does_not_roll_back_a_valid_script()
     {
         var owner = await SeedUserAsync();

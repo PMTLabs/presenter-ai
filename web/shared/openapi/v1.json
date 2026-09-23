@@ -1517,7 +1517,8 @@
           "voice",
           "context",
           "advanceSilenceMs",
-          "chunkChars"
+          "chunkChars",
+          "maxMinutes"
         ],
         "type": "object",
         "properties": {
@@ -1557,6 +1558,15 @@
           "chunkChars": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "maxMinutes": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "null",
               "integer",
               "string"
             ],
