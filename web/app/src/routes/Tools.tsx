@@ -72,6 +72,14 @@ export function Tools() {
       setError(problemMessage(result.error, "Unable to update server."));
     } else {
       await load();
+      if (body.alwaysAsk !== undefined && expanded[id]) {
+        const toolsResult = await apiClient.GET("/v1/tools/servers/{id}/tools", {
+          params: { path: { id } },
+        });
+        if (toolsResult.data) {
+          setTools((old) => ({ ...old, [id]: toolsResult.data ?? [] }));
+        }
+      }
     }
   };
 

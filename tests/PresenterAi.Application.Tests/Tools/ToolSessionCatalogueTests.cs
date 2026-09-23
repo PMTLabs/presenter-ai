@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Presenting.Tools;
 using PresenterAi.Application.Tools;
 using Xunit;
 
@@ -8,6 +10,23 @@ namespace PresenterAi.Application.Tests.Tools;
 
 public sealed class ToolSessionCatalogueTests
 {
+    [Fact]
+    public async Task Default_presenter_registry_plus_session_tools_fits_discovery_inline_budget()
+    {
+        await using var presenter = new Presenter(
+            (_, _) => null,
+            (_, _, _) => throw new InvalidOperationException("Not used by this test."));
+        var sessionTool = CreateTool("session_tool");
+
+        var catalogue = ToolSessionCatalogue.Build(presenter.ToolRegistry, [sessionTool], maxInlineTools: 0);
+
+        Assert.Contains(catalogue.InlineTools, tool => tool.Name == "find_tools");
+        Assert.Contains(catalogue.InlineTools, tool => tool.Name == "call_tool");
+        var payload = new JsonArray(catalogue.GetInlineToolDefinitions()
+            .Select(definition => (JsonNode)definition.DeepClone()).ToArray()).ToJsonString();
+        Assert.True(Encoding.UTF8.GetByteCount(payload) <= ToolSessionCatalogue.MaxInlineToolsPayloadBytes);
+    }
+
     [Fact]
     public void Threshold_16_with_16_tools_inlines_all_tools_without_meta_tools()
     {

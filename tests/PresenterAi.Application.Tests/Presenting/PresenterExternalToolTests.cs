@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Time.Testing;
+using System.Collections.Concurrent;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Scripts;
 using PresenterAi.Application.Tools;
@@ -516,14 +517,14 @@ public sealed class PresenterExternalToolTests
         public Presenter Presenter;
         public FakeSession? Session;
         public string? Owner;
-        public List<string> Logs = [];
+        public ConcurrentQueue<string> Logs = new();
         public Harness(Func<string, string, CancellationToken, Task<LoadedPresentation>> load,
             Func<string, CancellationToken, Task<SessionToolSet>> source, TimeSpan? budget = null, int maxInline = 16, bool client = false)
         {
             Presenter = new Presenter((request, _) => Session = new FakeSession { Request = request, DelegationMode = client ? "client" : "responses" },
                 load, new PresenterSettings(3000, "marin", 5000, maxInline), Clock, null, _ => true,
                 (owner, ct) => { Owner = owner; return source(owner, ct); }, budget);
-            Presenter.Log += l => Logs.Add(l.Message);
+            Presenter.Log += l => Logs.Enqueue(l.Message);
         }
         public static LoadedPresentation Presentation() => new("p", new PresentationMeta("p", "Test", "deck", "showFn", null, null, 3000, 300), Slides, null);
         public Task<PresenterStartResult> Start() => Presenter.StartAsync("p", null, "owner");

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Time.Testing;
@@ -212,8 +213,8 @@ public sealed class PresenterToolTests
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         session.Hear("question", 100, 150);
         session.RaiseDelegation("responses", "d");
         await harness.Flush();
@@ -437,8 +438,8 @@ public sealed class PresenterToolTests
         var registry = new ToolRegistry();
         registry.Register(new LateReadingTool(gate.Task));
         await using var harness = Create(toolRegistry: registry);
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
         session.RaiseToolCall("d", "late", "late_reader", "{\"value\":\"intact\"}");
@@ -461,8 +462,8 @@ public sealed class PresenterToolTests
         var registry = new ToolRegistry();
         registry.Register(new ImmediateAsyncFaultTool());
         await using var harness = Create(toolRegistry: registry);
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
         session.RaiseToolCall("d", "failed", "async_fault", "{}");
@@ -739,8 +740,8 @@ public sealed class PresenterToolTests
         await using var harness = Create(toolRegistry: registry);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         session.Hear("question", 100, 150);
         session.RaiseDelegation("responses", "slow_backend");
         await harness.Flush();

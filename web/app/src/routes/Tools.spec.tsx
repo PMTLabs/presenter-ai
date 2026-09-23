@@ -145,6 +145,42 @@ describe("Tools", () => {
     expect(always.disabled).toBe(true);
   });
 
+  it("refetches expanded tools after server-level always ask is disabled", async () => {
+    let server = { ...alpha, alwaysAsk: true };
+    setup([server], toolList);
+    api.GET.mockImplementation((path: string) =>
+      Promise.resolve(
+        path === "/v1/tools/servers"
+          ? { data: [server] }
+          : path === "/v1/tools/settings"
+            ? { data: { webSearchEnabled: false } }
+            : { data: [{ ...toolList[0], alwaysAsk: false }] },
+      ),
+    );
+    api.PATCH.mockImplementation((_path: string, request: { body: { alwaysAsk: boolean } }) => {
+      server = { ...server, alwaysAsk: request.body.alwaysAsk };
+      return Promise.resolve({ data: server });
+    });
+    await screen.findByText("Alpha");
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }));
+    const always = await screen.findByRole("checkbox", {
+      name: "Always ask for lookup",
+    }) as HTMLInputElement;
+    expect(always.checked).toBe(true);
+    expect(always.disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Always ask for this server" }));
+
+    await waitFor(() => expect(screen.getByText("read-only")).toBeTruthy());
+    expect(always.checked).toBe(false);
+    expect(always.disabled).toBe(false);
+    expect(api.GET.mock.calls.filter(([path]) => path === "/v1/tools/servers/{id}/tools"))
+      .toHaveLength(2);
+    expect(api.GET).toHaveBeenCalledWith("/v1/tools/servers/{id}/tools", {
+      params: { path: { id: "a" } },
+    });
+  });
+
   it("updates server-level always ask and web search with billing caption", async () => {
     setup();
     await screen.findByText("Alpha");
