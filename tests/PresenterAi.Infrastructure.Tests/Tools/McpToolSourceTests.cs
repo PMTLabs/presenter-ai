@@ -523,6 +523,27 @@ public sealed class McpToolSourceTests
     }
 
     [Fact]
+    public async Task Hostile_tool_name_is_escaped_and_capped_in_structured_log()
+    {
+        var hostile = "tool\nFAKE LOG\u0001" + new string('x', 2048);
+        var server = new ToolConnection(Guid.NewGuid(), "user-1", hostile, "test", "https://example.test/mcp",
+            "none", "connected", null, false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null);
+        var capture = new CapturingLoggerProvider();
+        using var factory = LoggerFactory.Create(builder => builder.AddProvider(capture));
+        var tool = new McpTool(server, hostile, hostile, "description",
+            new JsonObject { ["type"] = "object" }, false, TimeSpan.FromSeconds(1),
+            (_, _, _) => throw new InvalidOperationException(), logger: factory.CreateLogger("test"));
+        using var arguments = JsonDocument.Parse("{}");
+        await tool.InvokeAsync(arguments.RootElement);
+        var entry = Assert.Single(capture.Records);
+        Assert.DoesNotContain('\n', entry);
+        Assert.DoesNotContain('\r', entry);
+        Assert.DoesNotContain('\u0001', entry);
+        Assert.Contains("\\u000a", entry);
+        Assert.True(entry.Length < 1024);
+    }
+
+    [Fact]
     public async Task Log_capture_sink_sees_no_arguments_results_or_tokens()
     {
         await using var server = await TestMcpServer.StartAsync(requireAuth: false);

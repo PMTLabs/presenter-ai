@@ -112,7 +112,9 @@ public sealed class McpSessionToolSource(
                 var schemaJson = clientTool.ProtocolTool.InputSchema.GetRawText();
                 if (Encoding.UTF8.GetByteCount(schemaJson) > 4096)
                 {
-                    notes.Add($"tools: {server.Name} skipped {clientTool.Name} (schema exceeds 4 KiB)");
+                    notes.Add(
+                        $"tools: {UntrustedLogText.Sanitize(server.Name)} skipped " +
+                        $"{UntrustedLogText.Sanitize(clientTool.Name)} (schema exceeds 4 KiB)");
                     continue;
                 }
 
@@ -161,7 +163,7 @@ public sealed class McpSessionToolSource(
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            notes.Add($"tools: {server.Name} skipped (timeout)");
+            notes.Add($"tools: {UntrustedLogText.Sanitize(server.Name)} skipped (timeout)");
             await UpdateStatusAsync(ownerId, server.Id, "error", "timeout", cancellationToken);
             return new ServerResult(tools, notes);
         }
@@ -180,7 +182,7 @@ public sealed class McpSessionToolSource(
                 ? "needs_reconnect"
                 : "error";
 
-            notes.Add($"tools: {server.Name} skipped ({code})");
+            notes.Add($"tools: {UntrustedLogText.Sanitize(server.Name)} skipped ({code})");
             await UpdateStatusAsync(ownerId, server.Id, status, code, cancellationToken);
             return new ServerResult(tools, notes);
         }

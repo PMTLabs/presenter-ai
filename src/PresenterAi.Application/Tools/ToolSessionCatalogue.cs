@@ -46,7 +46,8 @@ public sealed class ToolSessionCatalogue
         }
 
         var all = presenter.Concat(session).ToList();
-        var overflow = all.Count > maxInlineTools;
+        var overflow = all.Count > maxInlineTools ||
+            GetPayloadBytes(all.Select(CreateDefinition)) > MaxInlineToolsPayloadBytes;
         if (!overflow)
         {
             AddInline(presenter);
@@ -57,6 +58,11 @@ public sealed class ToolSessionCatalogue
         }
         else
         {
+            if (all.Count <= maxInlineTools)
+            {
+                _notes.Add("External tools use discovery because the inline tool payload exceeded the 32 KiB budget.");
+            }
+
             var pinned = presenter.Where(t => t.Pinned).ToList();
             AddInline(pinned);
 
@@ -163,7 +169,8 @@ public sealed class ToolSessionCatalogue
         var candidate = _inlineDefinitions.Append(definition).ToArray();
         if (GetPayloadBytes(candidate) > MaxInlineToolsPayloadBytes)
         {
-            _notes.Add($"Tool '{tool.Name}' was omitted from the inline list because the 32 KiB tool budget was exceeded; it remains searchable.");
+            _notes.Add(
+                $"Tool '{tool.Name}' was omitted from the inline list because the 32 KiB tool budget was exceeded.");
             return;
         }
 

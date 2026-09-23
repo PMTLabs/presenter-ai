@@ -2111,7 +2111,8 @@ public sealed class Presenter : IPresenter
         _usageSeconds,
         AdvanceSilenceMs);
 
-    private void LogMessage(string level, string message) => Log?.Invoke(new PresenterLog(level, message));
+    private void LogMessage(string level, string message) =>
+        Log?.Invoke(new PresenterLog(level, UntrustedLogText.Sanitize(message, 1024)));
 
     private static string StateName(PresenterState state) => state.ToString().ToLowerInvariant();
 
