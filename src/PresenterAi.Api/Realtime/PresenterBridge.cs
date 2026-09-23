@@ -58,6 +58,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         presenter.State += state => Current?.EnqueueText(StateFrame(state));
         presenter.Slide += index => Current?.EnqueueText(new { type = "slide", index });
         presenter.Audio += audio => Current?.EnqueueBinary(audio.Bytes.ToArray());
+        presenter.Flush += () => Current?.EnqueueText(new { type = "flush" });
         presenter.Transcript += transcript => Current?.EnqueueText(new { type = "transcript", role = transcript.Role, delta = transcript.Delta, start_ms = transcript.StartMs, end_ms = transcript.EndMs });
         presenter.Usage += usage => Current?.EnqueueText(new { type = "usage", seconds = usage.Seconds, ratio = usage.Ratio });
         presenter.Closed += closed => Current?.EnqueueText(new { type = "closed", reason = closed.Reason, seconds = closed.Seconds });

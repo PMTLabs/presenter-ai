@@ -9,6 +9,8 @@ internal sealed class FakeSession : ILiveSession
 
     public bool FailConnect { get; set; }
 
+    public string DelegationMode { get; set; } = "responses";
+
     public bool ThrowOnClose { get; set; }
 
     public string? WarnOnConnect { get; set; }
@@ -50,7 +52,7 @@ internal sealed class FakeSession : ILiveSession
         }
 
         State = LiveSessionState.Open;
-        var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"), "responses");
+        var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"), DelegationMode);
         Started?.Invoke(session);
         return Task.FromResult(session);
     }

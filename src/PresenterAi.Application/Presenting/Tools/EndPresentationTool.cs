@@ -44,11 +44,11 @@ public sealed class EndPresentationTool : ITool
             return ToolResult.Failure("Missing or invalid 'confirmed' parameter.");
         }
 
-        // Plan 007 §3.4: the model can never end the talk by itself. Both values start the end confirmation;
-        // ending happens only when the audience answers "yes" to it (the awaiting-confirmation phase, Task 5).
-        await _presenter.PauseAsync(cancellationToken).ConfigureAwait(false);
+        var confirmed = confirmedElement.GetBoolean();
+        var changed = await _presenter.RequestEndConfirmationAsync(confirmed, cancellationToken).ConfigureAwait(false);
         var after = _presenter.Snapshot();
-        return ToolResult.Success(
-            $"confirmation required to end presentation: ask the audience to confirm; paused on slide {after.SlideIndex + 1} of {after.SlideCount}");
+        return ToolResult.Success(confirmed && changed && after.State is "ending" or "idle"
+            ? "presentation ended after confirmation"
+            : $"confirmation required to end presentation: paused on slide {after.SlideIndex + 1} of {after.SlideCount}");
     }
 }
