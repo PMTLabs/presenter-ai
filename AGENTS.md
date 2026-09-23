@@ -74,7 +74,7 @@ the default socket is found without it.
 - **Parity semantics are deliberate.** `stop-after-slide N` ends when slide N+1 is announced (Node parity).
   `busy` is `error{code:"busy",canTakeOver}` + close 1013; auth may request `takeOver:true`, which closes the
   same user's holder with `taken_over` + 4409; backpressure closes with 1011. The `/ws` frames and `/api` trio
-  are frozen until the admin plan — see `docs/reference/001-api-and-code-conventions.md` §8 and §10.
+  are frozen until the admin plan — see `docs/reference/001-api-and-code-conventions.md` §8 and §10. The presenter may emit `{"type":"flush"}` to discard queued playback audio; clients may ignore unknown frames.
 
 ## Conventions
 

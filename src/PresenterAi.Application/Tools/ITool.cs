@@ -21,5 +21,7 @@ public interface ITool
 
     string Source => "presenter";
 
+    string Title => Name;
+
     Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default);
 }

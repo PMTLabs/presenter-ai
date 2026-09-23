@@ -32,6 +32,7 @@ public sealed class McpTool : ITool
     public bool RequiresConfirmation { get; }
     public TimeSpan Timeout { get; }
     public string Source => _server.Name;
+    public string Title { get; }
 
     public ToolConnection Server => _server;
     public string RawToolName => _rawToolName;
@@ -69,6 +70,7 @@ public sealed class McpTool : ITool
         Tags = ExtractTags(server.Slug, server.Name, title, rawToolName);
         RequiresConfirmation = requiresConfirmation;
         Timeout = timeout;
+        Title = string.IsNullOrWhiteSpace(title) ? rawToolName : title;
     }
 
     public void SetName(string name)

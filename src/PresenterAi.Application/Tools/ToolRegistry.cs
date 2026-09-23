@@ -10,16 +10,17 @@ public sealed partial class ToolRegistry
     public const int MaxParametersBytes = 4096;
 
     private readonly Dictionary<string, ITool> _tools = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _sync = new();
     private int _pinnedCount;
 
     [GeneratedRegex("^[a-zA-Z0-9_-]{1,64}$")]
     private static partial Regex ToolNameRegex();
 
-    public int Count => _tools.Count;
+    public int Count { get { lock (_sync) return _tools.Count; } }
 
-    public int PinnedCount => _pinnedCount;
+    public int PinnedCount { get { lock (_sync) return _pinnedCount; } }
 
-    public bool Contains(string name) => _tools.ContainsKey(name);
+    public bool Contains(string name) { lock (_sync) return _tools.ContainsKey(name); }
 
     public void Register(ITool tool)
     {
@@ -30,11 +31,6 @@ public sealed partial class ToolRegistry
             throw new ArgumentException(
                 $"Tool name '{tool.Name}' is invalid. Must match '^[a-zA-Z0-9_-]{{1,64}}$'.",
                 nameof(tool));
-        }
-
-        if (_tools.ContainsKey(tool.Name))
-        {
-            throw new InvalidOperationException($"Tool with name '{tool.Name}' is already registered.");
         }
 
         if (tool.Description is { Length: > MaxDescriptionLength })
@@ -62,23 +58,31 @@ public sealed partial class ToolRegistry
                 nameof(tool));
         }
 
-        if (tool.Pinned)
+        lock (_sync)
         {
-            if (_pinnedCount >= MaxPinnedTools)
+            if (_tools.ContainsKey(tool.Name))
             {
-                throw new InvalidOperationException(
-                    $"Cannot register more than {MaxPinnedTools} pinned tools.");
+                throw new InvalidOperationException($"Tool with name '{tool.Name}' is already registered.");
             }
 
-            _pinnedCount++;
-        }
+            if (tool.Pinned)
+            {
+                if (_pinnedCount >= MaxPinnedTools)
+                {
+                    throw new InvalidOperationException(
+                        $"Cannot register more than {MaxPinnedTools} pinned tools.");
+                }
 
-        _tools[tool.Name] = tool;
+                _pinnedCount++;
+            }
+
+            _tools[tool.Name] = tool;
+        }
     }
 
     public IReadOnlyList<ITool> GetAllTools()
     {
-        return _tools.Values.ToList();
+        lock (_sync) return _tools.Values.ToList();
     }
 
     public ToolSessionCatalogue CreateCatalogue(int maxInlineTools = ToolsOptions.DefaultMaxInlineTools)

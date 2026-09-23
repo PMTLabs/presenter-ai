@@ -531,6 +531,63 @@ public sealed class ToolSessionCatalogueTests
         Assert.Equal("timeout", JsonDocument.Parse(timeout.ToJsonString()).RootElement.GetProperty("outcome").GetString());
     }
 
+    [Fact]
+    public async Task Mutating_source_and_export_cannot_change_snapshot_or_next_export()
+    {
+        var schema = new JsonObject { ["type"] = "object", ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "integer" } },
+            ["required"] = new JsonArray { "value" }, ["additionalProperties"] = false };
+        var source = new TestTool("strict", "Original", schema, [], true,
+            _ => Task.FromResult(ToolResult.Success("ok")));
+        var catalogue = new ToolSessionCatalogue([source]);
+        schema["required"] = new JsonArray();
+        catalogue.GetInlineToolDefinitions()[0]["parameters"] = new JsonObject { ["type"] = "object" };
+        catalogue.FindTool("strict")!.Parameters["required"] = new JsonArray();
+        Assert.Equal("Original", catalogue.GetInlineToolDefinitions()[0]["description"]!.GetValue<string>());
+        Assert.Equal("value", catalogue.GetInlineToolDefinitions()[0]["parameters"]!["required"]![0]!.GetValue<string>());
+        Assert.False((await catalogue.InvokeAsync("strict", ParseJson("{}"))).Ok);
+    }
+
+    [Fact]
+    public void Snapshot_keeps_confirmation_timeout_and_source_of_session_tools()
+    {
+        var registry = new ToolRegistry();
+        var external = new GatedTool();
+        var catalogue = ToolSessionCatalogue.Build(registry, [external], maxInlineTools: 0);
+
+        foreach (var tool in new[]
+                 {
+                     catalogue.FindTool("gated")!,
+                     catalogue.AllTools.Single(t => t.Name == "gated"),
+                     catalogue.Resolve("call_tool", ParseJson("{\"name\":\"gated\",\"arguments\":{}}")).Tool!,
+                 })
+        {
+            Assert.True(tool.RequiresConfirmation);
+            Assert.Equal(TimeSpan.FromSeconds(17), tool.Timeout);
+            Assert.Equal("crm", tool.Source);
+            Assert.Equal("Look up a customer", tool.Title);
+        }
+
+        var inline = ToolSessionCatalogue.Build(registry, [external]);
+        var inlineTool = inline.InlineTools.Single(t => t.Name == "gated");
+        Assert.True(inlineTool.RequiresConfirmation);
+        Assert.Equal("crm", inline.Resolve("gated", ParseJson("{}")).Tool!.Source);
+    }
+
+    private sealed class GatedTool : ITool
+    {
+        public string Name => "gated";
+        public string Description => "Needs a yes";
+        public JsonObject Parameters => new() { ["type"] = "object", ["properties"] = new JsonObject() };
+        public IReadOnlyList<string> Tags => [];
+        public bool Pinned => false;
+        public bool RequiresConfirmation => true;
+        public TimeSpan Timeout => TimeSpan.FromSeconds(17);
+        public string Source => "crm";
+        public string Title => "Look up a customer";
+        public Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default) =>
+            Task.FromResult(ToolResult.Success("ok"));
+    }
+
     private static ITool CreateTool(
         string name,
         string description = "Test tool description",

@@ -34,8 +34,8 @@ public sealed class ToolSessionCatalogue
         ArgumentNullException.ThrowIfNull(presenterTools);
         ArgumentNullException.ThrowIfNull(sessionTools);
 
-        var presenter = presenterTools.ToList();
-        var session = sessionTools.ToList();
+        var presenter = presenterTools.Select(t => (ITool)new SnapshotTool(t)).ToList();
+        var session = sessionTools.Select(t => (ITool)new SnapshotTool(t)).ToList();
         foreach (var tool in presenter.Concat(session))
         {
             if (!_snapshotTools.TryAdd(tool.Name, tool))
@@ -78,13 +78,29 @@ public sealed class ToolSessionCatalogue
         return new ToolSessionCatalogue(registry.GetAllTools(), sessionTools ?? [], maxInlineTools);
     }
 
-    public IReadOnlyList<ITool> InlineTools => _inlineTools;
+    public IReadOnlyList<ITool> InlineTools => _inlineTools.Select(t => (ITool)new SnapshotTool(t)).ToArray();
 
-    public IReadOnlyList<ITool> AllTools => _snapshotTools.Values.ToList();
+    public IReadOnlyList<ITool> AllTools => _snapshotTools.Values.Select(t => (ITool)new SnapshotTool(t)).ToArray();
 
-    public IReadOnlyList<string> Notes => _notes;
+    public IReadOnlyList<string> Notes => _notes.ToArray();
 
-    public IReadOnlyList<JsonObject> GetInlineToolDefinitions() => _inlineDefinitions;
+    public IReadOnlyList<JsonObject> GetInlineToolDefinitions() => _inlineDefinitions.Select(d => (JsonObject)d.DeepClone()).ToArray();
+
+    private sealed class SnapshotTool(ITool original) : ITool
+    {
+        private readonly JsonObject _parameters = (JsonObject)original.Parameters.DeepClone();
+        public string Name { get; } = original.Name;
+        public string Description { get; } = original.Description;
+        public IReadOnlyList<string> Tags { get; } = original.Tags.ToArray();
+        public bool Pinned { get; } = original.Pinned;
+        public bool RequiresConfirmation { get; } = original.RequiresConfirmation;
+        public TimeSpan Timeout { get; } = original.Timeout;
+        public string Source { get; } = original.Source;
+        public string Title { get; } = original.Title;
+        public JsonObject Parameters => (JsonObject)_parameters.DeepClone();
+        public Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default) =>
+            original.InvokeAsync(arguments, cancellationToken);
+    }
 
     public ITool? FindTool(string name)
     {

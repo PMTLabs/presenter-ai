@@ -51,6 +51,88 @@ public sealed class PresenterVoiceCommandTests
         }
     }
 
+    [Theory]
+    [InlineData("responses")]
+    [InlineData("client")]
+    public async Task Out_of_range_local_number_requests_spoken_range_without_bridge(string mode)
+    {
+        var (presenter, session, clock) = await Start(mode);
+        await using (presenter)
+        {
+            session.Hear("go to slide 40", 100, 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal(0, presenter.Snapshot().SlideIndex);
+            Assert.Contains(session.Sent, s => s.EventId == "invalid-slide-range" && s.Content!.Contains("slides 1 to 2"));
+            Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+            var frames = 0;
+            presenter.Audio += _ => frames++;
+            session.Speak(startMs: 201, endMs: 250);
+            await presenter.WaitUntilIdleAsync();
+            Assert.Equal(1, frames);
+            await Advance(presenter, clock, 701);
+            await Advance(presenter, clock, 20000);
+            Assert.Equal(0, presenter.Snapshot().SlideIndex);
+            Assert.DoesNotContain(session.Sent, s => s.EventId?.Contains("-resume-") == true);
+        }
+    }
+
+    [Theory]
+    [InlineData("responses")]
+    [InlineData("client")]
+    public async Task Paused_range_reply_obeys_permit_barrier(string mode)
+    {
+        var (presenter, session, clock) = await Start(mode);
+        await using (presenter)
+        {
+            await presenter.PauseAsync();
+            var frames = 0;
+            presenter.Audio += _ => frames++;
+            session.Hear("go to slide 40", 100, 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Speak(startMs: 120, endMs: 150);
+            session.Speak(startMs: 201, endMs: 250);
+            await presenter.WaitUntilIdleAsync();
+            Assert.Equal(1, frames);
+            await Advance(presenter, clock, 20000);
+            Assert.Equal("paused", presenter.Snapshot().State);
+            Assert.Equal(0, presenter.Snapshot().SlideIndex);
+        }
+    }
+
+    [Fact]
+    public async Task Single_seven_second_delta_is_not_an_instant_command()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            session.Hear("stop", 0, 7000);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal("presenting", presenter.Snapshot().State);
+        }
+    }
+
+    [Fact]
+    public async Task Timestamp_less_command_after_quick_restart_is_not_rejected_by_previous_speech()
+    {
+        var sessions = new List<FakeSession>();
+        var (presenter, session, clock) = await Start(sessions: sessions);
+        await using (presenter)
+        {
+            session.Speak();
+            await presenter.WaitUntilIdleAsync();
+            await presenter.EndAsync();
+            await presenter.WaitUntilIdleAsync();
+            Assert.True((await presenter.StartAsync("p", null, "owner")).Started);
+            sessions[^1].Hear("next slide", null, null);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal(1, presenter.Snapshot().SlideIndex);
+        }
+    }
+
     [Fact]
     public async Task Stop_end_and_continue_are_commands_not_questions()
     {
@@ -300,6 +382,91 @@ public sealed class PresenterVoiceCommandTests
             await presenter.WaitUntilIdleAsync();
             await Advance(presenter, clock);
             Assert.Contains(session.Sent, item => item.EventId?.Contains("-resume-") == true);
+        }
+    }
+
+    [Fact]
+    public async Task Check_in_no_keeps_hold_through_voiced_output_and_silence()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            session.Hear("What is this?", 100, 150);
+            await presenter.WaitUntilIdleAsync();
+            session.Speak(startMs: 151, endMs: 200);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 701);
+            session.Hear("no", 300, 320);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            session.Speak(startMs: 330, endMs: 400);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 20000);
+            Assert.Equal(0, presenter.Snapshot().SlideIndex);
+            Assert.DoesNotContain(session.Sent, item => item.EventId?.Contains("-resume-") == true);
+            session.Hear("new question", 500, 550);
+            await presenter.WaitUntilIdleAsync();
+            session.Speak(startMs: 551, endMs: 600);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 701);
+            await Advance(presenter, clock, 5100);
+            Assert.Contains(session.Sent, item => item.EventId?.Contains("-resume-") == true);
+        }
+    }
+
+    [Fact]
+    public async Task Ending_disposes_audio_permit_and_flushes_playback_before_delayed_close()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            var frames = 0;
+            var flushes = 0;
+            presenter.Audio += _ => frames++;
+            presenter.Flush += () => flushes++;
+            session.CloseGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            session.DeferCloseEvent = true;
+            var end = presenter.EndAsync();
+            for (var i = 0; i < 100 && presenter.Snapshot().State != "ending"; i++) await Task.Delay(10);
+            Assert.Equal("ending", presenter.Snapshot().State);
+            Assert.Equal(1, flushes);
+            session.CloseGate.SetResult();
+            await end;
+            session.Speak();
+            await presenter.WaitUntilIdleAsync();
+            Assert.Equal(0, frames);
+            Assert.Equal(1, flushes);
+            session.Close();
+            await presenter.WaitUntilIdleAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Voice_confirmed_end_flushes_again_and_discards_ending_audio()
+    {
+        var (presenter, session, clock) = await Start();
+        await using (presenter)
+        {
+            var frames = 0;
+            var flushes = 0;
+            presenter.Audio += _ => frames++;
+            presenter.Flush += () => flushes++;
+            await presenter.RequestEndConfirmationAsync(false);
+            session.Speak(startMs: 100, endMs: 150);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock, 501);
+            var before = frames;
+            session.DeferCloseEvent = true;
+            session.Hear("yes", 200, 250);
+            await presenter.WaitUntilIdleAsync();
+            await Advance(presenter, clock);
+            Assert.Equal("ending", presenter.Snapshot().State);
+            session.Speak(startMs: 260, endMs: 300);
+            await presenter.WaitUntilIdleAsync();
+            Assert.Equal(before, frames);
+            Assert.Equal(2, flushes); // pause and end, once each
+            session.Close();
+            await presenter.WaitUntilIdleAsync();
         }
     }
 

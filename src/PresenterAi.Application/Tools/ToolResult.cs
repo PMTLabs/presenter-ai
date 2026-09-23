@@ -61,14 +61,30 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
             return fallbackJson;
         }
 
-        var maxMsgBytes = MaxOutputBytes - 96;
-        var msgBytes = Encoding.UTF8.GetBytes(truncatedMessage);
-        var safeMessage = Encoding.UTF8.GetString(msgBytes, 0, Math.Min(msgBytes.Length, maxMsgBytes));
-        return new JsonObject
+        // Search Unicode scalar boundaries, measuring the actual escaped JSON on every step.
+        var boundaries = new List<int> { 0 };
+        foreach (var rune in truncatedMessage.EnumerateRunes())
+            boundaries.Add(boundaries[^1] + rune.Utf16SequenceLength);
+
+        var low = 0;
+        var high = boundaries.Count - 1;
+        var best = "";
+        while (low <= high)
         {
-            ["ok"] = Ok,
-            ["outcome"] = Outcome,
-            ["message"] = safeMessage
-        }.ToJsonString();
+            var mid = low + (high - low) / 2;
+            var candidate = new JsonObject
+            {
+                ["ok"] = Ok,
+                ["outcome"] = Outcome,
+                ["message"] = truncatedMessage[..boundaries[mid]]
+            }.ToJsonString();
+            if (Encoding.UTF8.GetByteCount(candidate) <= MaxOutputBytes)
+            {
+                best = candidate;
+                low = mid + 1;
+            }
+            else high = mid - 1;
+        }
+        return best;
     }
 }
