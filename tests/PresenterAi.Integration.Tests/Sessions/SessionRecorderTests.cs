@@ -5,6 +5,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using PresenterAi.Application.Auth;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Infrastructure.Persistence;
@@ -85,6 +86,136 @@ public sealed class SessionRecorderTests(PostgresFixture postgres, RedisFixture 
         var sessions = await context.Sessions.Where(session => session.UserId == owner.Id).ToArrayAsync();
         sessions.Should().ContainSingle();
         sessions[0].EndedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Records_end_reason_local_times_and_confirmed_usage()
+    {
+        var owner = await SeedPresentationAsync("confirmed-usage");
+        await using var services = new ServiceCollection()
+            .AddLogging()
+            .AddDbContext<PresenterAiDbContext>(options => options.UseNpgsql(postgres.ConnectionString))
+            .BuildServiceProvider();
+        var timeProvider = new FakeTimeProvider();
+        await using var recorder = new SessionRecorder(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            timeProvider,
+            NullLogger<SessionRecorder>.Instance);
+        var presenter = new RecorderPresenter();
+        var presentation = owner.Presentations.Single();
+        recorder.Attach(presenter);
+
+        var startedAt = new DateTimeOffset(2026, 9, 23, 10, 0, 0, TimeSpan.Zero);
+        var endedAt = new DateTimeOffset(2026, 9, 23, 10, 15, 0, TimeSpan.Zero);
+
+        await recorder.BeginAsync(owner.Id, new PresenterStartResult(
+            true, presentation.Id, "primary", "sess_confirmed", "model", ConnectedAt: startedAt));
+
+        var closed = new PresenterClosed(
+            Reason: "client_request",
+            Seconds: 15.0,
+            EndReason: EndReasons.User,
+            UsageConfirmed: true,
+            EstimatedSeconds: 16.0,
+            StartedAt: startedAt,
+            EndedAt: endedAt);
+
+        presenter.RaiseClosed(closed);
+        await recorder.EndAsync("disconnect");
+
+        await using var context = CreateContext();
+        var session = await context.Sessions.SingleAsync(s => s.UserId == owner.Id);
+        session.CloseReason.Should().Be("client_request");
+        session.EndReason.Should().Be(EndReasons.User);
+        session.UsageConfirmed.Should().BeTrue();
+        session.EstimatedSeconds.Should().Be(16);
+        session.UsageSeconds.Should().Be(15);
+        session.StartedAt.Should().Be(startedAt);
+        session.EndedAt.Should().Be(endedAt);
+    }
+
+    [Fact]
+    public async Task Close_timeout_stores_the_estimated_seconds_not_zero()
+    {
+        var owner = await SeedPresentationAsync("close-timeout");
+        await using var services = new ServiceCollection()
+            .AddLogging()
+            .AddDbContext<PresenterAiDbContext>(options => options.UseNpgsql(postgres.ConnectionString))
+            .BuildServiceProvider();
+        var timeProvider = new FakeTimeProvider();
+        await using var recorder = new SessionRecorder(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            timeProvider,
+            NullLogger<SessionRecorder>.Instance);
+        var presenter = new RecorderPresenter();
+        var presentation = owner.Presentations.Single();
+        recorder.Attach(presenter);
+
+        var startedAt = new DateTimeOffset(2026, 9, 23, 11, 0, 0, TimeSpan.Zero);
+        var endedAt = new DateTimeOffset(2026, 9, 23, 11, 5, 0, TimeSpan.Zero);
+
+        await recorder.BeginAsync(owner.Id, new PresenterStartResult(
+            true, presentation.Id, "primary", "sess_timeout", "model", ConnectedAt: startedAt));
+
+        var closed = new PresenterClosed(
+            Reason: "close_timeout",
+            Seconds: null,
+            EndReason: EndReasons.User,
+            UsageConfirmed: false,
+            EstimatedSeconds: 45.4,
+            StartedAt: startedAt,
+            EndedAt: endedAt);
+
+        presenter.RaiseClosed(closed);
+        await recorder.EndAsync("disconnect");
+
+        await using var context = CreateContext();
+        var session = await context.Sessions.SingleAsync(s => s.UserId == owner.Id);
+        session.CloseReason.Should().Be("close_timeout");
+        session.EndReason.Should().Be(EndReasons.User);
+        session.UsageConfirmed.Should().BeFalse();
+        session.EstimatedSeconds.Should().Be(45);
+        session.UsageSeconds.Should().Be(45, "unconfirmed usage must store estimated seconds, not zero");
+        session.StartedAt.Should().Be(startedAt);
+        session.EndedAt.Should().Be(endedAt);
+    }
+
+    [Fact]
+    public async Task Bridge_end_without_closed_stores_disconnect_and_unconfirmed()
+    {
+        var owner = await SeedPresentationAsync("bridge-end-no-closed");
+        await using var services = new ServiceCollection()
+            .AddLogging()
+            .AddDbContext<PresenterAiDbContext>(options => options.UseNpgsql(postgres.ConnectionString))
+            .BuildServiceProvider();
+        var timeProvider = new FakeTimeProvider();
+        var startTime = new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero);
+        timeProvider.SetUtcNow(startTime);
+
+        await using var recorder = new SessionRecorder(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            timeProvider,
+            NullLogger<SessionRecorder>.Instance);
+        var presenter = new RecorderPresenter();
+        var presentation = owner.Presentations.Single();
+        recorder.Attach(presenter);
+
+        await recorder.BeginAsync(owner.Id, new PresenterStartResult(
+            true, presentation.Id, "primary", "sess_no_closed", "model"));
+
+        timeProvider.Advance(TimeSpan.FromSeconds(25));
+
+        await recorder.EndAsync("disconnect");
+
+        await using var context = CreateContext();
+        var session = await context.Sessions.SingleAsync(s => s.UserId == owner.Id);
+        session.CloseReason.Should().Be("disconnect");
+        session.EndReason.Should().Be(EndReasons.Disconnect);
+        session.UsageConfirmed.Should().BeFalse();
+        session.EstimatedSeconds.Should().Be(25);
+        session.UsageSeconds.Should().Be(25);
+        session.StartedAt.Should().Be(startTime);
+        session.EndedAt.Should().Be(startTime + TimeSpan.FromSeconds(25));
     }
 
     [Fact]
@@ -332,7 +463,8 @@ public sealed class SessionRecorderTests(PostgresFixture postgres, RedisFixture 
 
         public PresenterSnapshot Snapshot() => new("presenting", null, null, 0, 1, false, false, null, null, 0, 200);
         public void RaiseTranscript(string role, string delta) => _transcript?.Invoke(new PresenterTranscript(role, delta, null, null));
-        public void RaiseClosed(string reason, double seconds) => _closed?.Invoke(new PresenterClosed(reason, seconds));
+        public void RaiseClosed(PresenterClosed closed) => _closed?.Invoke(closed);
+        public void RaiseClosed(string reason, double seconds) => _closed?.Invoke(new PresenterClosed(reason, seconds, UsageConfirmed: true));
         public Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default) => Task.FromResult(new PresenterStartResult(false, id, null, null, null));
         public Task<bool> NextAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> PrevAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);

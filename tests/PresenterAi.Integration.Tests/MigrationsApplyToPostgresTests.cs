@@ -72,6 +72,28 @@ public sealed class MigrationsApplyToPostgresTests(PostgresFixture postgres)
                 """, ("table_name", table), ("column_name", column)))
                 .Should().Be("NO", $"{table}.{column} is a required relationship key");
         }
+
+        foreach (var (column, dataType) in new[]
+                 {
+                     ("end_reason", "text"),
+                     ("usage_confirmed", "boolean"),
+                     ("estimated_seconds", "integer")
+                 })
+        {
+            (await ScalarAsync(connection, """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = @column_name;
+                """, ("column_name", column)))
+                .Should().Be(dataType, $"sessions.{column} must be {dataType}");
+
+            (await ScalarAsync(connection, """
+                SELECT is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'sessions' AND column_name = @column_name;
+                """, ("column_name", column)))
+                .Should().Be("YES", $"sessions.{column} must be nullable");
+        }
     }
 
     private static async Task<string> IndexDefinitionAsync(DbConnection connection, string name) =>
