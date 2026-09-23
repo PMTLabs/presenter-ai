@@ -48,6 +48,7 @@ services:
       Upstream__DelegationModel: "${UPSTREAM_DELEGATION_MODEL-gpt-5.6-luna}"
       Upstream__Fallback__DelegationModel: "${FALLBACK_DELEGATION_MODEL-gpt-5.6-luna}"
       Presenter__AdvanceSilenceMs: "${ADVANCE_SILENCE_MS:-3000}"
+      Presenter__FollowUpWaitMs: "${FOLLOW_UP_WAIT_MS:-5000}"
       Presenter__LogEvents: "${LOG_EVENTS:-false}"
       Content__RootDir: /app/content
       ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=presenter_ai;Username=presenter;Password=dev_password_change_me

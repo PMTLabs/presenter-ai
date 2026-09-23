@@ -67,7 +67,7 @@ container receives configuration keys with the `__` form. The mappings in `docke
 `UPSTREAM_ENDPOINT` → `Upstream__Endpoint`, `UPSTREAM_KEY` → `Upstream__Key`, `UPSTREAM_MODEL` →
 `Upstream__Model`, `UPSTREAM_VOICE` → `Upstream__Voice`, `FALLBACK_OPENAI_KEY` → `Upstream__Fallback__Key`,
 `UPSTREAM_DELEGATION_MODEL` → `Upstream__DelegationModel`, `FALLBACK_DELEGATION_MODEL` →
-`Upstream__Fallback__DelegationModel`, `ADVANCE_SILENCE_MS` → `Presenter__AdvanceSilenceMs`, and `LOG_EVENTS` → `Presenter__LogEvents`.
+`Upstream__Fallback__DelegationModel`, `ADVANCE_SILENCE_MS` → `Presenter__AdvanceSilenceMs`, `FOLLOW_UP_WAIT_MS` → `Presenter__FollowUpWaitMs`, and `LOG_EVENTS` → `Presenter__LogEvents`.
 
 ```bash
 cp .env.example .env
@@ -129,6 +129,7 @@ The names used by Compose are mapped above. The .NET local path uses the `Upstre
 | `FALLBACK_DELEGATION_MODEL` | no | The same for the OpenAI fallback upstream. Default `gpt-5.6-luna`. |
 | `FALLBACK_OPENAI_KEY` | no | If set, `api.openai.com` is tried when the primary cannot start a session (rate limit, outage). `FALLBACK_OPENAI_ENDPOINT` / `FALLBACK_OPENAI_MODEL` override the route/model. |
 | `ADVANCE_SILENCE_MS` | no | Silence after the model stops speaking before the next slide. Default `3000`. |
+| `FOLLOW_UP_WAIT_MS` | no | Quiet after an answer to an audience question before the slide resumes, so a follow-up can be asked. `2500`–`60000`, default `5000`. See `docs/guides/002-audience-questions.md`. |
 | `LOG_EVENTS` | no | Log every upstream JSON event (audio deltas excluded); the .NET host binds `true`/`false`. |
 
 Sessions cost about $0.05 per minute of session time, silence included. The app closes the session after the

@@ -65,7 +65,12 @@ public static class DependencyInjection
             .ValidateOnStart();
 
         services.AddOptions<PresenterOptions>()
-            .Bind(configuration.GetSection("Presenter"));
+            .Bind(configuration.GetSection("Presenter"))
+            // Below ~2.5 s the resume could fire inside a pause of the answer itself.
+            .Validate(
+                options => options.FollowUpWaitMs is >= PresenterOptions.MinFollowUpWaitMs and <= PresenterOptions.MaxFollowUpWaitMs,
+                $"Presenter:FollowUpWaitMs must be between {PresenterOptions.MinFollowUpWaitMs} and {PresenterOptions.MaxFollowUpWaitMs}")
+            .ValidateOnStart();
 
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
             UpstreamRoutes.From(serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamOptions>>().Value));
@@ -142,7 +147,7 @@ public static class DependencyInjection
                     ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice, request.Title))
                     : null,
                 loader,
-                new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice),
+                new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice, settings.FollowUpWaitMs),
                 timeProvider);
         });
         return services;

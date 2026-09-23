@@ -46,6 +46,7 @@ public sealed class UpstreamRoutesTests
         var defaults = new PresenterOptions();
         defaultConfig.GetSection("Presenter").Bind(defaults);
         Assert.Equal(3000, defaults.AdvanceSilenceMs);
+        Assert.Equal(5000, defaults.FollowUpWaitMs);
         Assert.False(defaults.LogEvents);
 
         var configured = new PresenterOptions();
@@ -53,12 +54,14 @@ public sealed class UpstreamRoutesTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Presenter:AdvanceSilenceMs"] = "1500",
+                ["Presenter:FollowUpWaitMs"] = "9000",
                 ["Presenter:LogEvents"] = "true"
             })
             .Build()
             .GetSection("Presenter")
             .Bind(configured);
         Assert.Equal(1500, configured.AdvanceSilenceMs);
+        Assert.Equal(9000, configured.FollowUpWaitMs);
         Assert.True(configured.LogEvents);
     }
 

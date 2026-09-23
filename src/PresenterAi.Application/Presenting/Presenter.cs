@@ -21,7 +21,7 @@ public sealed class Presenter : IPresenter
     public const int NudgeMs = 15_000;
     public const int WrapUpFallbackMs = 15_000;
     public const int QuestionHoldMs = 15_000;
-    public const int FollowUpWaitMs = 5_000;
+    public const int DefaultFollowUpWaitMs = 5_000;
     public const int MaxUpstreamAttempts = 4;
     public const int PartGapMs = 2_500;
 
@@ -1042,7 +1042,7 @@ public sealed class Presenter : IPresenter
 
         if (_answerVoiced)
         {
-            ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs / 1000} s; resuming");
+            ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
         }
 
         return true;
@@ -1209,6 +1209,10 @@ public sealed class Presenter : IPresenter
     private int SlideCount => _presentation?.Slides.Count ?? 0;
 
     private int AdvanceSilenceMs => _presentation?.Meta.AdvanceSilenceMs ?? _settings.AdvanceSilenceMs;
+
+    private int FollowUpWaitMs => _settings.FollowUpWaitMs;
+
+    public PresenterSettings Settings => _settings;
 
     private void SetState(PresenterState state)
     {
