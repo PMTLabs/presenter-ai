@@ -4,6 +4,7 @@ using PresenterAi.Application.Scripts;
 using PresenterAi.Application.Tools;
 using PresenterAi.Application.Tools.External;
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 using PresenterAi.Application.Presenting.VoiceCommands;
 using PresenterToolsRegistration = PresenterAi.Application.Presenting.Tools.PresenterToolsRegistration;
 
@@ -120,6 +121,14 @@ public sealed class Presenter : IPresenter
     private long _permitGeneration;
     private PresenterSnapshot _snapshot;
     private int _disposed;
+    private TalkGuard? _guard;
+    private string? _requestedEndReason;
+    private DateTimeOffset? _talkStartedAt;
+    private DateTimeOffset? _talkEndedAt;
+    private double _priorUsageSeconds;
+    private double _priorEstimatedSeconds;
+    private bool _usageConfirmed = true;
+    private DateTimeOffset? _connectedAt;
 
     public Presenter(
         Func<SessionRequest, int, ILiveSession?> createSession,
@@ -157,7 +166,7 @@ public sealed class Presenter : IPresenter
     public event Action<PresenterClosed>? Closed;
     public event Action<PresenterLog>? Log;
     public event Action<PresenterUpstreamError>? UpstreamError;
-    public event Action<PresenterLimitWarning>? LimitWarning { add { } remove { } }
+    public event Action<PresenterLimitWarning>? LimitWarning;
     public event Action<PresenterUpstreamStatus>? UpstreamStatus { add { } remove { } }
 
     public static int PartGapFor(int advanceSilenceMs) => Math.Min(PartGapMs, (int)Math.Round(advanceSilenceMs * 0.8));
@@ -172,19 +181,17 @@ public sealed class Presenter : IPresenter
         string ownerId,
         CancellationToken cancellationToken = default)
     {
-        var command = new StartCommand(ownerId, id, fromIndex);
+        return await StartAsync(id, fromIndex, ownerId, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PresenterStartResult> StartAsync(
+        string id, int? fromIndex, string ownerId, int? maxMinutes, CancellationToken cancellationToken = default)
+    {
+        var command = new StartCommand(ownerId, id, fromIndex, maxMinutes);
         ThrowIfDisposed();
         await WriteAsync(command, cancellationToken).ConfigureAwait(false);
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
-
-    public Task<PresenterStartResult> StartAsync(
-        string id,
-        int? fromIndex,
-        string ownerId,
-        int? maxMinutes,
-        CancellationToken cancellationToken = default) =>
-        StartAsync(id, fromIndex, ownerId, cancellationToken);
 
     public Task<bool> NextAsync(CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new NextCommand(), cancellationToken);
@@ -214,10 +221,10 @@ public sealed class Presenter : IPresenter
         EnqueueCommandAsync(new SendAudioCommand(pcm16.ToArray()), cancellationToken);
 
     public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) =>
-        EnqueueCommandAsync(new EndCommand(resumable), cancellationToken);
+        EndAsync(EndReasons.User, resumable, cancellationToken);
 
     public Task<bool> EndAsync(string endReason, bool resumable = false, CancellationToken cancellationToken = default) =>
-        EndAsync(resumable, cancellationToken);
+        EnqueueCommandAsync(new EndCommand(resumable, endReason), cancellationToken);
 
     public void AbortPendingStart() { }
 
@@ -376,7 +383,7 @@ public sealed class Presenter : IPresenter
                         break;
                     case WrapUpFallbackElapsed fallback when fallback.Generation == _wrapUpGeneration:
                         _wrapUpTimer = null;
-                        OnWrapUpFallback();
+                        await OnWrapUpFallbackAsync().ConfigureAwait(false);
                         break;
                     case QuestionHoldElapsed question when question.Generation == _questionGeneration:
                         _questionTimer = null;
@@ -392,6 +399,9 @@ public sealed class Presenter : IPresenter
                         break;
                     case PermitElapsed permit when permit.Generation == _permitGeneration:
                         ClosePermit();
+                        break;
+                    case GuardElapsed guard when guard.Generation == _guard?.Generation:
+                        await OnGuardElapsedAsync().ConfigureAwait(false);
                         break;
                     case DelegatedResponseReceived response:
                         OnDelegatedResponse(response);
@@ -448,7 +458,8 @@ public sealed class Presenter : IPresenter
     {
         try
         {
-            command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex).ConfigureAwait(false));
+            command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex,
+                command.MaxMinutes).ConfigureAwait(false));
         }
         catch (Exception exception)
         {
@@ -460,6 +471,7 @@ public sealed class Presenter : IPresenter
     {
         try
         {
+            if (command is not (SendAudioCommand or EndCommand)) RecordActivity();
             if (command is NextCommand or PrevCommand or GotoCommand or PauseCommand or ResumeCommand or EndCommand)
                 CancelToolConfirmation();
             var result = command switch
@@ -473,7 +485,7 @@ public sealed class Presenter : IPresenter
                 MuteCommand => MuteCore(),
                 UnmuteCommand => UnmuteCore(),
                 SendAudioCommand audio => SendAudioCore(audio.Pcm16),
-                EndCommand end => await EndAsyncCore(end.Resumable).ConfigureAwait(false),
+                EndCommand end => await EndAsyncCore(end.Resumable, end.EndReason).ConfigureAwait(false),
                 _ => false
             };
             command.Completion.TrySetResult(result);
@@ -484,7 +496,7 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex)
+    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex, int? maxMinutes)
     {
         if (_state != PresenterState.Idle)
         {
@@ -502,6 +514,17 @@ public sealed class Presenter : IPresenter
         _toolRoundTracker.Clear();
         _approvedTools.Clear();
         _hostedStarted.Clear();
+        _requestedEndReason = null;
+        _talkStartedAt = _timeProvider.GetUtcNow();
+        _talkEndedAt = null;
+        _priorUsageSeconds = 0;
+        _priorEstimatedSeconds = 0;
+        _usageConfirmed = true;
+        _guard?.Dispose();
+        var initialCap = Math.Min(_settings.MaxTalkMinutes, _settings.MaxTalkCeilingMinutes);
+        if (maxMinutes is >= 5) initialCap = Math.Min(initialCap, maxMinutes.Value);
+        _guard = new TalkGuard(_timeProvider, initialCap, _settings.IdleTimeoutSeconds,
+            _settings.PauseGraceSeconds, generation => QueueFromProducer(new GuardElapsed(generation)), () => { });
         SetState(PresenterState.Connecting);
         using var startCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         var toolsStartedAt = _timeProvider.GetTimestamp();
@@ -523,6 +546,21 @@ public sealed class Presenter : IPresenter
             startCts.Cancel();
             if (toolsTask is not null) ObserveLateToolSet(toolsTask);
             SetState(PresenterState.Idle);
+            _guard.Dispose();
+            _guard = null;
+            return new PresenterStartResult(false, id, null, null, null);
+        }
+
+        var scriptCap = _presentation.Meta.MaxMinutes ?? _settings.MaxTalkMinutes;
+        if (scriptCap > _settings.MaxTalkCeilingMinutes)
+            LogMessage("warn", $"limit: clamped {scriptCap} → {_settings.MaxTalkCeilingMinutes} min");
+        var effectiveCap = Math.Min(scriptCap, _settings.MaxTalkCeilingMinutes);
+        if (maxMinutes is >= 5) effectiveCap = Math.Min(effectiveCap, maxMinutes.Value);
+        _guard.Tighten(effectiveCap);
+        LogMessage("info", $"limit: max length {effectiveCap} min (script {scriptCap}, override {maxMinutes?.ToString() ?? "none"}, ceiling {_settings.MaxTalkCeilingMinutes})");
+        if (_guard.MaxExpired)
+        {
+            await EndAsyncCore(false, EndReasons.MaxLength).ConfigureAwait(false);
             return new PresenterStartResult(false, id, null, null, null);
         }
 
@@ -557,6 +595,11 @@ public sealed class Presenter : IPresenter
         string? upstream = null;
         for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
         {
+            if (_guard?.MaxExpired == true)
+            {
+                await EndAsyncCore(false, EndReasons.MaxLength).ConfigureAwait(false);
+                return new PresenterStartResult(false, id, null, null, null);
+            }
             var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
             var instructions = PromptBuilder.SystemInstructions(
                 presentation.Meta.Title,
@@ -589,6 +632,12 @@ public sealed class Presenter : IPresenter
             {
                 WireSession(candidate);
                 sessionInfo = await candidate.ConnectAsync(_lifetime.Token).ConfigureAwait(false);
+                if (_guard?.MaxExpired == true)
+                {
+                    await DisposeSessionAsync(candidate, "max length during connect").ConfigureAwait(false);
+                    await EndAsyncCore(false, EndReasons.MaxLength).ConfigureAwait(false);
+                    return new PresenterStartResult(false, id, null, null, null);
+                }
                 session = candidate;
                 upstream = label;
                 // Node logged this only for a fallback; the .NET host always says which upstream answered
@@ -610,11 +659,14 @@ public sealed class Presenter : IPresenter
             LogMessage("error", "no upstream could start a session");
             ReleaseSessionTools();
             SetState(PresenterState.Idle);
+            _guard?.Dispose();
+            _guard = null;
             return new PresenterStartResult(false, id, null, null, null);
         }
 
         _session = session;
         _sessionInfo = sessionInfo;
+        _connectedAt = _timeProvider.GetUtcNow();
         if (sessionInfo.DelegationMode == "client")
         {
             if (_sessionTools is not null)
@@ -633,8 +685,9 @@ public sealed class Presenter : IPresenter
         _usageSeconds = 0;
         _usageRatio = null;
         SetState(PresenterState.Presenting);
+        _guard?.StartPresenting();
         PresentSlide(startAt, interrupt: false);
-        return new PresenterStartResult(true, id, upstream, sessionInfo.Id, sessionInfo.Model);
+        return new PresenterStartResult(true, id, upstream, sessionInfo.Id, sessionInfo.Model, _connectedAt);
     }
 
     private void WireSession(ILiveSession session)
@@ -662,6 +715,7 @@ public sealed class Presenter : IPresenter
         CompleteSlideDiagnostics();
         ClearTimers();
         _slideIndex = index;
+        RecordActivity();
         _heardOutput = false;
         _nudgeCount = 0;
         _wrappingUp = false;
@@ -740,6 +794,7 @@ public sealed class Presenter : IPresenter
 
         if (voiced)
         {
+            if (_state == PresenterState.Presenting) RecordActivity();
             _lastVoicedAt = _timeProvider.GetTimestamp();
             if (audio.StartMs is { } start && audio.EndMs is { } end)
             {
@@ -823,6 +878,7 @@ public sealed class Presenter : IPresenter
         }
 
         Transcript?.Invoke(new PresenterTranscript(transcript.Role, transcript.Delta, transcript.StartMs, transcript.EndMs));
+        if (transcript.Role == "user" && !string.IsNullOrWhiteSpace(transcript.Delta)) RecordActivity();
         if (transcript.Role == "user" && _slideDiagnosticsActive)
         {
             _userTranscriptCharacters += transcript.Delta.Length;
@@ -1125,7 +1181,7 @@ public sealed class Presenter : IPresenter
     {
         if (confirmed && _interaction == Interaction.AwaitingEndAnswer)
         {
-            return await EndAsyncCore(false).ConfigureAwait(false);
+            return await EndAsyncCore(false, EndReasons.User).ConfigureAwait(false);
         }
 
         StartEndConfirmation();
@@ -1139,9 +1195,9 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        _usageSeconds = usage.Seconds;
+        _usageSeconds = _priorUsageSeconds + usage.Seconds;
         _usageRatio = usage.Ratio;
-        Usage?.Invoke(new PresenterUsage(usage.Seconds, usage.Ratio));
+        Usage?.Invoke(new PresenterUsage(_usageSeconds, usage.Ratio));
     }
 
     private void OnDelegation(DelegationReceived delegation)
@@ -1260,6 +1316,8 @@ public sealed class Presenter : IPresenter
             LogMessage("info", $"tool call for {call.CallId} dropped: session replaced or run not live");
             return;
         }
+
+        RecordActivity();
 
         if (_toolRoundTracker.IsCallDuplicate(call.CallId))
         {
@@ -1394,6 +1452,7 @@ public sealed class Presenter : IPresenter
 
     private void OnToolInvocationCompleted(ToolInvocationCompleted completed)
     {
+        RecordActivity();
         if (!ReferenceEquals(completed.Session, _session) || _state is not (PresenterState.Presenting or PresenterState.Paused))
         {
             LogMessage("info", $"tool invocation for {completed.CallId} dropped: session replaced or run not live");
@@ -1553,7 +1612,7 @@ public sealed class Presenter : IPresenter
         if (_wrappingUp)
         {
             LogMessage("info", "wrap-up finished; ending session");
-            ObserveBackground(EndAsync(), "wrap-up end");
+            ObserveBackground(EndAsync(EndReasons.Completed), "wrap-up end");
             return;
         }
 
@@ -1602,7 +1661,7 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private void OnWrapUpFallback()
+    private async Task OnWrapUpFallbackAsync()
     {
         if (_questionHoldOpen)
         {
@@ -1612,7 +1671,7 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting && _wrappingUp && !_heardOutput)
         {
             LogMessage("warn", "no wrap-up audio; ending session");
-            ObserveBackground(EndAsync(), "wrap-up fallback end");
+            await EndAsyncCore(false, EndReasons.Completed).ConfigureAwait(false);
         }
     }
 
@@ -1711,6 +1770,8 @@ public sealed class Presenter : IPresenter
         ClosePermit();
         _session?.AppendInstructions(PromptBuilder.PauseInstruction(), $"pause-{_slideIndex + 1}");
         SetState(PresenterState.Paused);
+        _guard?.Pause();
+        LimitWarning?.Invoke(new PresenterLimitWarning(EndReasons.Idle, null));
         Flush?.Invoke();
         return true;
     }
@@ -1742,6 +1803,7 @@ public sealed class Presenter : IPresenter
         ClosePermit();
         ClearQuestionHold();
         SetState(PresenterState.Presenting);
+        _guard?.StartPresenting();
         if (_wrappingUp)
         {
             _session?.AppendInstructions(PromptBuilder.WrapUpInstruction(), "wrap-up-resume");
@@ -1784,12 +1846,18 @@ public sealed class Presenter : IPresenter
     private bool SendAudioCore(byte[] pcm16) =>
         (_state is PresenterState.Presenting or PresenterState.Paused) && !_muted && (_session?.SendAudio(pcm16) ?? false);
 
-    private async Task<bool> EndAsyncCore(bool resumable)
+    private async Task<bool> EndAsyncCore(bool resumable, string endReason)
     {
         if (_state is PresenterState.Idle or PresenterState.Ending)
         {
             return false;
         }
+
+        Debug.Assert(EndReasons.All.Contains(endReason));
+        _requestedEndReason = endReason;
+        _talkEndedAt = endReason == EndReasons.MaxLength ? _guard?.MaxEndsAt : _timeProvider.GetUtcNow();
+        _guard?.Dispose();
+        _guard = null;
 
         CompleteSlideDiagnostics();
         ClearTimers();
@@ -1808,7 +1876,7 @@ public sealed class Presenter : IPresenter
         Flush?.Invoke();
         if (session is null)
         {
-            OnClosed("close_requested", null);
+            OnClosed("suspended", null, endReason);
             return true;
         }
 
@@ -1820,7 +1888,7 @@ public sealed class Presenter : IPresenter
         catch (Exception exception)
         {
             LogMessage("error", $"session close failed: {exception.Message}");
-            OnClosed("connection_lost", null);
+            OnClosed("connection_lost", null, endReason);
             await DisposeSessionAsync(session, "failed close").ConfigureAwait(false);
             throw;
         }
@@ -1828,7 +1896,7 @@ public sealed class Presenter : IPresenter
 
     private async Task OnSessionClosedAsync(ILiveSession session, string reason, double? seconds)
     {
-        OnClosed(reason, seconds);
+        OnClosed(reason, seconds, _requestedEndReason ?? EndReasons.UpstreamLost);
         await DisposeSessionAsync(session, "session close").ConfigureAwait(false);
     }
 
@@ -1844,8 +1912,12 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private void OnClosed(string reason, double? seconds)
+    private void OnClosed(string reason, double? seconds, string endReason)
     {
+        Debug.Assert(EndReasons.All.Contains(endReason));
+        _talkEndedAt ??= _timeProvider.GetUtcNow();
+        _guard?.Dispose();
+        _guard = null;
         CompleteSlideDiagnostics();
         ClearTimers();
         ResetUtterance();
@@ -1863,17 +1935,20 @@ public sealed class Presenter : IPresenter
             _lastRun = new LastRun(_presentation.Id, _slideIndex, endedNormally);
         }
 
-        if (seconds.HasValue)
-        {
-            _usageSeconds = seconds.Value;
-        }
+        var estimate = _priorEstimatedSeconds + (_connectedAt is { } connected
+            ? Math.Max(0, (_timeProvider.GetUtcNow() - connected).TotalSeconds) : 0);
+        _usageConfirmed &= seconds.HasValue;
+        _usageSeconds = _priorUsageSeconds + (seconds ?? 0);
+        double? confirmedSeconds = _usageConfirmed ? _usageSeconds : null;
 
         _session = null;
         _sessionInfo = null;
         LogMessage(
             "info",
-            $"closed: reason={reason} usage={(seconds.HasValue ? seconds.Value.ToString() : "unconfirmed")} s{(endedNormally ? string.Empty : $" (Start resumes at slide {_slideIndex + 1})")}");
-        Closed?.Invoke(new PresenterClosed(reason, seconds));
+            $"closed: reason={reason} end={endReason} usage={(confirmedSeconds?.ToString() ?? "unconfirmed")} s" +
+            $" (estimated {estimate:0} s){(endedNormally ? string.Empty : $" (Start resumes at slide {_slideIndex + 1})")}");
+        Closed?.Invoke(new PresenterClosed(reason, confirmedSeconds, endReason, _usageConfirmed, estimate,
+            _talkStartedAt, _talkEndedAt));
         SetState(PresenterState.Idle);
     }
 
@@ -2082,9 +2157,42 @@ public sealed class Presenter : IPresenter
         }
 
         SetState(PresenterState.Presenting);
+        _guard?.StartPresenting();
     }
 
     private bool PartsPending => _partsSent < _parts.Count;
+
+    private void RecordActivity()
+    {
+        if (_state == PresenterState.Presenting && _guard?.Activity() == true)
+            LimitWarning?.Invoke(new PresenterLimitWarning(EndReasons.Idle, null));
+    }
+
+    private async Task OnGuardElapsedAsync()
+    {
+        if (_guard is null || _state is PresenterState.Idle or PresenterState.Ending) return;
+        var due = _guard.Due();
+        if (due.Max)
+        {
+            await EndAsyncCore(false, EndReasons.MaxLength).ConfigureAwait(false);
+            return;
+        }
+        if (due.Idle)
+        {
+            await EndAsyncCore(false, EndReasons.Idle).ConfigureAwait(false);
+            return;
+        }
+        if (due.MaxWarning) RaiseLimitWarning(EndReasons.MaxLength);
+        if (due.IdleWarning) RaiseLimitWarning(EndReasons.Idle);
+    }
+
+    private void RaiseLimitWarning(string kind)
+    {
+        LogMessage("warn", $"limit: {kind} warning, {TalkGuard.WarningLead} s left");
+        LimitWarning?.Invoke(new PresenterLimitWarning(kind, TalkGuard.WarningLead));
+        if (_state == PresenterState.Presenting && _session is not null)
+            _session.AppendInstructions(PromptBuilder.LimitWarningInstruction(kind), $"limit-{kind}-warning");
+    }
 
     private int SlideCount => _presentation?.Slides.Count ?? 0;
 
@@ -2153,7 +2261,7 @@ public sealed class Presenter : IPresenter
         public string? InvocationCallId { get; set; }
     }
 
-    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex) : PresenterEvent
+    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex, int? MaxMinutes) : PresenterEvent
     {
         public TaskCompletionSource<PresenterStartResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
@@ -2166,7 +2274,8 @@ public sealed class Presenter : IPresenter
     private sealed record MuteCommand : Command;
     private sealed record UnmuteCommand : Command;
     private sealed record SendAudioCommand(byte[] Pcm16) : Command;
-    private sealed record EndCommand(bool Resumable) : Command;
+    private sealed record EndCommand(bool Resumable, string EndReason) : Command;
+    private sealed record GuardElapsed(long Generation) : PresenterEvent;
     private sealed record AudioReceived(ILiveSession Session, byte[] Bytes, long? StartMs, long? EndMs) : PresenterEvent;
     private sealed record TranscriptReceived(ILiveSession Session, string Role, string Delta, long? StartMs, long? EndMs) : PresenterEvent;
     private sealed record UsageReceived(ILiveSession Session, double Seconds, double? Ratio) : PresenterEvent;
