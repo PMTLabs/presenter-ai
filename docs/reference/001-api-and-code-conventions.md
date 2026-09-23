@@ -231,3 +231,55 @@ unchanged.
   CI step `openapi-drift` (regenerate the client and fail on diff).
 - **Changing this document** is a plan-level decision: note it in the relevant plan's approval log, bump the
   section, and regenerate the client in the same PR.
+
+## 13. External tools API
+
+The signed-in, caller-owned MCP and hosted-search settings surface is documented in the
+[external tools guide](../guides/003-external-tools.md). Every `/v1/tools` route below requires authorization and
+uses the default CORS policy. `tools` means the endpoint explicitly attaches the 30-per-minute-per-user tools rate
+limit; `—` means no tools policy is attached. Endpoint definitions: `src/PresenterAi.Api/Endpoints/ToolEndpoints.cs`.
+
+| Method | Path | Auth | Tools rate limit |
+|---|---|---|---|
+| GET | `/v1/tools/settings` | signed in | — |
+| PUT | `/v1/tools/settings` | signed in | — |
+| GET | `/v1/tools/servers` | signed in | — |
+| POST | `/v1/tools/servers` | signed in | tools |
+| PATCH | `/v1/tools/servers/{id}` | signed in | — |
+| DELETE | `/v1/tools/servers/{id}` | signed in | — |
+| PUT | `/v1/tools/servers/{id}/credential` | signed in | tools |
+| DELETE | `/v1/tools/servers/{id}/credential` | signed in | — |
+| POST | `/v1/tools/servers/{id}/oauth/start` | signed in | tools |
+| POST | `/v1/tools/oauth/complete` | signed in | tools |
+| POST | `/v1/tools/servers/{id}/test` | signed in | tools |
+| GET | `/v1/tools/servers/{id}/tools` | signed in | tools |
+| PUT | `/v1/tools/servers/{id}/tools/{toolName}` | signed in | — |
+| GET | `/v1/tools/oauth/client-metadata.json` | anonymous | — |
+
+The metadata document is separately mapped by `ToolOAuthMetadataEndpoint`; it is anonymous and returns 404 unless
+`OAuth:ApiBaseUrl` is HTTPS. The tool API uses RFC 9457 Problem Details with these tool-specific codes (exact string
+values from `PresenterAi.Contracts/ErrorCodes.cs`):
+
+| Code | HTTP | Typical meaning |
+|---|---:|---|
+| `tools_url_invalid` | 400 | Invalid server URL. |
+| `tools_url_blocked` | 400 | Host resolves to a non-public/blocked address. |
+| `tools_server_limit` | 400 | User already has the maximum server count. |
+| `tools_name_invalid` | 400 | Invalid server name. |
+| `tools_server_not_found` | 404 | Server is absent or not owned by caller. |
+| `tools_header_invalid` | 400 | Invalid or forbidden auth header. |
+| `tools_credentials_unavailable` | 503 | Credential encryption key is not configured. |
+| `tools_oauth_unsupported` | 400 | Required OAuth capability/client metadata is unavailable or incompatible. |
+| `tools_oauth_client_required` | 400 | A pre-registered client ID must be provided. |
+| `tools_unreachable` | 502 | Remote server could not be reached. |
+| `tools_redirect_refused` | 400 | Redirect refused by outbound request policy. |
+| `tools_oauth_state_invalid` | 400 | Invalid, expired, consumed, or wrong-owner OAuth state. |
+| `tools_oauth_failed` | 400 | OAuth exchange failed. |
+| `tools_auth` | 401 | Remote MCP authentication failed. |
+| `tools_response_too_large` | 502 | Remote response exceeded its cap. |
+| `tools_oauth_invalid_grant` | 400 | OAuth refresh grant is invalid. |
+| `validation.failed` | 400 | Invalid per-tool override name. |
+
+These values are the stable HTTP `code`s; runtime tool outcomes such as `timeout`, `credential_key_changed`, and
+`credential_unreadable` are status/log values, not additions to the HTTP error-code catalogue. See `ErrorCodes.cs`
+for the full catalogue and the guide for setup and recovery.
