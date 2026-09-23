@@ -98,6 +98,12 @@ describe("Present", () => {
     usePresenterStore.setState({
       snapshot: { state: "idle", slideIndex: 0, slideCount: 0, muted: false },
       logs: [],
+      limitWarning: null,
+      upstreamStatus: null,
+      suspended: false,
+      endReason: null,
+      usageConfirmed: null,
+      estimatedSeconds: null,
     });
     post.mockResolvedValue({ data: { ticket: "ticket" } });
     startAudio.mockResolvedValue({
@@ -108,7 +114,10 @@ describe("Present", () => {
     });
   });
 
-  afterEach(() => clearAuthSession());
+  afterEach(() => {
+    vi.useRealTimers();
+    clearAuthSession();
+  });
 
   it("flushes playback once and logs when capture reports barge-in", async () => {
     signIn();
@@ -369,5 +378,107 @@ describe("Present", () => {
     emitBridge("accepted");
     expect(screen.queryByText(notice)).toBeNull();
     expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false);
+  });
+
+  it("shows a countdown banner on limit_warning and clears it", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+
+    vi.useFakeTimers();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("limit_warning", { type: "limit_warning", kind: "max_length", secondsLeft: 60 });
+    expect(screen.getByRole("alert").textContent).toContain("Time limit warning: 60s remaining");
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByRole("alert").textContent).toContain("Time limit warning: 59s remaining");
+
+    emitBridge("limit_warning", { type: "limit_warning", kind: "max_length", secondsLeft: null });
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    emitBridge("limit_warning", { type: "limit_warning", kind: "idle", secondsLeft: 45 });
+    expect(screen.getByRole("alert").textContent).toContain("Inactivity warning: 45s remaining");
+
+    emitBridge("closed", { type: "closed", endReason: "idle" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("shows the disconnected banner while suspended", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false, suspended: true });
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Paused — disconnected to save cost; Resume reconnects",
+    );
+
+    emitBridge("upstream", { type: "upstream", status: "reconnecting" });
+    expect((await screen.findByRole("alert")).textContent).toContain("Reconnecting…");
+
+    emitBridge("upstream", { type: "upstream", status: "live" });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("length picker sends the chosen override", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    const select = await screen.findByRole("combobox", { name: "Length" });
+    expect(select).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Default (60 min)" })).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: "15" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await vi.waitFor(() => expect(startAudio).toHaveBeenCalledOnce());
+    expect(bridgeStart).toHaveBeenCalledWith("demo", undefined, 15);
+  });
+
+  it("length picker uses presentation maxMinutes as default", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections", maxMinutes: 45 } },
+    });
+    renderPresent();
+    const select = await screen.findByRole("combobox", { name: "Length" });
+    expect(select).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Default (45 min)" })).toBeTruthy();
+  });
+
+  it("hides length picker while presenting", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    expect(await screen.findByRole("combobox", { name: "Length" })).toBeTruthy();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    expect(screen.queryByRole("combobox", { name: "Length" })).toBeNull();
+  });
+
+  it("shows the end reason in plain words when a talk closes", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("closed", {
+      type: "closed",
+      endReason: "max_length",
+      usageConfirmed: true,
+      estimatedSeconds: 3600,
+    });
+    emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 1, muted: false });
+    expect(await screen.findByText("Talk ended: Maximum talk length reached")).toBeTruthy();
   });
 });
