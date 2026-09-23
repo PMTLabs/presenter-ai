@@ -21,6 +21,7 @@ public sealed class Presenter : IPresenter
     public const int NudgeMs = 15_000;
     public const int WrapUpFallbackMs = 15_000;
     public const int QuestionHoldMs = 15_000;
+    public const int FollowUpWaitMs = 5_000;
     public const int MaxUpstreamAttempts = 4;
     public const int PartGapMs = 2_500;
 
@@ -69,6 +70,7 @@ public sealed class Presenter : IPresenter
     private long _questionOpenedAt;
     private long? _latestQuestionEndMs;
     private string? _pendingBackendDelegation;
+    private int _resumeSequence;
     private PresenterSnapshot _snapshot;
     private int _disposed;
 
@@ -564,12 +566,21 @@ public sealed class Presenter : IPresenter
                 if (!_answerVoiced)
                 {
                     _answerVoiced = true;
+                    // The follow-up window takes over from here; the 15 s timer must not cut a long answer short.
+                    ClearQuestionTimer();
                     var elapsed = (long)_timeProvider.GetElapsedTime(_questionOpenedAt).TotalMilliseconds;
                     LogMessage("info", $"question: answered after {elapsed} ms");
                 }
             }
 
-            ArmAfterVoice();
+            if (_questionHoldOpen && _answerVoiced)
+            {
+                SetSilenceTimer(FollowUpWaitMs, partGap: false);
+            }
+            else
+            {
+                ArmAfterVoice();
+            }
         }
     }
 
@@ -679,14 +690,9 @@ public sealed class Presenter : IPresenter
 
     private void OnPartGap()
     {
-        if (_questionHoldOpen)
+        if (HoldBlocksProgress())
         {
-            if (!_answerVoiced)
-            {
-                return;
-            }
-
-            ClearQuestionHold();
+            return;
         }
 
         if (_state == PresenterState.Presenting && PartsPending)
@@ -697,14 +703,9 @@ public sealed class Presenter : IPresenter
 
     private void OnSilence()
     {
-        if (_questionHoldOpen)
+        if (HoldBlocksProgress())
         {
-            if (!_answerVoiced)
-            {
-                return;
-            }
-
-            ClearQuestionHold();
+            return;
         }
 
         if (_state != PresenterState.Presenting || !_heardOutput || PartsPending)
@@ -1027,10 +1028,35 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        LogMessage("info", "question: released after 15 s without an answer");
+        ResumeAfterQuestion("question: released after 15 s without an answer");
+    }
+
+    // An open hold never lets a timer advance. Once the answer has been followed by FollowUpWaitMs of quiet, the
+    // model is told to resume the slide; the ordinary timers take over from there.
+    private bool HoldBlocksProgress()
+    {
+        if (!_questionHoldOpen)
+        {
+            return false;
+        }
+
+        if (_answerVoiced)
+        {
+            ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs / 1000} s; resuming");
+        }
+
+        return true;
+    }
+
+    private void ResumeAfterQuestion(string message)
+    {
+        LogMessage("info", message);
         ClearQuestionHold();
         if (_heardOutput)
         {
+            _session?.AppendInstructions(
+                PromptBuilder.ResumeAfterQuestionInstruction(),
+                $"slide-{_slideIndex + 1}-resume-{++_resumeSequence}");
             ArmAfterVoice();
         }
         else if (_wrappingUp)

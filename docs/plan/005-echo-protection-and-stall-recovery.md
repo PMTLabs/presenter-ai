@@ -182,6 +182,14 @@ reasoning effort, priority tier, low verbosity).
   - the 15 s timer releases the hold and restores normal timing (ordinary silence if the slide has voiced output,
     otherwise the nudges continue); it never advances synchronously;
   - pause, stall pause, navigation, end and close clear the hold.
+  - *Follow-up window (2026-09-22, user request after the first live run):* the model no longer bridges back on its
+    own. After answering it stays silent (prompt rule), and once the answer is followed by `FollowUpWaitMs` (5 s) of
+    quiet, `Presenter` appends `slide-N-resume-K`: say a short bridge, then restart the interrupted sentence (the live
+    run resumed mid-sentence and was hard to follow). A new question inside the window reopens the hold. The resume
+    replaces the old "normal action on silence", so the slide never advances straight after an answer; the ordinary
+    timers take over once the model speaks again, or after the usual silence if it does not. The 15 s timer stops once
+    the answer is heard, so a long answer is not cut short; an unanswered hold also ends with the resume instruction.
+    Cost: a false hold (noise transcribed as speech while the model keeps talking) adds up to 5 s at the next pause.
 - **Diagnostics:** info lines `question: hold opened`, `question: delegated (backend|client)`, `question: answered
   after N ms`, `question: released after 15 s without an answer`; no transcript text at info level.
 

@@ -79,10 +79,13 @@ public sealed class PresenterTests
         await harness.Flush();
         harness.Session().Speak(startMs: 101, endMs: 200);
         await harness.Flush();
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(1500));
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.FollowUpWaitMs - 1));
         await harness.Flush();
         Assert.Equal([0], harness.Slides);
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(600));
+        Assert.DoesNotContain(harness.Session().Sent, IsResume);
+        await harness.EndFollowUp(1);
+        Assert.Equal([0], harness.Slides);
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
         Assert.Equal([0, 1], harness.Slides);
     }
@@ -556,10 +559,9 @@ public sealed class PresenterTests
         await harness.Flush();
         harness.Session().Speak(startMs: 101, endMs: 200);
         await harness.Flush();
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(1500));
-        await harness.Flush();
+        await harness.EndFollowUp();
         Assert.Equal(0, harness.Presenter.Snapshot().SlideIndex);
-        harness.Clock.Advance(TimeSpan.FromMilliseconds(600));
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
         Assert.Equal(1, harness.Presenter.Snapshot().SlideIndex);
     }
@@ -578,9 +580,67 @@ public sealed class PresenterTests
 
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
+        Assert.Equal([0], harness.Slides);
 
+        await harness.EndFollowUp(Presenter.FollowUpWaitMs - 2001 + 1);
+        var resume = Assert.Single(harness.Session().Sent, IsResume);
+        Assert.Equal("slide-1-resume-1", resume.EventId);
+        Assert.Equal(PromptBuilder.ResumeAfterQuestionInstruction(), resume.Content);
+        Assert.Contains(new PresenterLog("info", $"question: no follow-up after {Presenter.FollowUpWaitMs / 1000} s; resuming"), harness.Logs);
+        Assert.Equal([0], harness.Slides);
+
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
+        await harness.Flush();
         Assert.Equal([0, 1], harness.Slides);
         Assert.Contains(harness.Logs, log => log.Message.StartsWith("question: answered after ", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Follow_up_question_inside_the_window_keeps_the_hold()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        harness.Session().Speak();
+        await harness.Flush();
+        harness.Session().Hear("question");
+        await harness.Flush();
+        harness.Session().Speak();
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.FollowUpWaitMs - 1000));
+        harness.Session().Hear("and another one", startMs: 300, endMs: 400);
+        harness.Session().Speak(startMs: 0, endMs: 100);
+        await harness.Flush();
+        harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.FollowUpWaitMs + 1));
+        await harness.Flush();
+        Assert.DoesNotContain(harness.Session().Sent, IsResume);
+
+        harness.Session().Speak(startMs: 500, endMs: 600);
+        await harness.Flush();
+        await harness.EndFollowUp();
+        Assert.Single(harness.Session().Sent, IsResume);
+        Assert.Equal([0], harness.Slides);
+    }
+
+    [Fact]
+    public async Task Long_answer_is_not_cut_short_by_the_question_timer()
+    {
+        await using var harness = Create();
+        await harness.Presenter.StartAsync("p");
+        harness.Session().Speak();
+        await harness.Flush();
+        harness.Session().Hear("question");
+        await harness.Flush();
+        for (var second = 0; second < 20; second++)
+        {
+            harness.Session().Speak();
+            await harness.Flush();
+            harness.Clock.Advance(TimeSpan.FromMilliseconds(1000));
+            await harness.Flush();
+        }
+
+        Assert.DoesNotContain(harness.Session().Sent, IsResume);
+        Assert.DoesNotContain(harness.Logs, log => log.Message.StartsWith("question: released", StringComparison.Ordinal));
+        Assert.Equal([0], harness.Slides);
     }
 
     [Fact]
@@ -598,6 +658,8 @@ public sealed class PresenterTests
 
         harness.Session().Speak(startMs: 101, endMs: 200);
         await harness.Flush();
+        await harness.EndFollowUp();
+        Assert.DoesNotContain(harness.Session().Sent, item => item.EventId == "slide-1-part-2");
         harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.PartGapFor(2000) + 1));
         await harness.Flush();
         Assert.Contains(harness.Session().Sent, item => item.EventId == "slide-1-part-2");
@@ -774,6 +836,7 @@ public sealed class PresenterTests
         Assert.Contains(new PresenterLog("info", "question: backend answer ready"), harness.Logs);
         harness.Session().Speak();
         await harness.Flush();
+        await harness.EndFollowUp();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
 
@@ -793,6 +856,7 @@ public sealed class PresenterTests
         harness.Session().RaiseDelegatedResponse("delegation-10", "response.failed");
         harness.Session().Speak();
         await harness.Flush();
+        await harness.EndFollowUp();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
 
@@ -822,6 +886,9 @@ public sealed class PresenterTests
         Assert.Contains(new PresenterLog("warn", "delegation: backend unavailable (x); answering from the deck only"), harness.Logs);
         Assert.Equal("T", harness.Session().Request?.Title);
     }
+
+    private static bool IsResume((string Type, string? Content, string? EventId, string? DelegationId) item) =>
+        item.EventId?.Contains("-resume-", StringComparison.Ordinal) is true;
 
     private static Harness Create(
         IReadOnlyList<Slide>? slides = null,
@@ -900,6 +967,12 @@ public sealed class PresenterTests
         public FakeSession Session() => Sessions[^1];
 
         public Task Flush() => Presenter.WaitUntilIdleAsync();
+
+        public async Task EndFollowUp(int milliseconds = PresenterAi.Application.Presenting.Presenter.FollowUpWaitMs + 1)
+        {
+            Clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            await Flush();
+        }
 
         public ValueTask DisposeAsync() => Presenter.DisposeAsync();
     }
