@@ -153,6 +153,33 @@ public sealed class PresenterLifetimeTests
     }
 
     [Fact]
+    public async Task End_while_the_request_is_built_creates_no_upstream_and_keeps_the_end_reason()
+    {
+        var created = 0;
+        var closed = new List<PresenterClosed>();
+        Task<bool>? end = null;
+        Presenter? presenter = null;
+        presenter = new Presenter((_, _) => { created++; return new FakeSession(); },
+            (_, id, _) => Task.FromResult(new LoadedPresentation(id,
+                new PresentationMeta(id, "Title", "deck", "show", null, null, null),
+                [new Slide(0, 1, "One", "Narration.", null)], null)),
+            new PresenterSettings(MaxTalkMinutes: 5), new FakeTimeProvider(),
+            hasDelegationModel: _ =>
+            {
+                // Runs on the loop after the attempt's first cancellation check, while the request is built.
+                end ??= presenter!.EndAsync(EndReasons.User);
+                return true;
+            });
+        await using var _ = presenter;
+        presenter.Closed += closed.Add;
+        Assert.False((await presenter.StartAsync("deck", null, "owner")).Started);
+        await end!;
+        Assert.Equal(0, created);
+        Assert.Equal(EndReasons.User, Assert.Single(closed).EndReason);
+        Assert.Equal("idle", presenter.Snapshot().State);
+    }
+
+    [Fact]
     public async Task End_cancels_an_in_flight_tool_call()
     {
         var tool = new CancellableTool(false);

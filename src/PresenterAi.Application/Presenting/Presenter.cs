@@ -852,6 +852,9 @@ public sealed class Presenter : IPresenter
             var request = new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice,
                 presentation.Meta.Title, inlineTools, delegationInstructions,
                 isManaged ? _sessionTools?.HostedTools : null);
+            // Building the request runs host callbacks; re-check so a signal raised meanwhile creates no candidate.
+            if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                return new ConnectResult(null, null, null, true);
             var candidate = _createSession(request, attempt);
             if (candidate is null) break;
             var label = candidate.Name ?? $"upstream #{attempt + 1}";

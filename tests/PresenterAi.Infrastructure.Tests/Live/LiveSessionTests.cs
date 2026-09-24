@@ -33,6 +33,20 @@ public sealed class LiveSessionTests
     }
 
     [Fact]
+    public async Task Connect_with_a_cancelled_token_throws_without_opening_a_connection()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider());
+
+        var action = async () => await session.ConnectAsync(new CancellationToken(canceled: true));
+
+        await action.Should().ThrowAsync<OperationCanceledException>();
+        server.Headers.Should().BeNull("no HTTP upgrade request reached the server");
+        server.ConnectionCount.Should().Be(0);
+        server.ReceivedSnapshot().Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Session_start_sends_responses_delegation_when_a_model_is_set()
     {
         await using var server = await FakeLiveServer.StartAsync();
