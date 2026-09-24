@@ -175,6 +175,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/presentations/{id}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["ListPresentationRevisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/presentations/{id}/revisions/{number}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["GetPresentationRevision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/presentations/{id}/revisions/{number}/revert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["RevertPresentationRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sessions/ticket": {
         parameters: {
             query?: never;
@@ -408,6 +456,15 @@ export interface components {
             /** Format: int32 */
             total: number | string;
         };
+        ListResponseOfRevisionSummary: {
+            items: components["schemas"]["RevisionSummary"][];
+            /** Format: int32 */
+            page: number | string;
+            /** Format: int32 */
+            pageSize: number | string;
+            /** Format: int32 */
+            total: number | string;
+        };
         ListResponseOfSsoProviderResponse: {
             items: components["schemas"]["SsoProviderResponse"][];
             /** Format: int32 */
@@ -416,6 +473,11 @@ export interface components {
             pageSize: number | string;
             /** Format: int32 */
             total: number | string;
+        };
+        PendingEditDto: {
+            id: string;
+            slideIndexes: (number | string)[];
+            status: string;
         };
         PresentationDetail: {
             hasContext: boolean;
@@ -453,6 +515,55 @@ export interface components {
             status?: null | number | string;
             title?: null | string;
             type?: null | string;
+        };
+        RevertResponse: {
+            pendingEdits: components["schemas"]["PendingEditDto"][];
+            revision: components["schemas"]["RevisionSummary"];
+        };
+        RevisionChange: {
+            after: null | string;
+            before: null | string;
+            /** Format: int32 */
+            slideIndex: number | string;
+            title: string;
+        };
+        RevisionDetail: {
+            /** Format: int32 */
+            baseVersion: null | number | string;
+            changedSlides: (number | string)[];
+            changes: components["schemas"]["RevisionChange"][];
+            /** Format: date-time */
+            createdAt: string;
+            isCurrent: boolean;
+            /** Format: int32 */
+            number: number | string;
+            /** Format: int32 */
+            revertedFrom: null | number | string;
+            slides: components["schemas"]["RevisionSlide"][];
+            source: string;
+            summary: string;
+        };
+        RevisionSlide: {
+            /** Format: int32 */
+            index: number | string;
+            narration: string;
+            /** Format: int32 */
+            number: number | string;
+            title: string;
+        };
+        RevisionSummary: {
+            /** Format: int32 */
+            baseVersion: null | number | string;
+            changedSlides: (number | string)[];
+            /** Format: date-time */
+            createdAt: string;
+            isCurrent: boolean;
+            /** Format: int32 */
+            number: number | string;
+            /** Format: int32 */
+            revertedFrom: null | number | string;
+            source: string;
+            summary: string;
         };
         SaveToolCredentialRequest: {
             headerName: string;
@@ -924,6 +1035,149 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    ListPresentationRevisions: {
+        parameters: {
+            query?: {
+                page?: number | string;
+                pageSize?: number | string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListResponseOfRevisionSummary"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    GetPresentationRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                number: number | string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevisionDetail"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+        };
+    };
+    RevertPresentationRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                number: number | string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RevertResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ProblemDetails"];
+                };
+            };
+            /** @description Conflict */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

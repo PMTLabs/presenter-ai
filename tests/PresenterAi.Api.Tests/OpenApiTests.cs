@@ -29,6 +29,7 @@ public sealed class OpenApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
             ["presentation.not_found"] = 404,
             ["presentation.invalid_script"] = 400,
             ["presentation.slide_count_mismatch"] = 409,
+            ["revision.not_found"] = 404,
             ["deck.not_found"] = 404,
             ["deck.unsupported_format"] = 415,
             ["deck.no_driver"] = 422,
