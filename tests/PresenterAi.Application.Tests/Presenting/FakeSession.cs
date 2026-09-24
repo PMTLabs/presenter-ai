@@ -9,7 +9,13 @@ internal sealed class FakeSession : ILiveSession
 
     public bool FailConnect { get; set; }
 
+    public string DelegationMode { get; set; } = "responses";
+
     public bool ThrowOnClose { get; set; }
+    public bool RefuseToolOutput { get; set; }
+    public bool RefuseContinue { get; set; }
+    public TaskCompletionSource? CloseGate { get; set; }
+    public bool DeferCloseEvent { get; set; }
 
     public string? WarnOnConnect { get; set; }
 
@@ -34,6 +40,7 @@ internal sealed class FakeSession : ILiveSession
     public event Action<JsonElement>? UpstreamError;
     public event Action<string>? Warning;
     public event Action<string, string>? DelegatedResponseFinished;
+    public event Action<string, string, string, string>? ToolCallRequested;
     public event Action<string, double?>? Closed;
 
     public Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
@@ -49,7 +56,7 @@ internal sealed class FakeSession : ILiveSession
         }
 
         State = LiveSessionState.Open;
-        var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"));
+        var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"), DelegationMode);
         Started?.Invoke(session);
         return Task.FromResult(session);
     }
@@ -59,6 +66,20 @@ internal sealed class FakeSession : ILiveSession
     public string? AppendThinking(string content, string? eventId = null, string? delegationId = null) => Append("thinking", content, eventId, delegationId);
 
     public string? AppendCommentary(string content, string? eventId = null, string? delegationId = null) => Append("commentary", content, eventId, delegationId);
+
+    public bool SubmitToolOutput(string callId, string output)
+    {
+        if (RefuseToolOutput) return false;
+        Sent.Add(("tool_output", output, callId, null));
+        return true;
+    }
+
+    public bool ContinueResponses()
+    {
+        if (RefuseContinue) return false;
+        Sent.Add(("continue_responses", null, null, null));
+        return true;
+    }
 
     public bool Mute()
     {
@@ -78,17 +99,21 @@ internal sealed class FakeSession : ILiveSession
         return true;
     }
 
-    public Task<LiveCloseResult> CloseAsync()
+    public async Task<LiveCloseResult> CloseAsync()
     {
         Sent.Add(("close", null, null, null));
+        if (CloseGate is not null) await CloseGate.Task;
         if (ThrowOnClose)
         {
             throw new InvalidOperationException("close failed");
         }
 
-        State = LiveSessionState.Closed;
-        Closed?.Invoke("close_requested", 7);
-        return Task.FromResult(new LiveCloseResult("close_requested", 7));
+        if (!DeferCloseEvent)
+        {
+            State = LiveSessionState.Closed;
+            Closed?.Invoke("close_requested", 7);
+        }
+        return new LiveCloseResult("close_requested", 7);
     }
 
     public ValueTask DisposeAsync()
@@ -126,6 +151,9 @@ internal sealed class FakeSession : ILiveSession
 
     public void RaiseDelegatedResponse(string id, string type = "response.completed") =>
         DelegatedResponseFinished?.Invoke(id, type);
+
+    public void RaiseToolCall(string delegationId, string callId, string name, string arguments) =>
+        ToolCallRequested?.Invoke(delegationId, callId, name, arguments);
 
     private string? Append(string type, string content, string? eventId, string? delegationId)
     {

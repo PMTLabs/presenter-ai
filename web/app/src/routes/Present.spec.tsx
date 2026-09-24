@@ -126,6 +126,18 @@ describe("Present", () => {
     );
   });
 
+  it("flushes queued playback when the server sends flush", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    await vi.waitFor(() => expect(bridgeStart).toHaveBeenCalledOnce());
+    emitBridge("flush");
+    expect(playbackFlush).toHaveBeenCalledOnce();
+  });
+
   it("passes echoGate=off to startAudio", async () => {
     window.history.pushState({}, "", "/present/demo?echoGate=off");
     signIn();

@@ -5,6 +5,7 @@ public interface IPresenter : IAsyncDisposable
     event Action<PresenterSnapshot>? State;
     event Action<int>? Slide;
     event Action<PresenterAudio>? Audio;
+    event Action? Flush { add { } remove { } }
     event Action<PresenterTranscript>? Transcript;
     event Action<PresenterUsage>? Usage;
     event Action<PresenterClosed>? Closed;
@@ -18,6 +19,7 @@ public interface IPresenter : IAsyncDisposable
     Task<bool> PrevAsync(CancellationToken cancellationToken = default);
     Task<bool> GotoAsync(int index, CancellationToken cancellationToken = default);
     Task<bool> PauseAsync(CancellationToken cancellationToken = default);
+    Task<bool> RequestEndConfirmationAsync(bool confirmed, CancellationToken cancellationToken = default) => PauseAsync(cancellationToken);
     Task<bool> ResumeAsync(CancellationToken cancellationToken = default);
     Task<bool> MuteAsync(CancellationToken cancellationToken = default);
     Task<bool> UnmuteAsync(CancellationToken cancellationToken = default);

@@ -60,6 +60,15 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Question_resume_asks_for_a_natural_transition_not_a_canned_bridge()
+    {
+        var instruction = PromptBuilder.ResumeAfterQuestionInstruction();
+        Assert.Contains("natural transition of your own", instruction);
+        Assert.Contains("restart the sentence", instruction);
+        Assert.DoesNotContain("Back to the slide", instruction);
+    }
+
+    [Fact]
     public void Slide_instruction_variants_match_node_goldens()
     {
         Assert.Equal(

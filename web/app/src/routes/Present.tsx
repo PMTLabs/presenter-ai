@@ -138,6 +138,7 @@ export function Present() {
         if (event === "closed") stopAudio();
       });
     bridge.on("audio", (buffer) => audio.current?.playback.enqueue(buffer));
+    bridge.on("flush", () => audio.current?.playback.flush());
     bridge.on("open", () => log("info", "connected to server"));
     bridge.on("close", () => log("warn", "server connection closed"));
     bridge.on("busy", (busy) => {

@@ -33,7 +33,11 @@ public sealed class BridgeTests
         var appends = fake.ReceivedSnapshot().Where(message => message["type"]?.GetValue<string>() == "session.input_audio.append" && message["silent"]?.GetValue<bool>() == false).TakeLast(2).ToArray();
         appends.Select(message => message["audioLength"]!.GetValue<int>()).Should().OnlyContain(length => length == Convert.ToBase64String(new byte[960]).Length);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"pause\"}");
-        await BridgeTestSupport.WaitForAsync(() => fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.input_audio.mute"));
+        (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "flush"))["type"]!.GetValue<string>().Should().Be("flush");
+        fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.input_audio.mute").Should().BeFalse();
+        var beforePausedAudio = fake.ReceivedSnapshot().Count(message => message["type"]?.GetValue<string>() == "session.input_audio.append" && message["silent"]?.GetValue<bool>() == false);
+        await socket.SendAsync(new byte[960].Select(_ => (byte)1).ToArray(), WebSocketMessageType.Binary, true, CancellationToken.None);
+        await BridgeTestSupport.WaitForAsync(() => fake.ReceivedSnapshot().Count(message => message["type"]?.GetValue<string>() == "session.input_audio.append" && message["silent"]?.GetValue<bool>() == false) > beforePausedAudio);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"end\"}");
         (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "closed"))["seconds"]!.GetValue<double>().Should().Be(7);
         fake.ReceivedSnapshot().Any(message => message["type"]?.GetValue<string>() == "session.close").Should().BeTrue();

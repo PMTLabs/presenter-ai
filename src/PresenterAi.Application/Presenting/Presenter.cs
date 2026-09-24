@@ -1,10 +1,18 @@
 using System.Text.Json;
 using System.Threading.Channels;
 using PresenterAi.Application.Scripts;
+using PresenterAi.Application.Tools;
+using PresenterAi.Application.Presenting.VoiceCommands;
+using PresenterToolsRegistration = PresenterAi.Application.Presenting.Tools.PresenterToolsRegistration;
 
 namespace PresenterAi.Application.Presenting;
 
-public sealed record SessionRequest(string Instructions, string Voice, string Title);
+public sealed record SessionRequest(
+    string Instructions,
+    string Voice,
+    string Title,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null,
+    string? DelegationInstructions = null);
 
 public sealed record LoadedPresentation(
     string Id,
@@ -70,8 +78,37 @@ public sealed class Presenter : IPresenter
     private bool _answerVoiced;
     private long _questionOpenedAt;
     private long? _latestQuestionEndMs;
-    private string? _pendingBackendDelegation;
+    private readonly ToolRegistry _toolRegistry;
+    private readonly Func<int, bool>? _hasDelegationModel;
+    private readonly ToolRoundTracker _toolRoundTracker = new();
+    private static readonly AsyncLocal<string?> ActiveToolCallId = new();
+    private ToolSessionCatalogue? _catalogue;
+    private long _runGeneration;
+    private readonly Dictionary<string, long> _navigatingCallIds = new(StringComparer.Ordinal);
     private int _resumeSequence;
+    private enum Interaction { None, Answering, AwaitingCarryOn, WaitingOnSlide, AwaitingEndQuestion, AwaitingEndAnswer }
+    private Interaction _interaction;
+    private bool _rangeReply;
+    private ITimer? _interactionTimer;
+    private long _interactionGeneration;
+    private ITimer? _utteranceTimer;
+    private long _utteranceGeneration;
+    private string _utterance = "";
+    private long? _utteranceStartMs;
+    private long? _utteranceEndMs;
+    private long _utteranceOpenedAt;
+    private bool _utteranceTooLong;
+    private bool _utteranceDuringSpeech;
+    private bool _utteranceBeganDuringCarryOn;
+    private bool _utteranceBeganDuringWaiting;
+    private readonly Queue<(long Start, long End)> _voicedIntervals = new();
+    private long _lastVoicedAt;
+    private long? _permitBarrierMs;
+    private bool _speechPermit;
+    private bool _endQuestionVoiced;
+    private long _lastAnswerAt;
+    private ITimer? _permitTimer;
+    private long _permitGeneration;
     private PresenterSnapshot _snapshot;
     private int _disposed;
 
@@ -79,19 +116,29 @@ public sealed class Presenter : IPresenter
         Func<SessionRequest, int, ILiveSession?> createSession,
         Func<string, string, CancellationToken, Task<LoadedPresentation>> loadPresentation,
         PresenterSettings? settings = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ToolRegistry? toolRegistry = null,
+        Func<int, bool>? hasDelegationModel = null)
     {
         _createSession = createSession ?? throw new ArgumentNullException(nameof(createSession));
         _loadPresentation = loadPresentation ?? throw new ArgumentNullException(nameof(loadPresentation));
         _settings = settings ?? new PresenterSettings();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _toolRegistry = toolRegistry ?? new ToolRegistry();
+        _hasDelegationModel = hasDelegationModel;
+        PresenterToolsRegistration.RegisterAll(_toolRegistry, this);
         _snapshot = BuildSnapshot();
         _loop = Task.Run(RunLoopAsync);
     }
 
+    public ToolRegistry ToolRegistry => _toolRegistry;
+    public ToolSessionCatalogue? Catalogue => _catalogue;
+    public ToolRoundTracker ToolRoundTracker => _toolRoundTracker;
+
     public event Action<PresenterSnapshot>? State;
     public event Action<int>? Slide;
     public event Action<PresenterAudio>? Audio;
+    public event Action? Flush;
     public event Action<PresenterTranscript>? Transcript;
     public event Action<PresenterUsage>? Usage;
     public event Action<PresenterClosed>? Closed;
@@ -127,6 +174,9 @@ public sealed class Presenter : IPresenter
 
     public Task<bool> PauseAsync(CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new PauseCommand(), cancellationToken);
+
+    public Task<bool> RequestEndConfirmationAsync(bool confirmed, CancellationToken cancellationToken = default) =>
+        EnqueueCommandAsync(new ConfirmEndCommand(confirmed), cancellationToken);
 
     public Task<bool> ResumeAsync(CancellationToken cancellationToken = default) =>
         EnqueueCommandAsync(new ResumeCommand(), cancellationToken);
@@ -186,6 +236,7 @@ public sealed class Presenter : IPresenter
     private async Task<bool> EnqueueCommandAsync(Command command, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
+        command.InvocationCallId = ActiveToolCallId.Value;
         await WriteAsync(command, cancellationToken).ConfigureAwait(false);
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -221,7 +272,7 @@ public sealed class Presenter : IPresenter
         {
             if (completed.Exception is not null)
             {
-                LogMessage("error", $"{operation} failed: {completed.Exception.GetBaseException().Message}");
+                QueueFromProducer(new BackgroundFailure(operation, completed.Exception.GetBaseException().Message));
             }
         }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
@@ -303,8 +354,25 @@ public sealed class Presenter : IPresenter
                         _questionTimer = null;
                         OnQuestionHoldElapsed();
                         break;
+                    case UtteranceElapsed gap when gap.Generation == _utteranceGeneration:
+                        _utteranceTimer = null;
+                        CompleteUtterance();
+                        break;
+                    case InteractionElapsed phase when phase.Generation == _interactionGeneration:
+                        _interactionTimer = null;
+                        OnInteractionElapsed();
+                        break;
+                    case PermitElapsed permit when permit.Generation == _permitGeneration:
+                        ClosePermit();
+                        break;
                     case DelegatedResponseReceived response:
                         OnDelegatedResponse(response);
+                        break;
+                    case ToolCallReceived toolCall:
+                        OnToolCall(toolCall);
+                        break;
+                    case ToolInvocationCompleted completed:
+                        OnToolInvocationCompleted(completed);
                         break;
                     case SessionWarning warning:
                         if (ReferenceEquals(warning.Session, _session))
@@ -313,11 +381,17 @@ public sealed class Presenter : IPresenter
                         }
 
                         break;
+                    case BackgroundFailure failure:
+                        LogMessage("error", $"{failure.Operation} failed: {failure.Message}");
+                        break;
                     case Barrier barrier:
                         barrier.Completion.TrySetResult();
                         break;
                     case Shutdown shutdown:
                         ClearTimers();
+                        _navigatingCallIds.Clear();
+                        _runGeneration++;
+                        _toolRoundTracker.Clear();
                         var session = _session;
                         _session = null;
                         if (session is not null)
@@ -353,10 +427,11 @@ public sealed class Presenter : IPresenter
         {
             var result = command switch
             {
-                NextCommand => NextCore(),
-                PrevCommand => PrevCore(),
-                GotoCommand goTo => GotoCore(goTo.Index),
+                NextCommand next => NextCore(next.InvocationCallId),
+                PrevCommand prev => PrevCore(prev.InvocationCallId),
+                GotoCommand goTo => GotoCore(goTo.Index, goTo.InvocationCallId),
                 PauseCommand => PauseCore(),
+                ConfirmEndCommand confirm => await ConfirmEndCore(confirm.Confirmed).ConfigureAwait(false),
                 ResumeCommand => ResumeCore(),
                 MuteCommand => MuteCore(),
                 UnmuteCommand => UnmuteCore(),
@@ -380,7 +455,15 @@ public sealed class Presenter : IPresenter
             return new PresenterStartResult(false, id, null, null, null);
         }
 
+        ResetUtterance();
+        SetInteraction(Interaction.None);
+        _voicedIntervals.Clear();
+        _lastVoicedAt = 0;
         _endResumable = false;
+        _navigatingCallIds.Clear();
+        _runGeneration++;
+        _toolRoundTracker.Clear();
+        _catalogue = _toolRegistry.CreateCatalogue(_settings.MaxInlineTools);
         SetState(PresenterState.Connecting);
         try
         {
@@ -395,17 +478,32 @@ public sealed class Presenter : IPresenter
         }
 
         var presentation = _presentation;
-        var instructions = PromptBuilder.SystemInstructions(
-            presentation.Meta.Title,
-            presentation.Slides,
-            presentation.Context,
-            onWarn: message => LogMessage("warn", message));
         ILiveSession? session = null;
         LiveSessionInfo? sessionInfo = null;
         string? upstream = null;
         for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
         {
-            var candidate = _createSession(new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice, presentation.Meta.Title), attempt);
+            var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
+            var instructions = PromptBuilder.SystemInstructions(
+                presentation.Meta.Title,
+                presentation.Slides,
+                presentation.Context,
+                onWarn: message => LogMessage("warn", message),
+                managedMode: isManaged);
+
+            var inlineTools = isManaged ? _catalogue.GetInlineToolDefinitions() : null;
+            var delegationInstructions = isManaged
+                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides)
+                : null;
+
+            var request = new SessionRequest(
+                instructions,
+                presentation.Meta.Voice ?? _settings.Voice,
+                presentation.Meta.Title,
+                inlineTools,
+                delegationInstructions);
+
+            var candidate = _createSession(request, attempt);
             if (candidate is null)
             {
                 break;
@@ -441,6 +539,11 @@ public sealed class Presenter : IPresenter
 
         _session = session;
         _sessionInfo = sessionInfo;
+        if (sessionInfo.DelegationMode == "client")
+        {
+            session.AppendInstructions(PromptBuilder.ClientModeInstruction(), "client-mode-controls");
+        }
+
         var startAt = fromIndex
             ?? (_lastRun is { EndedNormally: false } last && last.Id == id ? last.Index : 0);
         startAt = Math.Clamp(startAt, 0, Math.Max(0, presentation.Slides.Count - 1));
@@ -462,6 +565,7 @@ public sealed class Presenter : IPresenter
         session.UpstreamError += raw => QueueFromProducer(new UpstreamErrorReceived(session, raw.Clone()));
         session.Warning += message => QueueFromProducer(new SessionWarning(session, message));
         session.DelegatedResponseFinished += (id, type) => QueueFromProducer(new DelegatedResponseReceived(session, id, type));
+        session.ToolCallRequested += (delegationId, callId, name, arguments) => QueueFromProducer(new ToolCallReceived(session, delegationId, callId, name, arguments));
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
     }
 
@@ -538,8 +642,41 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        Audio?.Invoke(new PresenterAudio(audio.Bytes, audio.StartMs, audio.EndMs));
         var voiced = AudioLevel.IsVoiced(audio.Bytes);
+        var forwarded = _state == PresenterState.Presenting || (_state == PresenterState.Paused && _speechPermit &&
+            (_permitBarrierMs is null || audio.StartMs is null || audio.StartMs >= _permitBarrierMs));
+        if (forwarded)
+        {
+            Audio?.Invoke(new PresenterAudio(audio.Bytes, audio.StartMs, audio.EndMs));
+        }
+
+        if (!forwarded)
+        {
+            return;
+        }
+
+        if (voiced)
+        {
+            _lastVoicedAt = _timeProvider.GetTimestamp();
+            if (audio.StartMs is { } start && audio.EndMs is { } end)
+            {
+                _voicedIntervals.Enqueue((start, end));
+                while (_voicedIntervals.Count > 256)
+                {
+                    _voicedIntervals.Dequeue();
+                }
+            }
+
+            if (_state == PresenterState.Paused)
+            {
+                ArmPermitQuiet();
+                if (_interaction == Interaction.AwaitingEndQuestion)
+                {
+                    _endQuestionVoiced = true;
+                    ArmInteraction(500);
+                }
+            }
+        }
         if (_slideDiagnosticsActive)
         {
             _outputFrames++;
@@ -563,11 +700,12 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting)
         {
             // While a backend answer is pending, speech is filler ("One moment."), not the answer.
-            if (_questionHoldOpen && _pendingBackendDelegation is null && IsAfterLatestQuestion(audio))
+            if (_questionHoldOpen && _interaction != Interaction.WaitingOnSlide && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
             {
                 if (!_answerVoiced)
                 {
                     _answerVoiced = true;
+                    SetInteraction(Interaction.Answering);
                     // The follow-up window takes over from here; the 15 s timer must not cut a long answer short.
                     ClearQuestionTimer();
                     var elapsed = (long)_timeProvider.GetElapsedTime(_questionOpenedAt).TotalMilliseconds;
@@ -575,11 +713,13 @@ public sealed class Presenter : IPresenter
                 }
             }
 
-            if (_questionHoldOpen && _answerVoiced)
+            if (_questionHoldOpen && _interaction != Interaction.WaitingOnSlide && _answerVoiced)
             {
-                SetSilenceTimer(FollowUpWaitMs, partGap: false);
+                _lastAnswerAt = _timeProvider.GetTimestamp();
+                SetInteraction(Interaction.Answering);
+                ArmInteraction(700);
             }
-            else
+            else if (_interaction != Interaction.WaitingOnSlide)
             {
                 ArmAfterVoice();
             }
@@ -599,10 +739,283 @@ public sealed class Presenter : IPresenter
             _userTranscriptCharacters += transcript.Delta.Length;
         }
 
-        if (transcript.Role == "user" && _state == PresenterState.Presenting && !string.IsNullOrWhiteSpace(transcript.Delta))
+        if (transcript.Role == "user" && (_state is PresenterState.Presenting or PresenterState.Paused) && !string.IsNullOrWhiteSpace(transcript.Delta))
         {
-            OpenOrExtendQuestionHold(transcript.EndMs);
+            if (_state == PresenterState.Presenting)
+            {
+                if (_interaction == Interaction.WaitingOnSlide)
+                {
+                    if (_utterance.Length == 0)
+                    {
+                        _rangeReply = false;
+                        // Remember the waiting phase for a resume command after the transcript opens its hold.
+                        _utteranceBeganDuringWaiting = true;
+                    }
+                    SetInteraction(Interaction.None);
+                }
+                OpenOrExtendQuestionHold(transcript.EndMs);
+            }
+
+            AppendUtterance(transcript);
         }
+    }
+
+    private void AppendUtterance(TranscriptReceived transcript)
+    {
+        if (_utterance.Length == 0)
+        {
+            _utteranceStartMs = transcript.StartMs;
+            _utteranceOpenedAt = _timeProvider.GetTimestamp();
+            _utteranceDuringSpeech = false;
+            _utteranceBeganDuringCarryOn = _interaction == Interaction.AwaitingCarryOn;
+        }
+
+        _utterance += transcript.Delta;
+        _utteranceEndMs = transcript.EndMs;
+        _utteranceTooLong |= _utterance.Length > 120 || _timeProvider.GetElapsedTime(_utteranceOpenedAt).TotalMilliseconds > 6000
+            || (_utteranceStartMs is { } start && _utteranceEndMs is { } end && end - start > 6000);
+        _utteranceDuringSpeech |= DuringSpeech(transcript.StartMs, transcript.EndMs);
+        _utteranceTimer?.Dispose();
+        var generation = ++_utteranceGeneration;
+        _utteranceTimer = _timeProvider.CreateTimer(
+            _ => QueueFromProducer(new UtteranceElapsed(generation)), null,
+            TimeSpan.FromMilliseconds(700), Timeout.InfiniteTimeSpan);
+    }
+
+    private bool DuringSpeech(long? start, long? end)
+    {
+        if (start is { } s && end is { } e)
+        {
+            return _voicedIntervals.Any(interval => interval.Start <= e && interval.End >= s);
+        }
+
+        return _lastVoicedAt != 0 && _timeProvider.GetElapsedTime(_lastVoicedAt).TotalMilliseconds <= 300;
+    }
+
+    private void ResetUtterance()
+    {
+        _utteranceTimer?.Dispose();
+        _utteranceTimer = null;
+        _utteranceGeneration++;
+        _utterance = "";
+        _utteranceStartMs = null;
+        _utteranceEndMs = null;
+        _utteranceTooLong = false;
+        _utteranceDuringSpeech = false;
+        _utteranceBeganDuringCarryOn = false;
+        _utteranceBeganDuringWaiting = false;
+    }
+
+    private void CompleteUtterance()
+    {
+        if (_utterance.Length == 0)
+        {
+            return;
+        }
+
+        var phrase = _utterance;
+        var newQuestionDuringCarryOn = _utteranceBeganDuringCarryOn;
+        var beganDuringWaiting = _utteranceBeganDuringWaiting;
+        var end = _utteranceEndMs;
+        var speaking = _utteranceDuringSpeech || DuringSpeech(_utteranceStartMs, end);
+        var command = _utteranceTooLong || _timeProvider.GetElapsedTime(_utteranceOpenedAt).TotalMilliseconds > 6000
+            || (_utteranceStartMs is { } start && end is { } finish && finish - start > 6000)
+            ? null : VoiceCommandMatcher.Match(phrase);
+        ResetUtterance();
+        if (command is not null && speaking && command.Intent != VoiceCommandIntent.Pause)
+        {
+            LogMessage("info", $"voice: \"{phrase.Trim()}\" ignored (model speaking)");
+            command = null;
+        }
+
+        if (command is { Intent: VoiceCommandIntent.GoTo } &&
+            (command.SlideNumber < 1 || command.SlideNumber > SlideCount))
+        {
+            if (_state == PresenterState.Presenting)
+            {
+                OpenOrExtendQuestionHold(end);
+                _rangeReply = true;
+            }
+            else OpenPermit(end);
+            LogMessage("info", $"voice: go to slide {command.SlideNumber} out of range (1-{SlideCount})");
+            _session?.AppendInstructions(PromptBuilder.InvalidSlideRangeInstruction(SlideCount), "invalid-slide-range");
+            return;
+        }
+
+        var keepHold = command is { Intent: VoiceCommandIntent.No } && _interaction == Interaction.AwaitingCarryOn;
+        if (command is not null && ExecuteVoiceCommand(command, beganDuringWaiting))
+        {
+            if (!keepHold) ClearQuestionHold();
+            LogMessage("info", $"voice: {command.Intent.ToString().ToLowerInvariant()} (instant)");
+            return;
+        }
+
+        if (_state == PresenterState.Paused)
+        {
+            OpenPermit(end);
+        }
+        else if (newQuestionDuringCarryOn && _interaction == Interaction.AwaitingCarryOn)
+        {
+            SetInteraction(Interaction.None);
+            OpenOrExtendQuestionHold(end);
+        }
+    }
+
+    private bool ExecuteVoiceCommand(VoiceCommand command, bool beganDuringWaiting = false)
+    {
+        switch (command.Intent)
+        {
+            case VoiceCommandIntent.Pause:
+                return PauseCore();
+            case VoiceCommandIntent.Resume:
+                return ResumeCore(beganDuringWaiting);
+            case VoiceCommandIntent.Next:
+                return NextCore();
+            case VoiceCommandIntent.Previous:
+                return PrevCore();
+            case VoiceCommandIntent.GoTo:
+                return GotoCore(command.SlideNumber!.Value - 1);
+            case VoiceCommandIntent.End:
+                StartEndConfirmation();
+                return true;
+            case VoiceCommandIntent.Yes when _interaction == Interaction.AwaitingCarryOn:
+                SetInteraction(Interaction.None);
+                ResumeAfterQuestion("question: confirmed; resuming");
+                return true;
+            case VoiceCommandIntent.No when _interaction == Interaction.AwaitingCarryOn:
+                SetInteraction(Interaction.WaitingOnSlide);
+                ClearQuestionTimer();
+                ClearSilenceTimer();
+                return true;
+            case VoiceCommandIntent.Yes when _interaction == Interaction.AwaitingEndAnswer:
+                ObserveBackground(EndAsync(), "voice confirmed end");
+                return true;
+            case VoiceCommandIntent.No when _interaction == Interaction.AwaitingEndAnswer:
+                return ResumeCore();
+            default:
+                return false;
+        }
+    }
+
+    private void OpenPermit(long? barrier)
+    {
+        _speechPermit = true;
+        _permitBarrierMs = barrier;
+        ArmPermitQuiet();
+    }
+
+    private void ArmPermitQuiet()
+    {
+        _permitTimer?.Dispose();
+        var generation = ++_permitGeneration;
+        _permitTimer = _timeProvider.CreateTimer(
+            _ => QueueFromProducer(new PermitElapsed(generation)), null,
+            TimeSpan.FromMilliseconds(1500), Timeout.InfiniteTimeSpan);
+    }
+
+    private void ClosePermit()
+    {
+        _permitTimer?.Dispose();
+        _permitTimer = null;
+        _permitGeneration++;
+        _speechPermit = false;
+        _permitBarrierMs = null;
+    }
+
+    private void SetInteraction(Interaction interaction)
+    {
+        _interactionTimer?.Dispose();
+        _interactionTimer = null;
+        _interactionGeneration++;
+        _interaction = interaction;
+    }
+
+    private void ArmInteraction(int milliseconds)
+    {
+        _interactionTimer?.Dispose();
+        var generation = ++_interactionGeneration;
+        _interactionTimer = _timeProvider.CreateTimer(
+            _ => QueueFromProducer(new InteractionElapsed(generation)), null,
+            TimeSpan.FromMilliseconds(milliseconds), Timeout.InfiniteTimeSpan);
+    }
+
+    private void OnInteractionElapsed()
+    {
+        switch (_interaction)
+        {
+            case Interaction.Answering:
+                if (_rangeReply)
+                {
+                    SetInteraction(Interaction.WaitingOnSlide);
+                    break;
+                }
+                SetInteraction(Interaction.AwaitingCarryOn);
+                var remaining = FollowUpWaitMs + 700 - (int)_timeProvider.GetElapsedTime(_lastAnswerAt).TotalMilliseconds;
+                if (remaining <= 0)
+                {
+                    OnInteractionElapsed();
+                }
+                else
+                {
+                    ArmInteraction(remaining);
+                }
+
+                break;
+            case Interaction.AwaitingCarryOn:
+                SetInteraction(Interaction.None);
+                ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
+                break;
+            case Interaction.AwaitingEndQuestion:
+                if (!_endQuestionVoiced)
+                {
+                    LogMessage("warn", "end: question not voiced after 8 s");
+                }
+
+                SetInteraction(Interaction.AwaitingEndAnswer);
+                ArmInteraction(10_000);
+                break;
+            case Interaction.AwaitingEndAnswer:
+                LogMessage("info", "end: confirmation timed out; staying paused");
+                SetInteraction(Interaction.None);
+                ClosePermit();
+                break;
+        }
+    }
+
+    private void StartEndConfirmation()
+    {
+        if (_interaction is Interaction.AwaitingEndQuestion or Interaction.AwaitingEndAnswer)
+        {
+            return;
+        }
+
+        if (_state == PresenterState.Presenting)
+        {
+            PauseCore();
+        }
+
+        if (_state != PresenterState.Paused)
+        {
+            return;
+        }
+
+        ClearQuestionHold();
+        _endQuestionVoiced = false;
+        SetInteraction(Interaction.AwaitingEndQuestion);
+        OpenPermit(null);
+        _session?.AppendInstructions(PromptBuilder.EndConfirmationInstruction(), "end-confirmation");
+        ArmInteraction(8000);
+    }
+
+    private async Task<bool> ConfirmEndCore(bool confirmed)
+    {
+        if (confirmed && _interaction == Interaction.AwaitingEndAnswer)
+        {
+            return await EndAsyncCore(false).ConfigureAwait(false);
+        }
+
+        StartEndConfirmation();
+        return _state == PresenterState.Paused;
     }
 
     private void OnUsage(UsageReceived usage)
@@ -646,7 +1059,7 @@ public sealed class Presenter : IPresenter
         OpenOrExtendQuestionHold(null);
         if (target == "responses")
         {
-            _pendingBackendDelegation = id ?? string.Empty;
+            _toolRoundTracker.OpenDelegation(id ?? string.Empty);
         }
         else if (target == "client")
         {
@@ -659,19 +1072,39 @@ public sealed class Presenter : IPresenter
 
     private void OnDelegatedResponse(DelegatedResponseReceived response)
     {
-        if (!ReferenceEquals(response.Session, _session)
-            || _pendingBackendDelegation is null
-            || (_pendingBackendDelegation.Length > 0 && _pendingBackendDelegation != response.DelegationId))
+        if (!ReferenceEquals(response.Session, _session))
         {
             return;
         }
 
-        FinishBackendDelegation(response.Type);
+        var result = _toolRoundTracker.OnDelegatedResponseFinished(response.DelegationId, response.Type);
+        switch (result)
+        {
+            case ToolRoundTracker.ResponseFinishedResult.ToolRound:
+                LogMessage("info", $"question: backend tool round completed for {response.DelegationId}");
+                if (_questionHoldOpen) ArmQuestionHold();
+                if (_toolRoundTracker.ShouldSendContinueResponses())
+                {
+                    TryContinueResponses();
+                }
+
+                break;
+
+            case ToolRoundTracker.ResponseFinishedResult.FinalAnswer:
+                FinishBackendDelegation("response.completed");
+                break;
+
+            case ToolRoundTracker.ResponseFinishedResult.Failed:
+                FinishBackendDelegation(response.Type);
+                break;
+
+            case ToolRoundTracker.ResponseFinishedResult.Ignored:
+                break;
+        }
     }
 
     private void FinishBackendDelegation(string type)
     {
-        _pendingBackendDelegation = null;
         if (type == "response.completed")
         {
             LogMessage("info", "question: backend answer ready");
@@ -699,9 +1132,151 @@ public sealed class Presenter : IPresenter
         UpstreamError?.Invoke(new PresenterUpstreamError(message, code, clientEventId));
 
         // A delegated backend can also fail with a top-level error that names no delegation; it ends the pending one.
-        if (code == "backend_error" && _pendingBackendDelegation is not null)
+        if (code == "backend_error" && _toolRoundTracker.HasPendingBackendDelegation)
         {
+            _toolRoundTracker.CloseAllDelegations();
             FinishBackendDelegation(code);
+        }
+    }
+
+    private void OnToolCall(ToolCallReceived call)
+    {
+        if (!ReferenceEquals(call.Session, _session) || _state is not (PresenterState.Presenting or PresenterState.Paused))
+        {
+            LogMessage("info", $"tool call for {call.CallId} dropped: session replaced or run not live");
+            return;
+        }
+
+        if (_toolRoundTracker.IsCallDuplicate(call.CallId))
+        {
+            LogMessage("info", $"tool call for {call.CallId} ignored: duplicate call id");
+            return;
+        }
+
+        if (!_toolRoundTracker.AddCall(call.DelegationId, call.CallId, call.Session, _runGeneration))
+        {
+            LogMessage("info", $"tool call for {call.CallId} ignored: could not track");
+            return;
+        }
+
+        if (_questionHoldOpen) ArmQuestionHold();
+        LogMessage("info", $"tool: {call.Name} ({call.CallId}) requested for delegation {call.DelegationId}");
+        StartToolInvocation(call.Session, _runGeneration, call.DelegationId, call.CallId, call.Name, call.Arguments);
+    }
+
+    private void StartToolInvocation(
+        ILiveSession session,
+        long runGeneration,
+        string delegationId,
+        string callId,
+        string name,
+        string argumentsJson)
+    {
+        var catalogue = _catalogue;
+        var timeoutMs = _settings.ToolTimeoutMs;
+        _ = Task.Run(async () =>
+        {
+            ActiveToolCallId.Value = callId;
+            ToolResult result = ToolResult.Failure("tool failed");
+            try
+            {
+                if (catalogue is null)
+                {
+                    result = ToolResult.Failure("no tool catalogue available");
+                }
+                else
+                {
+                    JsonDocument? doc = null;
+                    try
+                    {
+                        doc = JsonDocument.Parse(argumentsJson);
+                    }
+                    catch (JsonException)
+                    {
+                        result = ToolResult.Failure("malformed argument JSON");
+                    }
+
+                    if (doc is not null)
+                    {
+                        using (doc)
+                        {
+                            var tool = catalogue.FindTool(name);
+                            if (tool is null)
+                            {
+                                result = ToolResult.Failure($"unknown tool '{name}'");
+                            }
+                            else
+                            {
+                                var validation = ToolArgumentValidator.Validate(doc.RootElement, tool.Parameters);
+                                if (!validation.IsValid)
+                                {
+                                    result = ToolResult.Failure(validation.ErrorMessage ?? "invalid arguments");
+                                }
+                                else
+                                {
+                                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
+                                    var invocation = tool.InvokeAsync(doc.RootElement.Clone(), cts.Token);
+                                    try
+                                    {
+                                        result = await invocation.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cts.Token).ConfigureAwait(false);
+                                    }
+                                    catch (Exception error) when (error is TimeoutException || error is OperationCanceledException && cts.IsCancellationRequested)
+                                    {
+                                        // Only an abandoned invocation needs a late-fault observer.
+                                        _ = invocation.ContinueWith(t =>
+                                            QueueFromProducer(new BackgroundFailure("late tool fault", t.Exception!.GetBaseException().GetType().Name)),
+                                            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                                        result = ToolResult.Failure("timed out");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                result = ToolResult.Failure("tool failed");
+            }
+
+            QueueFromProducer(new ToolInvocationCompleted(session, runGeneration, delegationId, callId, result));
+        });
+    }
+
+    private void OnToolInvocationCompleted(ToolInvocationCompleted completed)
+    {
+        if (!ReferenceEquals(completed.Session, _session) || _state is not (PresenterState.Presenting or PresenterState.Paused))
+        {
+            LogMessage("info", $"tool invocation for {completed.CallId} dropped: session replaced or run not live");
+            return;
+        }
+
+        var result = completed.RunGeneration != _runGeneration &&
+            (!_navigatingCallIds.TryGetValue(completed.CallId, out var navigationGeneration) || navigationGeneration != _runGeneration)
+            ? ToolResult.Failure("stale: the presentation moved on") : completed.Result;
+
+        if (!_toolRoundTracker.IsCallPending(completed.DelegationId, completed.CallId))
+        {
+            LogMessage("info", $"tool invocation for {completed.CallId} dropped: call not pending in tracker");
+            return;
+        }
+
+        if (_session?.SubmitToolOutput(completed.CallId, result.ToJsonString()) != true)
+        {
+            LogMessage("warn", $"tool: {completed.CallId} output refused");
+            return;
+        }
+        _toolRoundTracker.MarkCallSubmitted(completed.DelegationId, completed.CallId);
+        _navigatingCallIds.Remove(completed.CallId);
+        LogMessage("info", $"tool: {completed.CallId} output submitted (ok={result.Ok})");
+        TryContinueResponses();
+    }
+
+    private void TryContinueResponses()
+    {
+        if (_toolRoundTracker.ShouldSendContinueResponses() && _session?.ContinueResponses() == true)
+        {
+            _toolRoundTracker.OnResponsesContinued();
         }
     }
 
@@ -814,7 +1389,7 @@ public sealed class Presenter : IPresenter
         ArmWrapUpFallback();
     }
 
-    private bool NextCore()
+    private bool NextCore(string? sourceCallId = null)
     {
         if (!CanNavigate())
         {
@@ -824,16 +1399,18 @@ public sealed class Presenter : IPresenter
         LeavePauseForNavigation();
         if (_slideIndex >= SlideCount - 1)
         {
+            OnNavigationSucceeded(sourceCallId);
             StartWrapUp();
             return true;
         }
 
         LogMessage("info", $"manual next → slide {_slideIndex + 2}");
+        OnNavigationSucceeded(sourceCallId);
         PresentSlide(_slideIndex + 1, interrupt: true);
         return true;
     }
 
-    private bool PrevCore()
+    private bool PrevCore(string? sourceCallId = null)
     {
         if (!CanNavigate())
         {
@@ -843,11 +1420,12 @@ public sealed class Presenter : IPresenter
         LeavePauseForNavigation();
         var target = Math.Max(0, _slideIndex - 1);
         LogMessage("info", $"manual prev → slide {target + 1}");
+        OnNavigationSucceeded(sourceCallId);
         PresentSlide(target, interrupt: true);
         return true;
     }
 
-    private bool GotoCore(int index)
+    private bool GotoCore(int index, string? sourceCallId = null)
     {
         if (!CanNavigate())
         {
@@ -862,8 +1440,15 @@ public sealed class Presenter : IPresenter
 
         LeavePauseForNavigation();
         LogMessage("info", $"goto → slide {index + 1}");
+        OnNavigationSucceeded(sourceCallId);
         PresentSlide(index, interrupt: true);
         return true;
+    }
+
+    private void OnNavigationSucceeded(string? sourceCallId)
+    {
+        _runGeneration++;
+        if (sourceCallId is not null) _navigatingCallIds[sourceCallId] = _runGeneration;
     }
 
     private bool PauseCore()
@@ -874,22 +1459,25 @@ public sealed class Presenter : IPresenter
         }
 
         ClearTimers();
-        _session?.Mute();
+        SetInteraction(Interaction.None);
+        ClosePermit();
         _session?.AppendInstructions(PromptBuilder.PauseInstruction(), $"pause-{_slideIndex + 1}");
         SetState(PresenterState.Paused);
+        Flush?.Invoke();
         return true;
     }
 
-    private bool ResumeCore()
+    private bool ResumeCore(bool beganDuringWaiting = false)
     {
-        if (_state != PresenterState.Paused || _presentation is null)
+        if (_state == PresenterState.Presenting && _interaction != Interaction.WaitingOnSlide && !beganDuringWaiting)
         {
+            ClearQuestionHold();
+            SetInteraction(Interaction.None);
             return false;
         }
-
-        if (!_muted)
+        if (_state is not (PresenterState.Presenting or PresenterState.Paused) || _presentation is null)
         {
-            _session?.Unmute();
+            return false;
         }
 
         var slide = _presentation.Slides[_slideIndex];
@@ -901,6 +1489,9 @@ public sealed class Presenter : IPresenter
             StartSlideDiagnostics();
         }
 
+        SetInteraction(Interaction.None);
+        ClosePermit();
+        ClearQuestionHold();
         SetState(PresenterState.Presenting);
         if (_wrappingUp)
         {
@@ -920,7 +1511,7 @@ public sealed class Presenter : IPresenter
     private bool MuteCore()
     {
         _muted = true;
-        if (_state == PresenterState.Presenting)
+        if (_state is PresenterState.Presenting or PresenterState.Paused)
         {
             _session?.Mute();
         }
@@ -932,7 +1523,7 @@ public sealed class Presenter : IPresenter
     private bool UnmuteCore()
     {
         _muted = false;
-        if (_state == PresenterState.Presenting)
+        if (_state is PresenterState.Presenting or PresenterState.Paused)
         {
             _session?.Unmute();
         }
@@ -942,7 +1533,7 @@ public sealed class Presenter : IPresenter
     }
 
     private bool SendAudioCore(byte[] pcm16) =>
-        _state == PresenterState.Presenting && !_muted && (_session?.SendAudio(pcm16) ?? false);
+        (_state is PresenterState.Presenting or PresenterState.Paused) && !_muted && (_session?.SendAudio(pcm16) ?? false);
 
     private async Task<bool> EndAsyncCore(bool resumable)
     {
@@ -953,9 +1544,18 @@ public sealed class Presenter : IPresenter
 
         CompleteSlideDiagnostics();
         ClearTimers();
+        ResetUtterance();
+        SetInteraction(Interaction.None);
+        ClosePermit();
+        _navigatingCallIds.Clear();
+        _voicedIntervals.Clear();
+        _lastVoicedAt = 0;
+        _runGeneration++;
+        _toolRoundTracker.Clear();
         _endResumable = resumable;
         var session = _session;
         SetState(PresenterState.Ending);
+        Flush?.Invoke();
         if (session is null)
         {
             OnClosed("close_requested", null);
@@ -998,6 +1598,14 @@ public sealed class Presenter : IPresenter
     {
         CompleteSlideDiagnostics();
         ClearTimers();
+        ResetUtterance();
+        SetInteraction(Interaction.None);
+        ClosePermit();
+        _navigatingCallIds.Clear();
+        _voicedIntervals.Clear();
+        _lastVoicedAt = 0;
+        _runGeneration++;
+        _toolRoundTracker.Clear();
         var endedNormally = IsNormalClose(reason) && !_endResumable;
         if (_presentation is not null)
         {
@@ -1041,7 +1649,7 @@ public sealed class Presenter : IPresenter
 
     private void OnQuestionHoldElapsed()
     {
-        if (!_questionHoldOpen)
+        if (!_questionHoldOpen || _interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide)
         {
             return;
         }
@@ -1058,7 +1666,7 @@ public sealed class Presenter : IPresenter
             return false;
         }
 
-        if (_answerVoiced)
+        if (_answerVoiced && _interaction == Interaction.None)
         {
             ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
         }
@@ -1189,10 +1797,14 @@ public sealed class Presenter : IPresenter
     private void ClearQuestionHold()
     {
         _questionHoldOpen = false;
+        _rangeReply = false;
         _answerVoiced = false;
         _latestQuestionEndMs = null;
-        _pendingBackendDelegation = null;
         ClearQuestionTimer();
+        if (_interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide)
+        {
+            SetInteraction(Interaction.None);
+        }
     }
 
     private void ClearQuestionTimer()
@@ -1209,14 +1821,12 @@ public sealed class Presenter : IPresenter
 
     private void LeavePauseForNavigation()
     {
+        SetInteraction(Interaction.None);
+        ClearQuestionHold();
+        ClosePermit();
         if (_state != PresenterState.Paused)
         {
             return;
-        }
-
-        if (!_muted)
-        {
-            _session?.Unmute();
         }
 
         SetState(PresenterState.Presenting);
@@ -1287,6 +1897,7 @@ public sealed class Presenter : IPresenter
     private abstract record Command : PresenterEvent
     {
         public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string? InvocationCallId { get; set; }
     }
 
     private sealed record StartCommand(string OwnerId, string Id, int? FromIndex) : PresenterEvent
@@ -1297,6 +1908,7 @@ public sealed class Presenter : IPresenter
     private sealed record PrevCommand : Command;
     private sealed record GotoCommand(int Index) : Command;
     private sealed record PauseCommand : Command;
+    private sealed record ConfirmEndCommand(bool Confirmed) : Command;
     private sealed record ResumeCommand : Command;
     private sealed record MuteCommand : Command;
     private sealed record UnmuteCommand : Command;
@@ -1309,12 +1921,18 @@ public sealed class Presenter : IPresenter
     private sealed record DelegationReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
     private sealed record UpstreamErrorReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
     private sealed record DelegatedResponseReceived(ILiveSession Session, string DelegationId, string Type) : PresenterEvent;
+    private sealed record ToolCallReceived(ILiveSession Session, string DelegationId, string CallId, string Name, string Arguments) : PresenterEvent;
+    private sealed record ToolInvocationCompleted(ILiveSession Session, long RunGeneration, string DelegationId, string CallId, ToolResult Result) : PresenterEvent;
     private sealed record SessionWarning(ILiveSession Session, string Message) : PresenterEvent;
     private sealed record SessionClosed(ILiveSession Session, string Reason, double? Seconds) : PresenterEvent;
     private sealed record SilenceElapsed(long Generation, bool PartGap) : PresenterEvent;
     private sealed record NudgeElapsed(long Generation) : PresenterEvent;
     private sealed record WrapUpFallbackElapsed(long Generation) : PresenterEvent;
     private sealed record QuestionHoldElapsed(long Generation) : PresenterEvent;
+    private sealed record UtteranceElapsed(long Generation) : PresenterEvent;
+    private sealed record InteractionElapsed(long Generation) : PresenterEvent;
+    private sealed record PermitElapsed(long Generation) : PresenterEvent;
+    private sealed record BackgroundFailure(string Operation, string Message) : PresenterEvent;
     private sealed record Barrier(TaskCompletionSource Completion) : PresenterEvent;
     private sealed record Shutdown(TaskCompletionSource Completion) : PresenterEvent;
     private sealed record LastRun(string Id, int Index, bool EndedNormally);

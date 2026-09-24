@@ -11,8 +11,19 @@ public enum LiveSessionState
     Closed
 }
 
-public sealed record LiveSessionConfig(string Model, string Instructions, string Voice, string? PresentationTitle = null);
+public sealed record LiveSessionConfig(
+    string Model,
+    string Instructions,
+    string Voice,
+    string? PresentationTitle = null,
+    IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null,
+    string? DelegationInstructions = null);
 
-public sealed record LiveSessionInfo(string? Id, string? Model, long? ExpiresAt, JsonElement Raw);
+public sealed record LiveSessionInfo(
+    string? Id,
+    string? Model,
+    long? ExpiresAt,
+    JsonElement Raw,
+    string DelegationMode = "client");
 
 public sealed record LiveCloseResult(string Reason, double? Seconds);

@@ -13,6 +13,7 @@ public interface ILiveSession : IAsyncDisposable
     event Action<JsonElement>? UpstreamError;
     event Action<string>? Warning;
     event Action<string, string>? DelegatedResponseFinished;
+    event Action<string, string, string, string>? ToolCallRequested;
     event Action<string, double?>? Closed;
 
     LiveSessionState State { get; }
@@ -30,6 +31,10 @@ public interface ILiveSession : IAsyncDisposable
     string? AppendThinking(string content, string? eventId = null, string? delegationId = null);
 
     string? AppendCommentary(string content, string? eventId = null, string? delegationId = null);
+
+    bool SubmitToolOutput(string callId, string output);
+
+    bool ContinueResponses();
 
     bool Mute();
 

@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Sessions;
+using PresenterAi.Application.Tools;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
 using PresenterAi.Infrastructure.Persistence;
@@ -72,6 +73,13 @@ public static class DependencyInjection
                 $"Presenter:FollowUpWaitMs must be between {PresenterOptions.MinFollowUpWaitMs} and {PresenterOptions.MaxFollowUpWaitMs}")
             .ValidateOnStart();
 
+        services.AddOptions<ToolsOptions>()
+            .Bind(configuration.GetSection("Tools"))
+            .Validate(
+                options => options.MaxInlineTools is >= ToolsOptions.MinMaxInlineTools and <= ToolsOptions.MaxMaxInlineTools,
+                $"Tools:MaxInlineTools must be between {ToolsOptions.MinMaxInlineTools} and {ToolsOptions.MaxMaxInlineTools}")
+            .ValidateOnStart();
+
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
             UpstreamRoutes.From(serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamOptions>>().Value));
 
@@ -116,12 +124,15 @@ public static class DependencyInjection
 
     public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
+        services.TryAddSingleton<ToolRegistry>();
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
             var routes = serviceProvider.GetRequiredService<UpstreamRoutes>();
             var settings = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PresenterOptions>>().Value;
             var timeProvider = serviceProvider.GetRequiredService<TimeProvider>();
+            var toolsOptions = serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ToolsOptions>>()?.Value;
+            var toolRegistry = serviceProvider.GetService<ToolRegistry>();
 
             Func<string, string, CancellationToken, Task<LoadedPresentation>> loader;
             if (fileBacked)
@@ -144,11 +155,23 @@ public static class DependencyInjection
 
             return new Presenter(
                 (request, attempt) => attempt < routes.Upstreams.Count
-                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(routes.Upstreams[attempt].Model, request.Instructions, request.Voice, request.Title))
+                    ? factory.Create(routes.Upstreams[attempt], new LiveSessionConfig(
+                        routes.Upstreams[attempt].Model,
+                        request.Instructions,
+                        request.Voice,
+                        request.Title,
+                        request.Tools,
+                        request.DelegationInstructions))
                     : null,
                 loader,
-                new PresenterSettings(settings.AdvanceSilenceMs, routes.Voice, settings.FollowUpWaitMs),
-                timeProvider);
+                new PresenterSettings(
+                    settings.AdvanceSilenceMs,
+                    routes.Voice,
+                    settings.FollowUpWaitMs,
+                    toolsOptions?.MaxInlineTools ?? ToolsOptions.DefaultMaxInlineTools),
+                timeProvider,
+                toolRegistry,
+                attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel));
         });
         return services;
     }
