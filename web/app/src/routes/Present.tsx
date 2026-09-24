@@ -12,6 +12,7 @@ import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
 import { LogPanel } from "../components/LogPanel";
 import { TrainerControls } from "../components/TrainerControls";
+import { ScriptVersions } from "../components/ScriptVersions";
 import { formatEndReason } from "../utils/endReasons";
 type Detail = components["schemas"]["PresentationDetail"];
 
@@ -557,6 +558,7 @@ export function Present() {
                 client.current?.trainTurn(question, answer, slideIndex)
               }
             />
+            {presentation && <ScriptVersions presentationId={presentation.id} />}
             <LogPanel />
           </aside>
         </Panel>
