@@ -160,11 +160,19 @@ public static class PromptBuilder
         "Return to the talk with a short, natural transition of your own, then restart the sentence you were in; if the slide was finished, say only the transition.";
 
     /// <summary>
-    /// Plan 011 (owner decision r1 #4): after a follow-up question asked during an answer, return to the narration
-    /// sentence the first question interrupted, not to the cut-off answer.
+    /// Plan 011: the resume after an Ask exchange. Ask start appended <see cref="PauseInstruction"/> ("stay silent ... do
+    /// not continue the narration until told"), and the T8 live run showed the model never answered the unnamed
+    /// <see cref="ResumeAfterQuestionInstruction"/> after it, while the explicit <see cref="ResumeInstruction"/> after a
+    /// Pause worked at once. So this names the slide and ends the pause explicitly, keeping the transition and
+    /// restart-the-sentence semantics. After a follow-up Ask (owner decision r1 #4) the sentence to restart is the
+    /// narration sentence the FIRST question interrupted, not a cut-off answer.
     /// </summary>
-    public static string ResumeAfterFollowUpInstruction() =>
-        "Return to the talk with a short, natural transition of your own, then restart the narration sentence you were in before the first question; do not continue an earlier answer; if the slide was finished, say only the transition.";
+    public static string ResumeAfterAskInstruction(int index, int total, string title, bool followUp) =>
+        $"The pause is over. Resume {SlideLabel(index, total, title)} now: say a short, natural transition of your own, " +
+        (followUp
+            ? "then restart the narration sentence you were in before the first question, not an earlier answer, and continue the narration from there"
+            : "then restart the sentence you were in when the question came and continue the narration from there") +
+        "; if the slide was finished, say only the transition. Then stop and wait.";
 
     public static string EndConfirmationInstruction() =>
         "Ask the audience briefly: Shall I end the presentation now? Then wait for their answer. Do not end the talk yourself.";

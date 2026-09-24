@@ -881,10 +881,12 @@ public sealed partial class Presenter
             return;
         }
 
-        if (exchange.NarrationHeard)
+        if (exchange.NarrationHeard && _presentation is not null)
         {
+            // Ask start paused the model; only an explicit, slide-named resume makes it speak again (T8 live run).
+            var current = _presentation.Slides[_slideIndex];
             ResumeAfterQuestion(message,
-                exchange.FollowUps > 0 ? PromptBuilder.ResumeAfterFollowUpInstruction() : null);
+                PromptBuilder.ResumeAfterAskInstruction(_slideIndex, SlideCount, current.Title, exchange.FollowUps > 0));
             return;
         }
 

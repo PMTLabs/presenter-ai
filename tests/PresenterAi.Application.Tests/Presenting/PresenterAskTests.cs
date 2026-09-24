@@ -1258,7 +1258,7 @@ public sealed class PresenterAskTests
 
         Assert.Equal("continued", Assert.Single(h.Offs).Reason);
         var resume = Assert.Single(h.S.Sent, IsResumeAfterQuestion);
-        Assert.Equal(PromptBuilder.ResumeAfterQuestionInstruction(), resume.Content);
+        Assert.Equal(PromptBuilder.ResumeAfterAskInstruction(0, 3, "One", followUp: false), resume.Content);
         Assert.Contains("ask: exchange ended (resume), 0 deferred notices, replay no", h.Logs);
     }
 
@@ -1721,7 +1721,7 @@ public sealed class PresenterAskTests
 
         Assert.Equal("continued", Assert.Single(h.Offs).Reason);
         var resume = Assert.Single(h.S.Sent, IsResumeAfterQuestion);
-        Assert.Equal(PromptBuilder.ResumeAfterFollowUpInstruction(), resume.Content);
+        Assert.Equal(PromptBuilder.ResumeAfterAskInstruction(0, 3, "One", followUp: true), resume.Content);
         Assert.Equal(0, h.Presenter.Snapshot().SlideIndex);
         Assert.Equal("presenting", h.Presenter.Snapshot().State);
     }
@@ -2466,6 +2466,53 @@ public sealed class PresenterAskTests
         Assert.Single(h.S.Sent, IsResumeAfterQuestion);
         if (kind == "exchange") Assert.Equal("continued", Assert.Single(h.Offs).Reason);
         else Assert.Empty(h.Offs);
+    }
+
+    // ---- T8 live-run defect: the resume after an Ask names the slide and ends the pause ------------------------
+
+    [Theory]
+    [InlineData("yes")]
+    [InlineData("timeout")]
+    [InlineData("continue")]
+    [InlineData("follow-up")]
+    public async Task Resume_after_an_ask_names_the_slide_and_ends_the_pause(string exit)
+    {
+        await using var h = new Harness();
+        if (exit == "follow-up")
+        {
+            await h.ToAwaitingAnswer();
+            await h.Answer();
+            await h.AskStart();
+            await h.MicSpeech();
+            await h.AskDone();
+            await h.Answer();
+            await h.Advance(TimeSpan.FromMilliseconds(701));
+            await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs));
+        }
+        else
+        {
+            await ResumeBy(h, exit);
+        }
+
+        var resume = Assert.Single(h.S.Sent, IsResumeAfterQuestion).Content!;
+        Assert.Contains("slide 1 of 3 (\"One\")", resume);
+        Assert.StartsWith("The pause is over. Resume slide 1 of 3", resume);
+        Assert.Contains(" now:", resume);
+        Assert.Contains("natural transition of your own", resume);
+        Assert.Contains(exit == "follow-up" ? "before the first question" : "when the question came", resume);
+        Assert.NotEqual(PromptBuilder.ResumeAfterQuestionInstruction(), resume);
+        // The ask's own pause came first; the resume is the explicit end of it.
+        Assert.True(h.S.Sent.FindLastIndex(s => s.EventId == "pause-1") < h.S.Sent.FindIndex(IsResumeAfterQuestion));
+    }
+
+    [Fact]
+    public async Task Barge_in_resume_without_a_pause_keeps_the_resume_after_question_wording()
+    {
+        await using var h = new Harness();
+        await ResumeBy(h, "barge-in");
+
+        Assert.Equal(PromptBuilder.ResumeAfterQuestionInstruction(), Assert.Single(h.S.Sent, IsResumeAfterQuestion).Content);
+        Assert.DoesNotContain(h.S.Sent, s => s.EventId?.StartsWith("pause-", StringComparison.Ordinal) == true);
     }
 
     // ---- Harness --------------------------------------------------------------------------------------------------

@@ -341,7 +341,7 @@ so check-in uses the turn-taking rule (site 15) instead.
      any Ask start. Deferred notices, the replay-due flag and the **resume point of the first ask** carry over: the
      exchange records at the first Ask whether the slide's narration had been heard, and answer audio never changes
      that. When the follow-up's answer ends (`Resume`), narration resumes from the sentence the first Ask interrupted
-     (`ResumeAfterFollowUpInstruction`: restart the narration sentence, do not continue an earlier answer), or with
+     (`ResumeAfterAskInstruction` with the follow-up wording: restart the narration sentence, do not continue an earlier answer), or with
      `ResumeInstruction` + nudge when the first Ask came before any narration audio.
      Every refusal of a follow-up (muted, not live, no session, failed reconnect, refused mute, transcriber failure)
      goes through one path: while the answer's upstream is live it sends `off{reason}` and re-sends `answering`, and
@@ -1398,3 +1398,4 @@ None. These decisions were forced by code facts and need confirmation at G2:
 | 2026-09-24 | Owner decision (review 027): voice confirmation during the answer | A pending tool confirmation in the answer phases takes a spoken yes/no by the P-13 turn-taking rule (new utterance after 1.5 s of transcript quiet); late question fragments still ignored; navigation stays closed during the exchange |
 | 2026-09-24 | Implementation review round 1 fixes (review 027) | Unmute acks attributed by echoed `client_event_id`, FIFO ack debt when none; deferred notices kept as content over the send-failure reset and appended once after reconnect; transcription disposed once; emitter-gate claim qualified as layered defences; §4.4(c) frame sequence corrected |
 | 2026-09-24 | Implementation review round 2 fixes (review 028) | Confirmation replies attributed at their first delta (a reply begun before the confirmation is discarded); one refusal path for follow-up Asks (live answer re-announced, a reset upstream ends the exchange once with notices and replay kept); nested follow-ups pinned with notices, replay and End/max-length oracles |
+| 2026-09-24 | T8 live-run fix: resume wording after an Ask | The model stayed silent after `ResumeAfterQuestionInstruction` following the Ask's `PauseInstruction`, while `ResumeInstruction` after Pause worked at once. Every resume after an Ask exchange (yes, timeout, Continue, budget; follow-up) now uses `ResumeAfterAskInstruction`: names the slide, "The pause is over. Resume … now", transition and restart-the-sentence semantics, "Then stop and wait." The barge-in resume (no pause before it) keeps its wording |
