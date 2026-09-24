@@ -20,6 +20,9 @@ public sealed class BridgeAskTests
         fake.KeepAudio = true;
         fake.UnmuteAckGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var factory = AskSupport.Factory(fake);
+        // The API's clock is fake and never advanced here, so the 2 s unmute-ack timeout cannot fire before the gate
+        // is released (review 027: the wall-clock timeout raced the pre-ack assertion).
+        factory.UseFakeClock();
         using var socket = await BridgeTestSupport.ConnectAsync(factory);
         await AskSupport.StartTalkAsync(socket);
 
@@ -31,42 +34,86 @@ public sealed class BridgeAskTests
         listening["transcribing"]!.GetValue<bool>().Should().BeFalse();
         listening["reason"].Should().BeNull();
 
-        // Speech, a 1.2 s thinking pause (compressed), more speech.
-        var frames = Enumerable.Range(0, 15).Select(AskSupport.VoicedFrame)
-            .Concat(Enumerable.Repeat(0, 60).Select(_ => new byte[AskRecorder.WindowBytes]))
+        // Speech, a 1.2 s thinking pause of quiet but non-zero room noise (compressed), more speech. Every mic payload
+        // is distinct and none is all zeros, so no mic frame can pass for a pump silence frame.
+        var question = Enumerable.Range(0, 15).Select(AskSupport.VoicedFrame)
+            .Concat(Enumerable.Range(0, 60).Select(AskSupport.QuietFrame))
             .Concat(Enumerable.Range(100, 15).Select(AskSupport.VoicedFrame))
             .ToArray();
-        foreach (var frame in frames) await AskSupport.SendBinaryAsync(socket, frame);
+        foreach (var frame in question) await AskSupport.SendBinaryAsync(socket, frame);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ask_extend\"}");
         (await AskSupport.ReceiveAskStateAsync(socket, "listening"))["heard"]!.GetValue<bool>().Should().BeTrue();
 
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ask_done\"}");
+        // Mic frames while the unmute ack is outstanding: neither recorded nor forwarded.
+        var duringAckWait = Enumerable.Range(500, 20).Select(AskSupport.VoicedFrame).ToArray();
+        foreach (var frame in duringAckWait) await AskSupport.SendBinaryAsync(socket, frame);
+        await AskSupport.AdmissionBarrierWhileListeningAsync(socket);
         await BridgeTestSupport.WaitForAsync(() => AskSupport.IndexOf(fake.ReceivedSnapshot(), "session.input_audio.unmute") >= 0);
-        await Task.Delay(300);
-        AskSupport.BurstAppends(fake.ReceivedSnapshot()).Should().BeEmpty("the burst waits for the upstream's unmuted ack (P-18)");
 
-        fake.UnmuteAckGate.TrySetResult();
-        var answering = await AskSupport.ReceiveAskStateAsync(socket, "answering");
-        answering["reason"]!.GetValue<string>().Should().Be("sent");
-        var expected = AskSupport.ExpectedBurst(frames);
-        await BridgeTestSupport.WaitForAsync(() =>
-            AskSupport.BurstAppends(fake.ReceivedSnapshot()).Sum(append => append.Length) == expected.Length);
-
-        var received = fake.ReceivedSnapshot();
-        var mute = AskSupport.IndexOf(received, "session.input_audio.mute");
-        var pause = received.ToList().FindIndex(message => message["type"]?.GetValue<string>() == "session.instructions.append" &&
+        var beforeAck = fake.ReceivedSnapshot();
+        var mute = AskSupport.IndexOf(beforeAck, "session.input_audio.mute");
+        var pause = beforeAck.ToList().FindIndex(message => message["type"]?.GetValue<string>() == "session.instructions.append" &&
             message["event_id"]?.GetValue<string>()?.StartsWith("pause-", StringComparison.Ordinal) == true);
-        var unmute = AskSupport.IndexOf(received, "session.input_audio.unmute");
+        var unmute = AskSupport.IndexOf(beforeAck, "session.input_audio.unmute");
         mute.Should().BeGreaterThanOrEqualTo(0);
         pause.Should().BeGreaterThan(mute, "the upstream is muted before the ask's pause instruction");
         unmute.Should().BeGreaterThan(pause);
-        received.Skip(mute).Take(unmute - mute)
-            .Where(message => message["type"]?.GetValue<string>() == "session.input_audio.append")
-            .Should().NotContain(message => !message["silent"]!.GetValue<bool>(), "no mic frame is forwarded while listening");
-        var firstBurst = received.ToList().FindIndex(message => AskSupport.IsBurstAppend(message));
-        firstBurst.Should().BeGreaterThan(unmute);
-        AskSupport.BurstAppends(received).SelectMany(bytes => bytes).ToArray().Should().Equal(expected,
-            "the appends after the unmute are the 200 ms zero lead-in and exactly the compressed recording, in order");
+        AskSupport.NonPumpAppends(beforeAck, mute).Should().BeEmpty(
+            "from the mute until the unmute ack no mic payload, lead-in or burst chunk reaches the upstream");
+
+        fake.UnmuteAckGate.TrySetResult();
+        (await AskSupport.ReceiveAskStateAsync(socket, "answering"))["reason"]!.GetValue<string>().Should().Be("sent");
+        // Answer phases: the mic is live again and forwarded after the burst.
+        var afterAnswering = Enumerable.Range(900, 10).Select(AskSupport.VoicedFrame).ToArray();
+        foreach (var frame in afterAnswering) await AskSupport.SendBinaryAsync(socket, frame);
+        var expected = AskSupport.ExpectedBurstAppends(question).Concat(afterAnswering).ToList();
+        await BridgeTestSupport.WaitForAsync(() => AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), mute).Count >= expected.Count);
+
+        var received = fake.ReceivedSnapshot();
+        AskSupport.NonPumpAppends(received, mute).Should().BeEquivalentTo(expected, options => options.WithStrictOrdering(),
+            "after the ack the upstream gets the 200 ms zero lead-in, exactly the compressed recording in 200 ms chunks, " +
+            "then only the mic frames sent after answering; the frames sent during the ack wait never arrive");
+        AskSupport.NonPumpAppendIndexes(received, mute).First().Should().BeGreaterThan(unmute);
+        received.Skip(unmute + 1).Should().NotContain(message =>
+            message["type"]!.GetValue<string>() == "session.input_audio.mute", "the upstream is never muted in the answer (P-16)");
+    }
+
+    [Fact]
+    public async Task Ack_wait_times_out_at_exactly_2_s_and_sends_the_burst_once()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        fake.KeepAudio = true;
+        fake.UnmuteAckGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var factory = AskSupport.Factory(fake);
+        factory.UseFakeClock();
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        await AskSupport.StartTalkAsync(socket);
+        var question = await AskSupport.AskWithSpeechAsync(socket, voicedFrames: 20);
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ask_done\"}");
+        await AskSupport.AdmissionBarrierWhileListeningAsync(socket);
+        await BridgeTestSupport.WaitForAsync(() => AskSupport.IndexOf(fake.ReceivedSnapshot(), "session.input_audio.unmute") >= 0);
+        var mute = AskSupport.IndexOf(fake.ReceivedSnapshot(), "session.input_audio.mute");
+
+        await factory.AdvanceAndSettleAsync(TimeSpan.FromMilliseconds(Presenter.AskUnmuteAckTimeoutMs - 1));
+        AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), mute).Should().BeEmpty("1 ms before the timeout nothing is sent");
+
+        await factory.AdvanceAndSettleAsync(TimeSpan.FromMilliseconds(1));
+        var frames = new List<(JsonObject? Text, byte[]? Binary)>();
+        var answering = await AskSupport.CollectForAsync(socket, frames, TimeSpan.FromSeconds(5),
+            frame => frame["type"]?.GetValue<string>() == "ask_state" && frame["state"]?.GetValue<string>() == "answering");
+        answering.Should().BeGreaterThanOrEqualTo(0, "the timeout sends the burst without an ack");
+        frames.Take(answering).Should().Contain(frame => frame.Text != null && frame.Text["type"]!.GetValue<string>() == "log" &&
+            frame.Text["message"]!.GetValue<string>() == $"ask: unmute ack timed out after {Presenter.AskUnmuteAckTimeoutMs} ms; sending");
+        var expected = AskSupport.ExpectedBurstAppends(question);
+        await BridgeTestSupport.WaitForAsync(() => AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), mute).Count >= expected.Count);
+
+        // The late ack changes nothing: the burst went out exactly once.
+        fake.UnmuteAckGate.TrySetResult();
+        await ((Presenter)factory.Services.GetRequiredService<IPresenter>()).WaitUntilIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), mute).Should().BeEquivalentTo(expected,
+            options => options.WithStrictOrdering());
     }
 
     [Fact]
@@ -327,6 +374,60 @@ internal static class AskSupport
         BitConverter.TryWriteBytes(bytes.AsSpan(0, 4), seed + 1_000_000);
         return bytes;
     }
+
+    /// <summary>
+    /// A distinct quiet 20 ms frame: low-level room noise (RMS far below the 120 voice threshold) that is never all
+    /// zeros, so it cannot be mistaken for a pump silence frame.
+    /// </summary>
+    public static byte[] QuietFrame(int seed)
+    {
+        var bytes = new byte[AskRecorder.WindowBytes];
+        for (var index = 0; index < bytes.Length / 2; index++)
+        {
+            BitConverter.TryWriteBytes(bytes.AsSpan(index * 2, 2), (short)((index * 7 + seed * 13) % 41 - 20));
+        }
+
+        BitConverter.TryWriteBytes(bytes.AsSpan(0, 2), (short)(seed + 1));
+        return bytes;
+    }
+
+    /// <summary>
+    /// A barrier for admission while an ask listens or waits for its unmute ack: <c>unmute</c> is refused with a log
+    /// frame, and admission is serial, so every item sent before it has reached the presenter.
+    /// </summary>
+    public static Task AdmissionBarrierWhileListeningAsync(WebSocket socket) => BarrierAsync(socket);
+
+    private static async Task BarrierAsync(WebSocket socket)
+    {
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"unmute\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "log" &&
+            frame["message"]?.GetValue<string>() == "ask: unmute refused while listening");
+    }
+
+    /// <summary>The upstream appends the burst should consist of: the 200 ms zero lead-in, then each recorder chunk.</summary>
+    public static List<byte[]> ExpectedBurstAppends(IEnumerable<byte[]> frames)
+    {
+        var recorder = new AskRecorder();
+        foreach (var frame in frames) recorder.Append(frame);
+        return [new byte[Presenter.AskLeadInMs * AskRecorder.BytesPerMs], .. recorder.Complete().Select(chunk => chunk.ToArray())];
+    }
+
+    /// <summary>A pump silence frame: exactly one 20 ms window of zeros (every test mic payload is non-zero).</summary>
+    private static bool IsPumpFrame(byte[] payload) =>
+        payload.Length == AskRecorder.WindowBytes && payload.All(value => value == 0);
+
+    private static IEnumerable<(int Index, byte[] Payload)> Appends(IReadOnlyList<JsonObject> received, int from) =>
+        received.Select((message, index) => (message, index))
+            .Where(pair => pair.index >= from && pair.message["type"]?.GetValue<string>() == "session.input_audio.append")
+            .Select(pair => (pair.index, Convert.FromBase64String(pair.message["audio"]?.GetValue<string>() ??
+                throw new InvalidOperationException("Set FakeLiveServer.KeepAudio to compare payloads."))));
+
+    /// <summary>Every append from <paramref name="from"/> on that is not a pump silence frame, in wire order (needs KeepAudio).</summary>
+    public static List<byte[]> NonPumpAppends(IReadOnlyList<JsonObject> received, int from) =>
+        Appends(received, from).Where(append => !IsPumpFrame(append.Payload)).Select(append => append.Payload).ToList();
+
+    public static List<int> NonPumpAppendIndexes(IReadOnlyList<JsonObject> received, int from) =>
+        Appends(received, from).Where(append => !IsPumpFrame(append.Payload)).Select(append => append.Index).ToList();
 
     /// <summary>The 200 ms zero lead-in followed by what the presenter's recorder makes of <paramref name="frames"/>.</summary>
     public static byte[] ExpectedBurst(IEnumerable<byte[]> frames)
