@@ -153,6 +153,43 @@ public sealed class ResponsesScriptReviserTests
         Assert.Single(handler.Calls);
     }
 
+    public static TheoryData<string> OffSchemaRevisions => new()
+    {
+        // extra root property (the review's adversarial case)
+        """{"slides":[{"number":2,"narration":"changed","extra":"x"}],"summary":"x","extra":"x"}""",
+        """{"slides":[{"number":2,"narration":"changed"}],"summary":"x","extra":"x"}""",
+        // extra slide property
+        """{"slides":[{"number":2,"narration":"changed","extra":"x"}],"summary":"x"}""",
+        // duplicated key (JsonDocument keeps both)
+        """{"slides":[{"number":2,"narration":"changed"}],"summary":"x","summary":"y"}""",
+        """{"slides":[{"number":2,"narration":"changed","number":3}],"summary":"x"}""",
+        // missing slide property
+        """{"slides":[{"number":2}],"summary":"x"}""",
+        // wrong types
+        """{"slides":[{"number":"2","narration":"changed"}],"summary":"x"}""",
+        """{"slides":[{"number":2.5,"narration":"changed"}],"summary":"x"}""",
+        """{"slides":[{"number":2,"narration":null}],"summary":"x"}""",
+        """{"slides":[{"number":2,"narration":"changed"}],"summary":7}""",
+        """{"slides":{"number":2,"narration":"changed"},"summary":"x"}""",
+        """{"slides":["changed"],"summary":"x"}""",
+        // not an object
+        """[{"slides":[],"summary":"x"}]"""
+    };
+
+    [Theory]
+    [MemberData(nameof(OffSchemaRevisions))]
+    public async Task Output_outside_the_declared_schema_is_invalid_output_without_fallback(string revision)
+    {
+        var handler = new StubHandler(
+            _ => Json(Completed(revision)),
+            _ => Json(Completed(RevisionJson(2, "Should not be called."))));
+
+        var result = await CreateReviser(handler).ReviseAsync(Request(), CancellationToken.None);
+
+        Assert.Equal(new ScriptRevisionResult.Failed(ScriptEditErrors.InvalidOutput), result);
+        Assert.Single(handler.Calls);
+    }
+
     [Fact]
     public async Task Parses_message_among_multiple_output_elements()
     {

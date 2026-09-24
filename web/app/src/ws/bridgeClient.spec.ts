@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BridgeClient, type BridgeMessage, type Snapshot } from "./bridgeClient";
+import { groupExchanges } from "../store/exchanges";
 
 class FakeSocket {
   static OPEN = 1;
@@ -343,6 +344,39 @@ describe("BridgeClient", () => {
     expect(ws.sent[3]).toBe(
       '{"type":"train_turn","question":"What about 2025?","answer":"The 2025 figures show growth.","slideIndex":3}',
     );
+  });
+
+  it("sends a worst-case exchange inside every train_turn limit of the bridge", () => {
+    // Vietnamese (3 UTF-8 bytes per code unit), JSON-escaped quotes/backslashes and control characters, over
+    // several user turns: the frame must satisfy PresenterBridge.TryReadTrainTurn and its 16 KiB text cap.
+    const heavy = '\u0001\u0002\u0003\u0004\u0005\u0006Ệ"\\\u0085 '.repeat(700);
+    const turns = [
+      { role: "user", text: heavy, endMs: null, slide: 1 },
+      { role: "user", text: `${heavy} Giá bao nhiêu?`, endMs: null, slide: 1 },
+      { role: "assistant", text: heavy, endMs: null, slide: 1 },
+      { role: "assistant", text: heavy, endMs: null, slide: 1 },
+    ];
+    const exchange = groupExchanges(turns)[3]!;
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.fire("open", {});
+
+    c.trainTurn(exchange.question, exchange.answer, exchange.slideIndex);
+
+    const frame = ws.sent.at(-1) as string;
+    expect(new TextEncoder().encode(frame).length).toBeLessThanOrEqual(16 * 1024);
+    const sent = JSON.parse(frame) as { type: string; question: string; answer: string; slideIndex: number };
+    expect(sent.type).toBe("train_turn");
+    expect(sent.slideIndex).toBe(1);
+    for (const text of [sent.question, sent.answer]) {
+      expect(text.length).toBeGreaterThan(0);
+      expect(text.length).toBeLessThanOrEqual(2000);
+      // .NET string.IsNullOrWhiteSpace also counts U+0085 and the C0 separators as whitespace.
+      // eslint-disable-next-line no-control-regex -- matching control characters is the point
+      expect(text.replace(/[\s\u0085\u001c-\u001f]/g, "")).not.toBe("");
+    }
+    expect(sent.question.endsWith("Giá bao nhiêu?")).toBe(true);
   });
 
   it("emits script_edit and script_version", () => {

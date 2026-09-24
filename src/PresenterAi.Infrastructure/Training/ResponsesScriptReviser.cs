@@ -292,7 +292,7 @@ public sealed class ResponsesScriptReviser : IScriptReviser
         {
             using var document = JsonDocument.Parse(text);
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
+            if (!HasExactlyProperties(root, RootProperties)
                 || !root.TryGetProperty("slides", out var slides)
                 || slides.ValueKind != JsonValueKind.Array
                 || !root.TryGetProperty("summary", out var summary)
@@ -304,7 +304,7 @@ public sealed class ResponsesScriptReviser : IScriptReviser
             var revised = new List<RevisedSlide>();
             foreach (var slide in slides.EnumerateArray())
             {
-                if (slide.ValueKind != JsonValueKind.Object
+                if (!HasExactlyProperties(slide, SlideProperties)
                     || !slide.TryGetProperty("number", out var number)
                     || number.ValueKind != JsonValueKind.Number
                     || !number.TryGetInt32(out var n)
@@ -323,6 +323,31 @@ public sealed class ResponsesScriptReviser : IScriptReviser
         {
             return null;
         }
+    }
+
+    // The property sets Schema() declares with additionalProperties:false and every property required. Strict request
+    // formatting asks the provider to comply; the response is still checked here, so an extra, missing or repeated
+    // key is invalid_output rather than silently ignored.
+    private static readonly string[] RootProperties = ["slides", "summary"];
+    private static readonly string[] SlideProperties = ["number", "narration"];
+
+    private static bool HasExactlyProperties(JsonElement element, string[] allowed)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var property in element.EnumerateObject())
+        {
+            if (Array.IndexOf(allowed, property.Name) < 0 || !seen.Add(property.Name))
+            {
+                return false;
+            }
+        }
+
+        return seen.Count == allowed.Length;
     }
 
     private static string BuildInput(ScriptRevisionRequest request)

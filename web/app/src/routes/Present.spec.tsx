@@ -605,4 +605,39 @@ describe("Present", () => {
       await screen.findByText("Voice training is unavailable on this connection — use Train on this"),
     ).toBeTruthy();
   });
+
+  it("train on this sends an overlong multi-turn question within the bridge's limits", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+    act(() => usePresenterStore.setState({ slide: 0, transcript: [] }));
+    const leadIn = Array.from({ length: 150 }, (_, i) => `background${i}`).join(" ");
+    const actualQuestion = "How much does the new coating cost?";
+    // Three user turns (gaps over 1 s) totalling well over 2,000 characters, then the answer.
+    emitBridge("transcript", { type: "transcript", role: "user", delta: leadIn, end_ms: 1000 });
+    emitBridge("transcript", { type: "transcript", role: "user", delta: leadIn, end_ms: 5000 });
+    emitBridge("transcript", { type: "transcript", role: "user", delta: actualQuestion, end_ms: 9000 });
+    emitBridge("transcript", { type: "transcript", role: "assistant", delta: "It costs 10% more.", end_ms: 12000 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Train on this" }));
+
+    expect(bridgeTrainTurn).toHaveBeenCalledTimes(1);
+    const [question, answer, slideIndex] = bridgeTrainTurn.mock.calls[0] as [string, string, number];
+    expect(question.length).toBeLessThanOrEqual(2000);
+    expect(question.startsWith("…")).toBe(true);
+    expect(question.endsWith(` ${actualQuestion}`)).toBe(true);
+    expect(answer).toBe("It costs 10% more.");
+    expect(slideIndex).toBe(0);
+  });
 });
