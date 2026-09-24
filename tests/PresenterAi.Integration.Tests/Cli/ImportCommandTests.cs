@@ -6,6 +6,7 @@ using PresenterAi.Application.Content;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Persistence.Entities;
+using PresenterAi.Infrastructure.Tests.Content;
 using PresenterAi.Integration.Tests.Support;
 using Xunit;
 
@@ -18,7 +19,7 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
     public async Task Reimporting_updates_instead_of_duplicating()
     {
         var owner = await SeedUserAsync();
-        var root = FindRepositoryRoot();
+        var root = PinnedContentRoot.Create(FindRepositoryRoot());
         var configuration = Configuration();
         var firstOutput = new StringWriter();
         var firstExit = await PresenterAi.Cli.Program.RunAsync(
