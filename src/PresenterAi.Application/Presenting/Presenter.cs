@@ -1511,6 +1511,7 @@ public sealed partial class Presenter : IPresenter
             return;
         }
 
+        TreatVoicedSpeechAsFiller();
         OpenOrExtendQuestionHold(null);
         if (target == "responses")
         {
@@ -1563,6 +1564,21 @@ public sealed partial class Presenter : IPresenter
             case ToolRoundTracker.ResponseFinishedResult.Ignored:
                 break;
         }
+    }
+
+    /// <summary>
+    /// T8 live-run defect: a delegation that starts after the answer was believed voiced means that speech was filler
+    /// ("One moment."), said before the delegation event arrived. Return to waiting for the answer: the Answering /
+    /// check-in timers stop, and an ask exchange goes back to AwaitingAnswer under its original budget and ceiling.
+    /// The real answer then drives the check-in.
+    /// </summary>
+    private void TreatVoicedSpeechAsFiller()
+    {
+        if (!_questionHoldOpen || !_answerVoiced) return;
+        LogMessage("info", "question: delegated after speech; that speech was filler, waiting for the answer");
+        if (_interaction is Interaction.Answering or Interaction.AwaitingCarryOn) SetInteraction(Interaction.None);
+        _answerVoiced = false;
+        ReturnExchangeToAwaitingAnswer();
     }
 
     private void FinishBackendDelegation(string type)

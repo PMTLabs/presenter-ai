@@ -578,6 +578,22 @@ public sealed partial class Presenter
         ArmInteraction(700);
     }
 
+    /// <summary>
+    /// The speech taken as the answer was filler (a delegation followed it): back to AwaitingAnswer. The budget keeps
+    /// its original start, so the ceiling still bounds the wait; a check-in reply already open is dropped.
+    /// </summary>
+    private void ReturnExchangeToAwaitingAnswer()
+    {
+        if (_exchange is not { Phase: AskPhase.Answering or AskPhase.CheckIn } exchange) return;
+        exchange.Phase = AskPhase.AwaitingAnswer;
+        if (exchange.UtteranceOpen)
+        {
+            ResetUtterance();
+            exchange.UtteranceOpen = false;
+            exchange.UtteranceConfirmation = null;
+        }
+    }
+
     /// <summary>The existing 700 ms quiet after the answer moved to AwaitingCarryOn: the check-in begins (loop time).</summary>
     private void MarkExchangeCheckIn()
     {
