@@ -219,7 +219,7 @@ public sealed class BridgeContractTests
         using var socket = await BridgeTestSupport.ConnectAsync(factory);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
         var state = await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "state" && frame["state"]?.GetValue<string>() == "presenting");
-        state.Select(pair => pair.Key).Should().BeEquivalentTo(["type", "state", "presentationId", "title", "slideIndex", "slideCount", "paused", "muted", "sessionId", "expiresAt", "usageSeconds", "advanceSilenceMs"]);
+        state.Select(pair => pair.Key).Should().BeEquivalentTo(["type", "state", "presentationId", "title", "slideIndex", "slideCount", "paused", "muted", "sessionId", "expiresAt", "usageSeconds", "advanceSilenceMs", "suspended"]);
         (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "slide")).Select(pair => pair.Key).Should().BeEquivalentTo(["type", "index"]);
         (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "transcript")).Select(pair => pair.Key).Should().BeEquivalentTo(["type", "role", "delta", "start_ms", "end_ms"]);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"goto\",\"index\":0}");
@@ -230,6 +230,6 @@ public sealed class BridgeContractTests
         (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong")).Select(pair => pair.Key).Should().BeEquivalentTo(["type"]);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"end\"}");
         (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "usage")).Select(pair => pair.Key).Should().BeEquivalentTo(["type", "seconds", "ratio"]);
-        (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "closed")).Select(pair => pair.Key).Should().BeEquivalentTo(["type", "reason", "seconds"]);
+        (await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "closed")).Select(pair => pair.Key).Should().BeEquivalentTo(["type", "reason", "seconds", "endReason", "usageConfirmed", "estimatedSeconds"]);
     }
 }

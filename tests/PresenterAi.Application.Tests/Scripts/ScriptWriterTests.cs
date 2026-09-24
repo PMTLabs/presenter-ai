@@ -18,6 +18,18 @@ public sealed class ScriptWriterTests
     }
 
     [Fact]
+    public void Round_trips_max_minutes()
+    {
+        var original = new PresentationScript(
+            new PresentationMeta("p", "P", "d", "auto", null, null, null, MaxMinutes: 75),
+            [new Slide(0, 1, "", "x", null)]);
+
+        var roundTrip = ScriptParser.Parse(ScriptWriter.Format(original), "p");
+
+        Assert.Equal(75, roundTrip.Meta.MaxMinutes);
+    }
+
+    [Fact]
     public void Round_trips_yaml_sensitive_record_values()
     {
         var original = new PresentationScript(

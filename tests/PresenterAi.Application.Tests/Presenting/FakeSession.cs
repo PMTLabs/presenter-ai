@@ -15,6 +15,9 @@ internal sealed class FakeSession : ILiveSession
     public bool RefuseToolOutput { get; set; }
     public bool RefuseContinue { get; set; }
     public TaskCompletionSource? CloseGate { get; set; }
+    public TaskCompletionSource? ConnectGate { get; set; }
+    public double? CloseSeconds { get; set; } = 7;
+    public bool ThrowOnAppend { get; set; }
     public bool DeferCloseEvent { get; set; }
 
     public string? WarnOnConnect { get; set; }
@@ -46,8 +49,9 @@ internal sealed class FakeSession : ILiveSession
     public void RaiseHostedActivity(string delegationId, string status) => HostedToolActivity?.Invoke(delegationId, "web_search", status);
     public event Action<string, double?>? Closed;
 
-    public Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
+    public async Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
     {
+        if (ConnectGate is not null) await ConnectGate.Task.WaitAsync(cancellationToken);
         if (FailConnect)
         {
             throw new LiveStartupException("invalid_model", Error("invalid_model", "startup error"), "startup error");
@@ -61,7 +65,7 @@ internal sealed class FakeSession : ILiveSession
         State = LiveSessionState.Open;
         var session = new LiveSessionInfo("sess_test", "test", 123, Json("{\"id\":\"sess_test\",\"expires_at\":123}"), DelegationMode);
         Started?.Invoke(session);
-        return Task.FromResult(session);
+        return session;
     }
 
     public string? AppendInstructions(string content, string? eventId = null, string? delegationId = null) => Append("instructions", content, eventId, delegationId);
@@ -114,9 +118,9 @@ internal sealed class FakeSession : ILiveSession
         if (!DeferCloseEvent)
         {
             State = LiveSessionState.Closed;
-            Closed?.Invoke("close_requested", 7);
+            Closed?.Invoke(CloseSeconds is null ? "close_timeout" : "close_requested", CloseSeconds);
         }
-        return new LiveCloseResult("close_requested", 7);
+        return new LiveCloseResult(CloseSeconds is null ? "close_timeout" : "close_requested", CloseSeconds);
     }
 
     public ValueTask DisposeAsync()
@@ -162,6 +166,7 @@ internal sealed class FakeSession : ILiveSession
 
     private string? Append(string type, string content, string? eventId, string? delegationId)
     {
+        if (ThrowOnAppend) throw new InvalidOperationException("append failed");
         Sent.Add((type, content, eventId, delegationId));
         Appended?.Invoke(type, eventId, Json("{}"));
         return eventId;

@@ -305,4 +305,44 @@ describe("BridgeClient", () => {
     second.fire("open", {});
     expect(second.sent[0]).toBe('{"type":"auth","ticket":"test-ticket"}');
   });
+
+  it("answers server ping with pong", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.fire("open", {});
+    ws.fire("message", { data: JSON.stringify({ type: "ping" }) });
+    expect(ws.sent).toContain('{"type":"pong"}');
+  });
+
+  it("start sends maxMinutes only when chosen", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.fire("open", {});
+    c.start("sample");
+    c.start("sample", 1);
+    c.start("sample", undefined, 15);
+    c.start("sample", 2, 30);
+    expect(ws.sent[1]).toBe('{"type":"start","presentation":"sample"}');
+    expect(ws.sent[2]).toBe('{"type":"start","presentation":"sample","fromIndex":1}');
+    expect(ws.sent[3]).toBe('{"type":"start","presentation":"sample","maxMinutes":15}');
+    expect(ws.sent[4]).toBe('{"type":"start","presentation":"sample","fromIndex":2,"maxMinutes":30}');
+  });
+
+  it("emits limit_warning and upstream", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    const warnings: BridgeMessage[] = [];
+    const upstreams: BridgeMessage[] = [];
+    c.on("limit_warning", (msg) => warnings.push(msg));
+    c.on("upstream", (msg) => upstreams.push(msg));
+    const warningMsg = { type: "limit_warning", kind: "max_length", secondsLeft: 60 };
+    const upstreamMsg = { type: "upstream", status: "suspended" };
+    ws.fire("message", { data: JSON.stringify(warningMsg) });
+    ws.fire("message", { data: JSON.stringify(upstreamMsg) });
+    expect(warnings).toEqual([warningMsg]);
+    expect(upstreams).toEqual([upstreamMsg]);
+  });
 });

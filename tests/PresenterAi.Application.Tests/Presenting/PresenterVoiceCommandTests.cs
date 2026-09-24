@@ -304,6 +304,8 @@ public sealed class PresenterVoiceCommandTests
     public async Task End_confirmation_voice_answer_has_priority(string answer, string state)
     {
         var (presenter, session, clock) = await Start();
+        PresenterClosed? closed = null;
+        presenter.Closed += value => closed = value;
         await using (presenter)
         {
             await presenter.RequestEndConfirmationAsync(false);
@@ -318,6 +320,8 @@ public sealed class PresenterVoiceCommandTests
             if (answer == "yes")
             {
                 Assert.Single(session.Sent, item => item.Type == "close");
+                Assert.Equal(EndReasons.User, closed?.EndReason);
+                Assert.Equal("close_requested", closed?.Reason);
                 Assert.True((await presenter.StartAsync("p", null, "owner")).Started);
                 Assert.Equal(0, presenter.Snapshot().SlideIndex);
             }

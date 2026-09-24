@@ -130,7 +130,8 @@ public static class ImportCommand
             voice = meta.Voice,
             context = meta.Context,
             advanceSilenceMs = meta.AdvanceSilenceMs,
-            chunkChars = meta.ChunkChars
+            chunkChars = meta.ChunkChars,
+            maxMinutes = meta.MaxMinutes
         });
 
     private static bool IsDirectPresentationFile(string path, string contentRoot)

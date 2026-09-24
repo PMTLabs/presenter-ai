@@ -177,7 +177,7 @@ public sealed class SessionRecorder : ISessionRecorder
     private void OnUsage(PresenterUsage usage) => Enqueue(new UsageWork(usage.Seconds));
 
     private void OnClosed(PresenterClosed closed) =>
-        Enqueue(new ClosedWork(closed.Reason, closed.Seconds));
+        Enqueue(new ClosedWork(closed));
 
     private void Enqueue(EventWork work)
     {
@@ -260,7 +260,7 @@ public sealed class SessionRecorder : ISessionRecorder
         {
             PresentationId = begin.Result.PresentationId,
             UserId = begin.UserId,
-            StartedAt = _timeProvider.GetUtcNow(),
+            StartedAt = begin.Result.ConnectedAt ?? _timeProvider.GetUtcNow(),
             Upstream = begin.Result.Upstream ?? string.Empty,
             UpstreamSessionId = begin.Result.UpstreamSessionId
         };
@@ -303,7 +303,7 @@ public sealed class SessionRecorder : ISessionRecorder
                 _hasUsage = true;
                 break;
             case ClosedWork closed:
-                await ProcessEndAsync(new EndWork(closed.Reason, closed.Seconds)).ConfigureAwait(false);
+                await ProcessClosedAsync(closed.Closed).ConfigureAwait(false);
                 break;
         }
     }
@@ -330,7 +330,59 @@ public sealed class SessionRecorder : ISessionRecorder
         }
     }
 
-    private async Task ProcessEndAsync(EndWork end)
+    private Task ProcessClosedAsync(PresenterClosed closed) =>
+        FinalizeSessionAsync(session =>
+        {
+            if (closed.StartedAt.HasValue)
+            {
+                session.StartedAt = closed.StartedAt.Value;
+            }
+
+            var endedAt = closed.EndedAt ?? _timeProvider.GetUtcNow();
+            session.EndedAt = endedAt;
+
+            var wallClockSeconds = Math.Max(0, (endedAt - session.StartedAt).TotalSeconds);
+            var fallbackWallClock = wallClockSeconds > 0 ? wallClockSeconds : (_hasUsage ? _lastUsageSeconds : 0d);
+            var estimatedSeconds = closed.EstimatedSeconds > 0
+                ? ToRoundedSeconds(closed.EstimatedSeconds)
+                : ToRoundedSeconds(fallbackWallClock);
+
+            session.EstimatedSeconds = estimatedSeconds;
+            session.UsageConfirmed = closed.UsageConfirmed;
+
+            if (closed.UsageConfirmed)
+            {
+                session.UsageSeconds = ToRoundedSeconds(closed.Seconds ?? estimatedSeconds);
+            }
+            else
+            {
+                session.UsageSeconds = estimatedSeconds;
+            }
+
+            session.CloseReason = string.IsNullOrWhiteSpace(closed.Reason) ? "disconnect" : closed.Reason;
+            session.EndReason = string.IsNullOrWhiteSpace(closed.EndReason) ? EndReasons.UpstreamLost : closed.EndReason;
+        });
+
+    private Task ProcessEndAsync(EndWork end) =>
+        FinalizeSessionAsync(session =>
+        {
+            var endedAt = _timeProvider.GetUtcNow();
+            session.EndedAt = endedAt;
+
+            var wallClockSeconds = Math.Max(0, (endedAt - session.StartedAt).TotalSeconds);
+            var fallbackWallClock = wallClockSeconds > 0 ? wallClockSeconds : (_hasUsage ? _lastUsageSeconds : 0d);
+            var estimatedSeconds = end.Seconds.HasValue && end.Seconds.Value > 0
+                ? ToRoundedSeconds(end.Seconds.Value)
+                : ToRoundedSeconds(fallbackWallClock);
+
+            session.EstimatedSeconds = estimatedSeconds;
+            session.UsageConfirmed = false;
+            session.UsageSeconds = estimatedSeconds;
+            session.CloseReason = string.IsNullOrWhiteSpace(end.CloseReason) ? "disconnect" : end.CloseReason;
+            session.EndReason = EndReasons.Disconnect;
+        });
+
+    private async Task FinalizeSessionAsync(Action<Session> applyMetadata)
     {
         // This is deliberately worker-local: ClosedWork and the bridge EndWork can both be queued for one run,
         // but only the first item may write final metadata or complete the finalisation attempt.
@@ -354,8 +406,6 @@ public sealed class SessionRecorder : ISessionRecorder
 
         var turn = _turn;
         _turn = null;
-        var endedAt = _timeProvider.GetUtcNow();
-        var usageSeconds = end.Seconds ?? (_hasUsage ? _lastUsageSeconds : 0d);
 
         try
         {
@@ -371,9 +421,7 @@ public sealed class SessionRecorder : ISessionRecorder
                     db.SessionTurns.Add(CreateTurn(turn));
                 }
 
-                session.EndedAt = endedAt;
-                session.UsageSeconds = ToRoundedSeconds(usageSeconds);
-                session.CloseReason = string.IsNullOrWhiteSpace(end.CloseReason) ? "disconnect" : end.CloseReason;
+                applyMetadata(session);
                 await db.SaveChangesAsync(_lifetime.Token).ConfigureAwait(false);
             }
         }
@@ -444,7 +492,7 @@ public sealed class SessionRecorder : ISessionRecorder
     }
 
     private static int ToRoundedSeconds(double seconds) =>
-        Convert.ToInt32(Math.Round(Math.Max(0, seconds), MidpointRounding.AwayFromZero));
+        seconds > 0 ? Math.Max(1, Convert.ToInt32(Math.Round(seconds, MidpointRounding.AwayFromZero))) : 0;
 
     public async ValueTask DisposeAsync()
     {
@@ -478,7 +526,7 @@ public sealed class SessionRecorder : ISessionRecorder
     private sealed record SlideWork(int SlideNo) : EventWork;
     private sealed record TranscriptWork(string Role, string Delta, DateTimeOffset At) : EventWork;
     private sealed record UsageWork(double Seconds) : EventWork;
-    private sealed record ClosedWork(string Reason, double? Seconds) : EventWork;
+    private sealed record ClosedWork(PresenterClosed Closed) : EventWork;
     private sealed record BeginWork(string UserId, PresenterStartResult Result) : Work;
     private sealed record EndWork(string CloseReason, double? Seconds) : Work;
     private sealed record TurnBuffer(string Role, string Text, int? SlideNo, DateTimeOffset At);

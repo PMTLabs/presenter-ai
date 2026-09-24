@@ -42,7 +42,16 @@ public static class DependencyInjection
         // store is resolved. This keeps presentation-only test hosts bootable without Docker.
         services.AddSingleton<IConnectionMultiplexer>(_ => RedisConnection.Connect(connectionString ?? string.Empty));
         services.AddOptions<SessionRedisOptions>()
-            .Bind(configuration.GetSection("Session"));
+            .Bind(configuration.GetSection("Session"))
+            .Validate(
+                options => options.HeartbeatIntervalSeconds is >= SessionRedisOptions.MinHeartbeatIntervalSeconds
+                    and <= SessionRedisOptions.MaxHeartbeatIntervalSeconds,
+                $"Session:HeartbeatIntervalSeconds must be between {SessionRedisOptions.MinHeartbeatIntervalSeconds} and {SessionRedisOptions.MaxHeartbeatIntervalSeconds}")
+            .Validate(
+                options => options.HeartbeatTimeoutSeconds >= 2 * options.HeartbeatIntervalSeconds
+                    && options.HeartbeatTimeoutSeconds <= SessionRedisOptions.MaxHeartbeatTimeoutSeconds,
+                $"Session:HeartbeatTimeoutSeconds must be between 2 * HeartbeatIntervalSeconds and {SessionRedisOptions.MaxHeartbeatTimeoutSeconds}")
+            .ValidateOnStart();
         services.AddSingleton<ITicketStore, TicketStore>();
         services.AddSingleton<ISsoCodeStore, SsoCodeStore>();
         services.AddSingleton<ISsoStateStore, SsoStateStore>();
@@ -74,6 +83,22 @@ public static class DependencyInjection
             .Validate(
                 options => options.FollowUpWaitMs is >= PresenterOptions.MinFollowUpWaitMs and <= PresenterOptions.MaxFollowUpWaitMs,
                 $"Presenter:FollowUpWaitMs must be between {PresenterOptions.MinFollowUpWaitMs} and {PresenterOptions.MaxFollowUpWaitMs}")
+            .Validate(
+                options => options.MaxTalkCeilingMinutes is >= PresenterOptions.MinMaxTalkCeilingMinutes
+                    and <= PresenterOptions.MaxMaxTalkCeilingMinutes,
+                $"Presenter:MaxTalkCeilingMinutes must be between {PresenterOptions.MinMaxTalkCeilingMinutes} and {PresenterOptions.MaxMaxTalkCeilingMinutes}")
+            .Validate(
+                options => options.MaxTalkMinutes >= PresenterOptions.MinMaxTalkMinutes
+                    && options.MaxTalkMinutes <= options.MaxTalkCeilingMinutes,
+                $"Presenter:MaxTalkMinutes must be between {PresenterOptions.MinMaxTalkMinutes} and Presenter:MaxTalkCeilingMinutes")
+            .Validate(
+                options => options.PauseGraceSeconds is >= PresenterOptions.MinPauseGraceSeconds
+                    and <= PresenterOptions.MaxPauseGraceSeconds,
+                $"Presenter:PauseGraceSeconds must be between {PresenterOptions.MinPauseGraceSeconds} and {PresenterOptions.MaxPauseGraceSeconds}")
+            .Validate(
+                options => options.IdleTimeoutSeconds is >= PresenterOptions.MinIdleTimeoutSeconds
+                    and <= PresenterOptions.MaxIdleTimeoutSeconds,
+                $"Presenter:IdleTimeoutSeconds must be between {PresenterOptions.MinIdleTimeoutSeconds} and {PresenterOptions.MaxIdleTimeoutSeconds}")
             .ValidateOnStart();
 
         services.AddOptions<ToolsOptions>()
@@ -181,7 +206,11 @@ public static class DependencyInjection
                     settings.AdvanceSilenceMs,
                     routes.Voice,
                     settings.FollowUpWaitMs,
-                    toolsOptions?.MaxInlineTools ?? ToolsOptions.DefaultMaxInlineTools),
+                    toolsOptions?.MaxInlineTools ?? ToolsOptions.DefaultMaxInlineTools,
+                    settings.MaxTalkMinutes,
+                    settings.MaxTalkCeilingMinutes,
+                    settings.PauseGraceSeconds,
+                    settings.IdleTimeoutSeconds),
                 timeProvider,
                 toolRegistry,
                 attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel),

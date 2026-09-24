@@ -199,9 +199,17 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                         .HasColumnType("text")
                         .HasColumnName("close_reason");
 
+                    b.Property<string>("EndReason")
+                        .HasColumnType("text")
+                        .HasColumnName("end_reason");
+
                     b.Property<DateTimeOffset?>("EndedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("ended_at");
+
+                    b.Property<int?>("EstimatedSeconds")
+                        .HasColumnType("integer")
+                        .HasColumnName("estimated_seconds");
 
                     b.Property<string>("PresentationId")
                         .IsRequired()
@@ -220,6 +228,10 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                     b.Property<string>("UpstreamSessionId")
                         .HasColumnType("text")
                         .HasColumnName("upstream_session_id");
+
+                    b.Property<bool?>("UsageConfirmed")
+                        .HasColumnType("boolean")
+                        .HasColumnName("usage_confirmed");
 
                     b.Property<int>("UsageSeconds")
                         .HasColumnType("integer")

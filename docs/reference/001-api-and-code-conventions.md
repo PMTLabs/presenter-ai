@@ -173,8 +173,24 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   frame with `"takeOver":true` from that user ends the holder's talk (Start then resumes at its slide) and replaces
   it; the replaced client gets `{"type":"error","code":"taken_over"}` and close `4409` with reason `taken_over`,
   and must not reconnect. Another account's request gets busy with `canTakeOver:false`.
-- Ping/pong: client `{"type":"ping"}` → `{"type":"pong"}` every 15 s; server closes after 45 s of silence.
-- Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on pause). This is a server-to-client event, not a command; clients that do not recognize it may ignore it.
+- Heartbeat: the server sends `{"type":"ping"}` every `Session:HeartbeatIntervalSeconds` (default 15 s); the
+  client answers `{"type":"pong"}`. Any inbound frame also counts as activity. If no frame arrives within
+  `Session:HeartbeatTimeoutSeconds` (default 45 s), the bridge aborts the socket and ends the talk with reason
+  `heartbeat`.
+- Start may include an optional `maxMinutes` integer (minimum 5) alongside `presentation` and `fromIndex`. A value
+  below 5 is a protocol error; an override at or above the effective cap is ignored. A lower override can only
+  reduce the effective cap and cannot exceed the server's ceiling.
+- Additional server-to-client events (additive; unknown events may be ignored):
+  - `{"type":"limit_warning","kind":"max_length"|"idle","secondsLeft":60}` warns of a cutoff;
+    idle activity clears it with `{"type":"limit_warning","kind":"idle","secondsLeft":null}`.
+  - `{"type":"upstream","status":"suspended"|"reconnecting"|"live"}` reports pause-close and resume reconnect
+    status.
+  - `closed` retains its existing fields and adds `endReason`, `usageConfirmed`, and `estimatedSeconds`; the first
+    is the reason vocabulary, the second says whether provider usage is confirmed, and the last is local elapsed
+    estimate in seconds.
+  - `state` adds `suspended` (boolean) to indicate that the talk is paused with its upstream closed.
+- Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on
+  pause). This is a server-to-client event, not a command; clients that do not recognize it may ignore it.
 
 ## 9. Security and headers
 

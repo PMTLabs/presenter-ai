@@ -432,6 +432,8 @@ export interface components {
             deck: string;
             driver: string;
             id: string;
+            /** Format: int32 */
+            maxMinutes: null | number | string;
             title: string;
             voice: null | string;
         };

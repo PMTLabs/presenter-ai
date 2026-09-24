@@ -4,6 +4,7 @@ using PresenterAi.Application.Scripts;
 using PresenterAi.Application.Tools;
 using PresenterAi.Application.Tools.External;
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 using PresenterAi.Application.Presenting.VoiceCommands;
 using PresenterToolsRegistration = PresenterAi.Application.Presenting.Tools.PresenterToolsRegistration;
 
@@ -35,6 +36,10 @@ public sealed class Presenter : IPresenter
     public const int DefaultFollowUpWaitMs = 5_000;
     public const int MaxUpstreamAttempts = 4;
     public const int PartGapMs = 2_500;
+    // DisposeAsync's wait for the loop. The shutdown close is LiveSession.CloseAsync, itself bounded by
+    // LiveSessionOptions.CloseTimeout (5 s), so twice that expires only for a loop wedged elsewhere, e.g. in a
+    // presentation loader that ignores cancellation. Past it the process can exit; no upstream can be created.
+    public static readonly TimeSpan ShutdownBound = TimeSpan.FromSeconds(10);
 
     private readonly Func<SessionRequest, int, ILiveSession?> _createSession;
     private readonly Func<string, string, CancellationToken, Task<LoadedPresentation>> _loadPresentation;
@@ -120,6 +125,23 @@ public sealed class Presenter : IPresenter
     private long _permitGeneration;
     private PresenterSnapshot _snapshot;
     private int _disposed;
+    private TalkGuard? _guard;
+    private string? _requestedEndReason;
+    private DateTimeOffset? _talkStartedAt;
+    private DateTimeOffset? _talkEndedAt;
+    private double _priorUsageSeconds;
+    private double _priorEstimatedSeconds;
+    private bool _usageConfirmed = true;
+    private DateTimeOffset? _connectedAt;
+    private CancellationTokenSource? _runCts;
+    // Off-loop signals (End, the guard's max-length callback, AbortPendingStart, Dispose) reach a Start or talk only
+    // through tickets: a ticket exists from the moment StartAsync enqueues, so there is no queued or accepting
+    // window in which a signal finds nothing to cancel. _queuedStarts and _talk are changed under _ticketGate.
+    private readonly object _ticketGate = new();
+    private readonly List<StartTicket> _queuedStarts = [];
+    private StartTicket? _talk;
+    private bool _suspended;
+    private string? _endDiagnostic;
 
     public Presenter(
         Func<SessionRequest, int, ILiveSession?> createSession,
@@ -157,6 +179,8 @@ public sealed class Presenter : IPresenter
     public event Action<PresenterClosed>? Closed;
     public event Action<PresenterLog>? Log;
     public event Action<PresenterUpstreamError>? UpstreamError;
+    public event Action<PresenterLimitWarning>? LimitWarning;
+    public event Action<PresenterUpstreamStatus>? UpstreamStatus;
 
     public static int PartGapFor(int advanceSilenceMs) => Math.Min(PartGapMs, (int)Math.Round(advanceSilenceMs * 0.8));
 
@@ -170,9 +194,26 @@ public sealed class Presenter : IPresenter
         string ownerId,
         CancellationToken cancellationToken = default)
     {
-        var command = new StartCommand(ownerId, id, fromIndex);
+        return await StartAsync(id, fromIndex, ownerId, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PresenterStartResult> StartAsync(
+        string id, int? fromIndex, string ownerId, int? maxMinutes, CancellationToken cancellationToken = default)
+    {
         ThrowIfDisposed();
-        await WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        var ticket = new StartTicket();
+        // Registered before the command is written, so an End or abort from now on cancels this Start.
+        lock (_ticketGate) _queuedStarts.Add(ticket);
+        var command = new StartCommand(ownerId, id, fromIndex, maxMinutes, ticket);
+        try
+        {
+            await WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            lock (_ticketGate) _queuedStarts.Remove(ticket);
+            throw;
+        }
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -204,7 +245,39 @@ public sealed class Presenter : IPresenter
         EnqueueCommandAsync(new SendAudioCommand(pcm16.ToArray()), cancellationToken);
 
     public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) =>
-        EnqueueCommandAsync(new EndCommand(resumable), cancellationToken);
+        EndAsync(EndReasons.User, resumable, cancellationToken);
+
+    public Task<bool> EndAsync(string endReason, bool resumable = false, CancellationToken cancellationToken = default) =>
+        EndWithReasonAsync(endReason, resumable, cancellationToken);
+
+    private Task<bool> EndWithReasonAsync(string endReason, bool resumable, CancellationToken cancellationToken)
+    {
+        CancelConnect(endReason);
+        return EnqueueCommandAsync(new EndCommand(resumable, endReason), cancellationToken);
+    }
+
+    /// <summary>
+    /// Cancels every queued Start and the current talk's load, connects and reconnects, and records
+    /// <paramref name="reason"/> on each (first one wins per ticket). An End while idle with nothing queued touches
+    /// only the finished talk's ticket, so it cannot label the next talk.
+    /// </summary>
+    private void CancelConnect(string? reason)
+    {
+        StartTicket[] tickets;
+        lock (_ticketGate)
+        {
+            tickets = _talk is null ? [.. _queuedStarts] : [.. _queuedStarts, _talk];
+            foreach (var ticket in tickets) ticket.RecordEndReason(reason);
+        }
+        // Cancel outside the gate: token callbacks may run loop continuations inline on this thread.
+        foreach (var ticket in tickets) ticket.Cancel();
+    }
+
+    /// <summary>
+    /// Cancels queued and in-flight Starts and connects without choosing an end reason. Callers end the talk next
+    /// (bridge cleanup, shutdown, CLI cancellation); a Start enqueued after this call is unaffected.
+    /// </summary>
+    public void AbortPendingStart() => CancelConnect(null);
 
     /// <summary>Test hook that completes after all currently queued producer events have been consumed.</summary>
     public async Task WaitUntilIdleAsync(CancellationToken cancellationToken = default)
@@ -230,6 +303,35 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        // Cancels queued Starts and the current talk's load and connects. From here no Start or reconnect can create
+        // an upstream: acceptance rejects a cancelled ticket and ConnectUpstreamAsync checks the ticket before every
+        // candidate, so abandoning a loop wedged in a loader that ignores cancellation is safe.
+        CancelConnect(EndReasons.Shutdown);
+        CancelRun();
+
+        var stopping = StopLoopAsync();
+        try
+        {
+            await stopping.WaitAsync(ShutdownBound, _timeProvider).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            LogMessage("warn", $"presenter loop did not stop within {ShutdownBound.TotalSeconds:0} s; abandoning it");
+            _events.Writer.TryComplete();
+            _lifetime.Cancel();
+            _ = stopping.ContinueWith(task => _ = task.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            // The abandoned loop still reads _lifetime.Token and _runCts, so neither is disposed here.
+            return;
+        }
+
+        _runCts?.Dispose();
+        _lifetime.Dispose();
+    }
+
+    private async Task StopLoopAsync()
+    {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -243,7 +345,6 @@ public sealed class Presenter : IPresenter
         _events.Writer.TryComplete();
         _lifetime.Cancel();
         await _loop.ConfigureAwait(false);
-        _lifetime.Dispose();
     }
 
     private async Task<bool> EnqueueCommandAsync(Command command, CancellationToken cancellationToken)
@@ -310,6 +411,8 @@ public sealed class Presenter : IPresenter
         {
             await foreach (var presenterEvent in _events.Reader.ReadAllAsync(_lifetime.Token).ConfigureAwait(false))
             {
+                try
+                {
                 switch (presenterEvent)
                 {
                     case StartCommand start:
@@ -361,7 +464,7 @@ public sealed class Presenter : IPresenter
                         break;
                     case WrapUpFallbackElapsed fallback when fallback.Generation == _wrapUpGeneration:
                         _wrapUpTimer = null;
-                        OnWrapUpFallback();
+                        await OnWrapUpFallbackAsync().ConfigureAwait(false);
                         break;
                     case QuestionHoldElapsed question when question.Generation == _questionGeneration:
                         _questionTimer = null;
@@ -377,6 +480,10 @@ public sealed class Presenter : IPresenter
                         break;
                     case PermitElapsed permit when permit.Generation == _permitGeneration:
                         ClosePermit();
+                        break;
+                    case GuardElapsed guard when ReferenceEquals(guard.Source, _guard) &&
+                        guard.Generation == _guard.Generation:
+                        await OnGuardElapsedAsync().ConfigureAwait(false);
                         break;
                     case DelegatedResponseReceived response:
                         OnDelegatedResponse(response);
@@ -407,37 +514,111 @@ public sealed class Presenter : IPresenter
                         barrier.Completion.TrySetResult();
                         break;
                     case Shutdown shutdown:
-                        ClearTimers();
-                        _navigatingCallIds.Clear();
-                        _runGeneration++;
-                        _toolRoundTracker.Clear();
-                        ReleaseSessionTools();
-                        var session = _session;
-                        _session = null;
-                        if (session is not null)
-                        {
-                            await DisposeSessionAsync(session, "shutdown").ConfigureAwait(false);
-                        }
-
-                        shutdown.Completion.TrySetResult();
+                        try { await CloseForShutdownAsync().ConfigureAwait(false); }
+                        finally { shutdown.Completion.TrySetResult(); }
                         return;
+                }
+                }
+                catch (Exception exception)
+                {
+                    await FailSafeCloseAsync(exception).ConfigureAwait(false);
                 }
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
         }
+        finally
+        {
+            CancelRun();
+            StopGuard();
+            if (_session is { } session)
+            {
+                _session = null;
+                await DisposeSessionAsync(session, "loop exit").ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task CloseForShutdownAsync()
+    {
+        CancelRun();
+        StopGuard();
+        var session = _session;
+        _session = null;
+        LiveCloseResult? result = null;
+        if (session is not null)
+        {
+            Exception? closeError = null;
+            try { result = await session.CloseAsync().ConfigureAwait(false); }
+            catch (Exception ex) { closeError = ex; }
+            finally { await DisposeSessionAsync(session, "shutdown").ConfigureAwait(false); }
+            if (closeError is not null) LogMessage("error", $"shutdown close failed: {closeError.GetType().Name}");
+        }
+        if (_state != PresenterState.Idle)
+        {
+            _talkEndedAt = _timeProvider.GetUtcNow();
+            OnClosed("disposed", result?.Seconds, EndReasons.Shutdown);
+        }
+    }
+
+    private async Task FailSafeCloseAsync(Exception exception)
+    {
+        try { LogMessage("error", $"presenter handler failed: {exception.GetType().Name}"); }
+        catch (Exception) { }
+        CancelRun();
+        var session = _session;
+        _session = null;
+        LiveCloseResult? result = null;
+        if (session is not null)
+        {
+            try { result = await session.CloseAsync().ConfigureAwait(false); }
+            catch (Exception)
+            {
+                try { session.Terminate(); }
+                catch (Exception) { }
+            }
+            finally { await DisposeSessionAsync(session, "handler failure").ConfigureAwait(false); }
+        }
+        if (_state != PresenterState.Idle)
+        {
+            _talkEndedAt = _timeProvider.GetUtcNow();
+            try { OnClosed(exception.GetType().Name, result?.Seconds, EndReasons.Error); }
+            catch (Exception)
+            {
+                _state = PresenterState.Idle;
+                Volatile.Write(ref _snapshot, BuildSnapshot());
+            }
+        }
     }
 
     private async Task ProcessStartAsync(StartCommand command)
     {
+        var ticket = command.Ticket;
+        bool rejected;
+        lock (_ticketGate)
+        {
+            _queuedStarts.Remove(ticket);
+            rejected = ticket.Token.IsCancellationRequested || Volatile.Read(ref _disposed) != 0;
+            // Only an accepted Start becomes the talk; a Start ignored because a talk is running must not
+            // replace that talk's ticket. Under the gate, a signal sees the ticket either queued or as the talk.
+            if (!rejected && _state == PresenterState.Idle) _talk = ticket;
+        }
+        if (rejected)
+        {
+            LogMessage("info", $"start cancelled before it began ({ticket.EndReason ?? "aborted"})");
+            command.Completion.TrySetResult(new PresenterStartResult(false, command.Id, null, null, null));
+            return;
+        }
         try
         {
-            command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex).ConfigureAwait(false));
+            command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex,
+                command.MaxMinutes, ticket).ConfigureAwait(false));
         }
         catch (Exception exception)
         {
-            command.Completion.TrySetException(exception);
+            await FailSafeCloseAsync(exception).ConfigureAwait(false);
+            command.Completion.TrySetResult(new PresenterStartResult(false, command.Id, null, null, null));
         }
     }
 
@@ -445,20 +626,21 @@ public sealed class Presenter : IPresenter
     {
         try
         {
+            if (command is not (SendAudioCommand or EndCommand)) RecordActivity();
             if (command is NextCommand or PrevCommand or GotoCommand or PauseCommand or ResumeCommand or EndCommand)
                 CancelToolConfirmation();
             var result = command switch
             {
-                NextCommand next => NextCore(next.InvocationCallId),
-                PrevCommand prev => PrevCore(prev.InvocationCallId),
-                GotoCommand goTo => GotoCore(goTo.Index, goTo.InvocationCallId),
+                NextCommand next => await NavigateAfterReconnectAsync(() => NextCore(next.InvocationCallId)).ConfigureAwait(false),
+                PrevCommand prev => await NavigateAfterReconnectAsync(() => PrevCore(prev.InvocationCallId)).ConfigureAwait(false),
+                GotoCommand goTo => await NavigateAfterReconnectAsync(() => GotoCore(goTo.Index, goTo.InvocationCallId)).ConfigureAwait(false),
                 PauseCommand => PauseCore(),
                 ConfirmEndCommand confirm => await ConfirmEndCore(confirm.Confirmed).ConfigureAwait(false),
-                ResumeCommand => ResumeCore(),
+                ResumeCommand => await ResumeAfterReconnectAsync().ConfigureAwait(false),
                 MuteCommand => MuteCore(),
                 UnmuteCommand => UnmuteCore(),
                 SendAudioCommand audio => SendAudioCore(audio.Pcm16),
-                EndCommand end => await EndAsyncCore(end.Resumable).ConfigureAwait(false),
+                EndCommand end => await EndAsyncCore(end.Resumable, end.EndReason).ConfigureAwait(false),
                 _ => false
             };
             command.Completion.TrySetResult(result);
@@ -466,10 +648,12 @@ public sealed class Presenter : IPresenter
         catch (Exception exception)
         {
             command.Completion.TrySetException(exception);
+            await FailSafeCloseAsync(exception).ConfigureAwait(false);
         }
     }
 
-    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex)
+    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex, int? maxMinutes,
+        StartTicket ticket)
     {
         if (_state != PresenterState.Idle)
         {
@@ -487,34 +671,84 @@ public sealed class Presenter : IPresenter
         _toolRoundTracker.Clear();
         _approvedTools.Clear();
         _hostedStarted.Clear();
+        _requestedEndReason = null;
+        _runCts?.Dispose();
+        _runCts = new CancellationTokenSource();
+        _talkStartedAt = _timeProvider.GetUtcNow();
+        _talkEndedAt = null;
+        _priorUsageSeconds = 0;
+        _priorEstimatedSeconds = 0;
+        _usageConfirmed = true;
+        StopGuard();
+        var initialCap = Math.Min(_settings.MaxTalkMinutes, _settings.MaxTalkCeilingMinutes);
+        if (maxMinutes is >= 5) initialCap = Math.Min(initialCap, maxMinutes.Value);
+        TalkGuard? guard = null;
+        guard = new TalkGuard(_timeProvider, initialCap, _settings.IdleTimeoutSeconds,
+            _settings.PauseGraceSeconds, generation => QueueFromProducer(new GuardElapsed(guard!, generation)),
+            () =>
+            {
+                if (ReferenceEquals(Volatile.Read(ref _guard), guard)) ticket.Cancel(EndReasons.MaxLength);
+            });
+        Volatile.Write(ref _guard, guard);
+        _talkStartedAt = guard.StartedAt;
+        _suspended = false;
+        _endDiagnostic = null;
         SetState(PresenterState.Connecting);
-        using var startCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        // The ticket was cancellable since StartAsync enqueued it, so there is no check-then-publish gap: an End or
+        // abort before, during or after acceptance is already visible here.
+        using var startCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, ticket.Token);
+        using var toolsCts = CancellationTokenSource.CreateLinkedTokenSource(startCts.Token);
         var toolsStartedAt = _timeProvider.GetTimestamp();
         Task<SessionToolSet>? toolsTask = null;
         if (_loadSessionTools is not null && (_hasDelegationModel is null || Enumerable.Range(0, MaxUpstreamAttempts).Any(i => _hasDelegationModel(i))))
         {
-            try { toolsTask = _loadSessionTools(ownerId, startCts.Token); }
+            try { toolsTask = _loadSessionTools(ownerId, toolsCts.Token); }
             catch (Exception ex) { LogMessage("warn", $"tools: load failed ({ex.GetType().Name})"); }
         }
-        var presentationTask = _loadPresentation(ownerId, id, _lifetime.Token);
+        var presentationTask = _loadPresentation(ownerId, id, startCts.Token);
         try
         {
             _presentation = await presentationTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (startCts.IsCancellationRequested)
+        {
+            toolsCts.Cancel();
+            if (toolsTask is not null) ObserveLateToolSet(toolsTask);
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.Shutdown).ConfigureAwait(false);
+            return new PresenterStartResult(false, id, null, null, null);
         }
         catch (Exception exception)
         {
             LogMessage("error", $"cannot load presentation \"{id}\": {exception.Message}");
             UpstreamError?.Invoke(new PresenterUpstreamError($"cannot load presentation: {exception.Message}", "presentation"));
-            startCts.Cancel();
+            toolsCts.Cancel();
             if (toolsTask is not null) ObserveLateToolSet(toolsTask);
             SetState(PresenterState.Idle);
+            StopGuard();
+            CancelRun();
+            return new PresenterStartResult(false, id, null, null, null);
+        }
+
+        var scriptCap = _presentation.Meta.MaxMinutes ?? _settings.MaxTalkMinutes;
+        if (scriptCap > _settings.MaxTalkCeilingMinutes)
+            LogMessage("warn", $"limit: clamped {scriptCap} → {_settings.MaxTalkCeilingMinutes} min");
+        if (maxMinutes > _settings.MaxTalkCeilingMinutes)
+            LogMessage("warn", $"limit: clamped override {maxMinutes} → {_settings.MaxTalkCeilingMinutes} min");
+        var effectiveCap = Math.Min(scriptCap, _settings.MaxTalkCeilingMinutes);
+        if (maxMinutes is >= 5) effectiveCap = Math.Min(effectiveCap, maxMinutes.Value);
+        _guard.Tighten(effectiveCap);
+        LogMessage("info", $"limit: max length {effectiveCap} min (script {scriptCap}, override {maxMinutes?.ToString() ?? "none"}, ceiling {_settings.MaxTalkCeilingMinutes})");
+        if (_guard.MaxExpired)
+        {
+            await EndAsyncCore(false, EndReasons.MaxLength).ConfigureAwait(false);
             return new PresenterStartResult(false, id, null, null, null);
         }
 
         if (toolsTask is not null)
         {
             var remaining = _startToolBudget - _timeProvider.GetElapsedTime(toolsStartedAt);
-            if (remaining > TimeSpan.Zero && await Task.WhenAny(toolsTask, Task.Delay(remaining, _lifetime.Token)).ConfigureAwait(false) == toolsTask)
+            if (remaining > TimeSpan.Zero && await Task.WhenAny(toolsTask, Task.Delay(remaining, startCts.Token))
+                .ConfigureAwait(false) == toolsTask)
             {
                 try
                 {
@@ -528,99 +762,135 @@ public sealed class Presenter : IPresenter
             }
             else
             {
-                startCts.Cancel();
+                toolsCts.Cancel();
                 LogMessage("warn", "tools: start budget exceeded");
                 ObserveLateToolSet(toolsTask);
             }
         }
+        if (startCts.IsCancellationRequested)
+        {
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.Shutdown).ConfigureAwait(false);
+            return new PresenterStartResult(false, id, null, null, null);
+        }
         _catalogue = ToolSessionCatalogue.Build(_toolRegistry, _sessionTools?.Tools, _settings.MaxInlineTools);
         foreach (var note in _catalogue.Notes) LogMessage("info", note);
         var presentation = _presentation;
-        var hasExternalTools = _sessionTools is { Tools.Count: > 0 } or { HostedTools.Count: > 0 };
-        ILiveSession? session = null;
-        LiveSessionInfo? sessionInfo = null;
-        string? upstream = null;
-        for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
+        var connection = await ConnectUpstreamAsync().ConfigureAwait(false);
+        if (connection.Cancelled)
         {
-            var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
-            var instructions = PromptBuilder.SystemInstructions(
-                presentation.Meta.Title,
-                presentation.Slides,
-                presentation.Context,
-                onWarn: message => LogMessage("warn", message),
-                managedMode: isManaged) + (isManaged && hasExternalTools ? PromptBuilder.ExternalToolsSystemRules() : "");
-
-            var inlineTools = isManaged ? _catalogue.GetInlineToolDefinitions() : null;
-            var delegationInstructions = isManaged
-                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides) + (hasExternalTools ? PromptBuilder.ExternalToolsBackendRules() : "")
-                : null;
-
-            var request = new SessionRequest(
-                instructions,
-                presentation.Meta.Voice ?? _settings.Voice,
-                presentation.Meta.Title,
-                inlineTools,
-                delegationInstructions,
-                isManaged ? _sessionTools?.HostedTools : null);
-
-            var candidate = _createSession(request, attempt);
-            if (candidate is null)
-            {
-                break;
-            }
-
-            var label = candidate.Name ?? $"upstream #{attempt + 1}";
-            try
-            {
-                WireSession(candidate);
-                sessionInfo = await candidate.ConnectAsync(_lifetime.Token).ConfigureAwait(false);
-                session = candidate;
-                upstream = label;
-                // Node logged this only for a fallback; the .NET host always says which upstream answered
-                // (info for the primary, warn when a fallback took over) so a live run shows Azure vs OpenAI.
-                LogMessage(attempt > 0 ? "warn" : "info", $"connected via {label}");
-                break;
-            }
-            catch (Exception exception)
-            {
-                LogMessage("error", $"session start via {label} failed: {exception.Message}");
-                var startup = exception as LiveStartupException;
-                UpstreamError?.Invoke(new PresenterUpstreamError($"{label}: {exception.Message}", startup?.Code ?? "connect"));
-                await DisposeSessionAsync(candidate, $"failed start via {label}").ConfigureAwait(false);
-            }
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.MaxLength).ConfigureAwait(false);
+            return new PresenterStartResult(false, id, null, null, null);
         }
-
-        if (session is null || sessionInfo is null)
+        if (connection.Session is null || connection.Info is null)
         {
             LogMessage("error", "no upstream could start a session");
             ReleaseSessionTools();
             SetState(PresenterState.Idle);
+            StopGuard();
+            CancelRun();
             return new PresenterStartResult(false, id, null, null, null);
         }
 
+        var session = connection.Session;
+        var sessionInfo = connection.Info;
         _session = session;
         _sessionInfo = sessionInfo;
-        if (sessionInfo.DelegationMode == "client")
+        try
         {
-            if (_sessionTools is not null)
+            _connectedAt = _timeProvider.GetUtcNow();
+            if (sessionInfo.DelegationMode == "client")
             {
-                ReleaseSessionTools();
-                _catalogue = ToolSessionCatalogue.Build(_toolRegistry, maxInlineTools: _settings.MaxInlineTools);
-                LogMessage("info", "external tools need a delegation model; not used in this talk");
+                if (_sessionTools is not null)
+                {
+                    ReleaseSessionTools();
+                    _catalogue = ToolSessionCatalogue.Build(_toolRegistry, maxInlineTools: _settings.MaxInlineTools);
+                    LogMessage("info", "external tools need a delegation model; not used in this talk");
+                }
+                session.AppendInstructions(PromptBuilder.ClientModeInstruction(), "client-mode-controls");
             }
-            session.AppendInstructions(PromptBuilder.ClientModeInstruction(), "client-mode-controls");
-        }
 
-        var startAt = fromIndex
-            ?? (_lastRun is { EndedNormally: false } last && last.Id == id ? last.Index : 0);
-        startAt = Math.Clamp(startAt, 0, Math.Max(0, presentation.Slides.Count - 1));
-        _muted = false;
-        _usageSeconds = 0;
-        _usageRatio = null;
-        SetState(PresenterState.Presenting);
-        PresentSlide(startAt, interrupt: false);
-        return new PresenterStartResult(true, id, upstream, sessionInfo.Id, sessionInfo.Model);
+            var startAt = fromIndex
+                ?? (_lastRun is { EndedNormally: false } last && last.Id == id ? last.Index : 0);
+            startAt = Math.Clamp(startAt, 0, Math.Max(0, presentation.Slides.Count - 1));
+            _muted = false;
+            _usageSeconds = 0;
+            _usageRatio = null;
+            SetState(PresenterState.Presenting);
+            _guard?.StartPresenting();
+            PresentSlide(startAt, interrupt: false);
+            return new PresenterStartResult(true, id, connection.Label, sessionInfo.Id, sessionInfo.Model,
+                _connectedAt);
+        }
+        catch (Exception exception)
+        {
+            await FailSafeCloseAsync(exception).ConfigureAwait(false);
+            return new PresenterStartResult(false, id, null, null, null);
+        }
     }
+
+    private async Task<ConnectResult> ConnectUpstreamAsync()
+    {
+        var presentation = _presentation!;
+        var hasExternalTools = _sessionTools is { Tools.Count: > 0 } or { HostedTools.Count: > 0 };
+        // Start and every reconnect run under the talk's ticket, which off-loop End, abort and the guard cancel
+        // directly. Nothing is published here, so a signal that arrives before this line is still observed below,
+        // before any candidate upstream is created.
+        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token,
+            _talk?.Token ?? CancellationToken.None);
+        for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
+        {
+            if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                return new ConnectResult(null, null, null, true);
+            var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
+            var instructions = PromptBuilder.SystemInstructions(presentation.Meta.Title, presentation.Slides,
+                presentation.Context, onWarn: message => LogMessage("warn", message), managedMode: isManaged) +
+                (isManaged && hasExternalTools ? PromptBuilder.ExternalToolsSystemRules() : "");
+            var inlineTools = isManaged ? _catalogue?.GetInlineToolDefinitions() : null;
+            var delegationInstructions = isManaged
+                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides) +
+                  (hasExternalTools ? PromptBuilder.ExternalToolsBackendRules() : "") : null;
+            var request = new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice,
+                presentation.Meta.Title, inlineTools, delegationInstructions,
+                isManaged ? _sessionTools?.HostedTools : null);
+            // Building the request runs host callbacks; re-check so a signal raised meanwhile creates no candidate.
+            if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                return new ConnectResult(null, null, null, true);
+            var candidate = _createSession(request, attempt);
+            if (candidate is null) break;
+            var label = candidate.Name ?? $"upstream #{attempt + 1}";
+            try
+            {
+                WireSession(candidate);
+                var info = await candidate.ConnectAsync(connectCts.Token).ConfigureAwait(false);
+                if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                {
+                    await DisposeSessionAsync(candidate, "cancelled connect").ConfigureAwait(false);
+                    return new ConnectResult(null, null, null, true);
+                }
+                LogMessage(attempt > 0 ? "warn" : "info", $"connected via {label}");
+                return new ConnectResult(candidate, info, label, false);
+            }
+            catch (OperationCanceledException) when (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+            {
+                await DisposeSessionAsync(candidate, "cancelled connect").ConfigureAwait(false);
+                return new ConnectResult(null, null, null, true);
+            }
+            catch (Exception exception)
+            {
+                _endDiagnostic = exception.Message;
+                await DisposeSessionAsync(candidate, $"failed start via {label}").ConfigureAwait(false);
+                LogMessage("error", $"session start via {label} failed: {exception.Message}");
+                var startup = exception as LiveStartupException;
+                UpstreamError?.Invoke(new PresenterUpstreamError($"{label}: {exception.Message}",
+                    startup?.Code ?? "connect"));
+                if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                    return new ConnectResult(null, null, null, true);
+            }
+        }
+        return new ConnectResult(null, null, null, false);
+    }
+
+    private sealed record ConnectResult(ILiveSession? Session, LiveSessionInfo? Info, string? Label, bool Cancelled);
 
     private void WireSession(ILiveSession session)
     {
@@ -647,6 +917,7 @@ public sealed class Presenter : IPresenter
         CompleteSlideDiagnostics();
         ClearTimers();
         _slideIndex = index;
+        RecordActivity();
         _heardOutput = false;
         _nudgeCount = 0;
         _wrappingUp = false;
@@ -725,6 +996,7 @@ public sealed class Presenter : IPresenter
 
         if (voiced)
         {
+            if (_state == PresenterState.Presenting) RecordActivity();
             _lastVoicedAt = _timeProvider.GetTimestamp();
             if (audio.StartMs is { } start && audio.EndMs is { } end)
             {
@@ -808,6 +1080,7 @@ public sealed class Presenter : IPresenter
         }
 
         Transcript?.Invoke(new PresenterTranscript(transcript.Role, transcript.Delta, transcript.StartMs, transcript.EndMs));
+        if (transcript.Role == "user" && !string.IsNullOrWhiteSpace(transcript.Delta)) RecordActivity();
         if (transcript.Role == "user" && _slideDiagnosticsActive)
         {
             _userTranscriptCharacters += transcript.Delta.Length;
@@ -949,15 +1222,23 @@ public sealed class Presenter : IPresenter
                 return PauseCore();
             case VoiceCommandIntent.Resume:
                 CancelToolConfirmation();
+                if (_suspended) { ObserveBackground(ResumeAsync(), "voice reconnect"); return true; }
                 return ResumeCore(beganDuringWaiting);
             case VoiceCommandIntent.Next:
                 CancelToolConfirmation();
+                if (_suspended) { ObserveBackground(NextAsync(), "voice next reconnect"); return true; }
                 return NextCore();
             case VoiceCommandIntent.Previous:
                 CancelToolConfirmation();
+                if (_suspended) { ObserveBackground(PrevAsync(), "voice previous reconnect"); return true; }
                 return PrevCore();
             case VoiceCommandIntent.GoTo:
                 CancelToolConfirmation();
+                if (_suspended)
+                {
+                    ObserveBackground(GotoAsync(command.SlideNumber!.Value - 1), "voice goto reconnect");
+                    return true;
+                }
                 return GotoCore(command.SlideNumber!.Value - 1);
             case VoiceCommandIntent.End:
                 CancelToolConfirmation();
@@ -1110,7 +1391,7 @@ public sealed class Presenter : IPresenter
     {
         if (confirmed && _interaction == Interaction.AwaitingEndAnswer)
         {
-            return await EndAsyncCore(false).ConfigureAwait(false);
+            return await EndAsyncCore(false, EndReasons.User).ConfigureAwait(false);
         }
 
         StartEndConfirmation();
@@ -1124,9 +1405,9 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        _usageSeconds = usage.Seconds;
+        _usageSeconds = _priorUsageSeconds + usage.Seconds;
         _usageRatio = usage.Ratio;
-        Usage?.Invoke(new PresenterUsage(usage.Seconds, usage.Ratio));
+        Usage?.Invoke(new PresenterUsage(_usageSeconds, usage.Ratio));
     }
 
     private void OnDelegation(DelegationReceived delegation)
@@ -1246,6 +1527,8 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        RecordActivity();
+
         if (_toolRoundTracker.IsCallDuplicate(call.CallId))
         {
             LogMessage("info", $"tool call for {call.CallId} ignored: duplicate call id");
@@ -1304,6 +1587,7 @@ public sealed class Presenter : IPresenter
     {
         var startedAt = _timeProvider.GetTimestamp();
         var catalogue = _catalogue;
+        var runToken = _runCts?.Token ?? CancellationToken.None;
         _ = Task.Run(async () =>
         {
             ActiveToolCallId.Value = callId;
@@ -1337,7 +1621,8 @@ public sealed class Presenter : IPresenter
                             }
                             else
                             {
-                                result = await InvokeBoundedAsync(resolution.Tool!, resolution.Arguments).ConfigureAwait(false);
+                                result = await InvokeBoundedAsync(resolution.Tool!, resolution.Arguments, runToken)
+                                    .ConfigureAwait(false);
                             }
                         }
                     }
@@ -1355,10 +1640,11 @@ public sealed class Presenter : IPresenter
 
     // Bounded even when a tool ignores its token: the run gives up at the tool's timeout, works on a copy of the
     // arguments, and a fault that arrives after it gave up is logged by type only.
-    private async Task<ToolResult> InvokeBoundedAsync(ITool tool, JsonElement arguments)
+    private async Task<ToolResult> InvokeBoundedAsync(ITool tool, JsonElement arguments, CancellationToken runToken)
     {
         var abandoned = 0;
-        using var cts = new CancellationTokenSource(tool.Timeout);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(runToken);
+        cts.CancelAfter(tool.Timeout);
         var invocation = tool.InvokeAsync(arguments.Clone(), cts.Token);
         _ = invocation.ContinueWith(t =>
             {
@@ -1370,6 +1656,11 @@ public sealed class Presenter : IPresenter
         {
             return await invocation.WaitAsync(tool.Timeout, cts.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (runToken.IsCancellationRequested)
+        {
+            Volatile.Write(ref abandoned, 1);
+            return ToolResult.Failure("cancelled") with { Outcome = "cancelled" };
+        }
         catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && cts.IsCancellationRequested))
         {
             Volatile.Write(ref abandoned, 1);
@@ -1379,6 +1670,7 @@ public sealed class Presenter : IPresenter
 
     private void OnToolInvocationCompleted(ToolInvocationCompleted completed)
     {
+        RecordActivity();
         if (!ReferenceEquals(completed.Session, _session) || _state is not (PresenterState.Presenting or PresenterState.Paused))
         {
             LogMessage("info", $"tool invocation for {completed.CallId} dropped: session replaced or run not live");
@@ -1445,11 +1737,12 @@ public sealed class Presenter : IPresenter
         SetInteraction(Interaction.None);
         ClosePermit();
         var startedAt = _timeProvider.GetTimestamp();
+        var runToken = _runCts?.Token ?? CancellationToken.None;
         _approvedTools[pending.Key] = new ApprovedToolCall(startedAt, null);
         _ = Task.Run(async () =>
         {
             ToolResult result;
-            try { result = await InvokeBoundedAsync(pending.Tool, pending.Arguments).ConfigureAwait(false); }
+            try { result = await InvokeBoundedAsync(pending.Tool, pending.Arguments, runToken).ConfigureAwait(false); }
             catch (Exception) { result = ToolResult.Failure("tool failed"); }
             QueueFromProducer(new ApprovedToolCompleted(pending, result, startedAt));
         });
@@ -1538,7 +1831,7 @@ public sealed class Presenter : IPresenter
         if (_wrappingUp)
         {
             LogMessage("info", "wrap-up finished; ending session");
-            ObserveBackground(EndAsync(), "wrap-up end");
+            ObserveBackground(EndAsync(EndReasons.Completed), "wrap-up end");
             return;
         }
 
@@ -1587,7 +1880,7 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private void OnWrapUpFallback()
+    private async Task OnWrapUpFallbackAsync()
     {
         if (_questionHoldOpen)
         {
@@ -1597,7 +1890,7 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting && _wrappingUp && !_heardOutput)
         {
             LogMessage("warn", "no wrap-up audio; ending session");
-            ObserveBackground(EndAsync(), "wrap-up fallback end");
+            await EndAsyncCore(false, EndReasons.Completed).ConfigureAwait(false);
         }
     }
 
@@ -1696,8 +1989,82 @@ public sealed class Presenter : IPresenter
         ClosePermit();
         _session?.AppendInstructions(PromptBuilder.PauseInstruction(), $"pause-{_slideIndex + 1}");
         SetState(PresenterState.Paused);
+        _guard?.Pause();
+        LimitWarning?.Invoke(new PresenterLimitWarning(EndReasons.Idle, null));
         Flush?.Invoke();
         return true;
+    }
+
+    private async Task SuspendUpstreamAsync()
+    {
+        if (_state != PresenterState.Paused || _session is null) return;
+        var session = _session;
+        _session = null;
+        _sessionInfo = null;
+        _suspended = true;
+        LiveCloseResult? result = null;
+        Exception? closeError = null;
+        try { result = await session.CloseAsync().ConfigureAwait(false); }
+        catch (Exception ex) { closeError = ex; }
+        finally { await DisposeSessionAsync(session, "pause suspension").ConfigureAwait(false); }
+        AccumulateSegment(result?.Seconds);
+        if (closeError is not null) LogMessage("error", $"pause close failed: {closeError.Message}");
+        LogMessage("info", $"pause: upstream closed after {_settings.PauseGraceSeconds} s paused");
+        UpstreamStatus?.Invoke(new PresenterUpstreamStatus("suspended"));
+        PublishSnapshot();
+    }
+
+    private void AccumulateSegment(double? seconds)
+    {
+        _usageConfirmed &= seconds.HasValue;
+        var estimated = _connectedAt is { } connected
+            ? Math.Max(0, (_timeProvider.GetUtcNow() - connected).TotalSeconds) : 0;
+        _priorEstimatedSeconds += estimated;
+        _priorUsageSeconds += seconds ?? estimated;
+        _connectedAt = null;
+        _usageSeconds = _priorUsageSeconds;
+        Usage?.Invoke(new PresenterUsage(_usageSeconds, _usageRatio));
+    }
+
+    private async Task<bool> ReconnectAsync()
+    {
+        if (!_suspended || _state != PresenterState.Paused) return false;
+        UpstreamStatus?.Invoke(new PresenterUpstreamStatus("reconnecting"));
+        var connection = await ConnectUpstreamAsync().ConfigureAwait(false);
+        if (connection.Cancelled)
+        {
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.MaxLength).ConfigureAwait(false);
+            return false;
+        }
+        if (connection.Session is null || connection.Info is null)
+        {
+            await EndAsyncCore(false, EndReasons.ReconnectFailed).ConfigureAwait(false);
+            return false;
+        }
+        _session = connection.Session;
+        _sessionInfo = connection.Info;
+        _connectedAt = _timeProvider.GetUtcNow();
+        _suspended = false;
+        if (_muted) _session.Mute();
+        LogMessage("info", $"resume: reconnected via {connection.Label}");
+        UpstreamStatus?.Invoke(new PresenterUpstreamStatus("live"));
+        PublishSnapshot();
+        return true;
+    }
+
+    private async Task<bool> ResumeAfterReconnectAsync()
+    {
+        var reconnected = _suspended;
+        if (reconnected && !await ReconnectAsync().ConfigureAwait(false)) return false;
+        var resumed = ResumeCore();
+        if (resumed && reconnected) PresentSlide(_slideIndex, interrupt: false);
+        return resumed;
+    }
+
+    private async Task<bool> NavigateAfterReconnectAsync(Func<bool> navigate)
+    {
+        if (_suspended && !await ReconnectAsync().ConfigureAwait(false)) return false;
+        return navigate();
     }
 
     private bool ResumeCore(bool beganDuringWaiting = false)
@@ -1727,6 +2094,7 @@ public sealed class Presenter : IPresenter
         ClosePermit();
         ClearQuestionHold();
         SetState(PresenterState.Presenting);
+        _guard?.StartPresenting();
         if (_wrappingUp)
         {
             _session?.AppendInstructions(PromptBuilder.WrapUpInstruction(), "wrap-up-resume");
@@ -1769,12 +2137,19 @@ public sealed class Presenter : IPresenter
     private bool SendAudioCore(byte[] pcm16) =>
         (_state is PresenterState.Presenting or PresenterState.Paused) && !_muted && (_session?.SendAudio(pcm16) ?? false);
 
-    private async Task<bool> EndAsyncCore(bool resumable)
+    private async Task<bool> EndAsyncCore(bool resumable, string endReason)
     {
         if (_state is PresenterState.Idle or PresenterState.Ending)
         {
             return false;
         }
+
+        endReason = _talk?.EndReason ?? endReason;
+        Debug.Assert(EndReasons.All.Contains(endReason));
+        _requestedEndReason = endReason;
+        _talkEndedAt = endReason == EndReasons.MaxLength ? _guard?.MaxEndsAt : _timeProvider.GetUtcNow();
+        StopGuard();
+        CancelRun();
 
         CompleteSlideDiagnostics();
         ClearTimers();
@@ -1793,7 +2168,13 @@ public sealed class Presenter : IPresenter
         Flush?.Invoke();
         if (session is null)
         {
-            OnClosed("close_requested", null);
+            var reason = endReason switch
+            {
+                EndReasons.ReconnectFailed => _endDiagnostic ?? "connect_failed",
+                EndReasons.Shutdown => "disposed",
+                _ => _suspended ? "suspended" : "close_requested"
+            };
+            OnClosed(reason, null, endReason);
             return true;
         }
 
@@ -1805,7 +2186,7 @@ public sealed class Presenter : IPresenter
         catch (Exception exception)
         {
             LogMessage("error", $"session close failed: {exception.Message}");
-            OnClosed("connection_lost", null);
+            OnClosed("connection_lost", null, endReason);
             await DisposeSessionAsync(session, "failed close").ConfigureAwait(false);
             throw;
         }
@@ -1813,8 +2194,8 @@ public sealed class Presenter : IPresenter
 
     private async Task OnSessionClosedAsync(ILiveSession session, string reason, double? seconds)
     {
-        OnClosed(reason, seconds);
-        await DisposeSessionAsync(session, "session close").ConfigureAwait(false);
+        try { OnClosed(reason, seconds, _requestedEndReason ?? EndReasons.UpstreamLost); }
+        finally { await DisposeSessionAsync(session, "session close").ConfigureAwait(false); }
     }
 
     private async Task DisposeSessionAsync(ILiveSession session, string operation)
@@ -1829,8 +2210,12 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private void OnClosed(string reason, double? seconds)
+    private void OnClosed(string reason, double? seconds, string endReason)
     {
+        CancelRun();
+        Debug.Assert(EndReasons.All.Contains(endReason));
+        _talkEndedAt ??= _timeProvider.GetUtcNow();
+        StopGuard();
         CompleteSlideDiagnostics();
         ClearTimers();
         ResetUtterance();
@@ -1848,17 +2233,23 @@ public sealed class Presenter : IPresenter
             _lastRun = new LastRun(_presentation.Id, _slideIndex, endedNormally);
         }
 
-        if (seconds.HasValue)
-        {
-            _usageSeconds = seconds.Value;
-        }
+        var currentEstimate = _connectedAt is { } connected
+            ? Math.Max(0, (_timeProvider.GetUtcNow() - connected).TotalSeconds) : 0;
+        var estimate = _priorEstimatedSeconds + currentEstimate;
+        if (_connectedAt is not null) _usageConfirmed &= seconds.HasValue;
+        _usageSeconds = _priorUsageSeconds + (seconds ?? currentEstimate);
+        double? confirmedSeconds = _usageConfirmed ? _usageSeconds : null;
 
         _session = null;
         _sessionInfo = null;
         LogMessage(
             "info",
-            $"closed: reason={reason} usage={(seconds.HasValue ? seconds.Value.ToString() : "unconfirmed")} s{(endedNormally ? string.Empty : $" (Start resumes at slide {_slideIndex + 1})")}");
-        Closed?.Invoke(new PresenterClosed(reason, seconds));
+            $"closed: reason={reason} end={endReason} usage={(confirmedSeconds?.ToString() ?? "unconfirmed")} s" +
+            $" (estimated {estimate:0} s){(endedNormally ? string.Empty : $" (Start resumes at slide {_slideIndex + 1})")}");
+        Closed?.Invoke(new PresenterClosed(reason, confirmedSeconds, endReason, _usageConfirmed, estimate,
+            _talkStartedAt, _talkEndedAt));
+        _suspended = false;
+        _connectedAt = null;
         SetState(PresenterState.Idle);
     }
 
@@ -2067,9 +2458,54 @@ public sealed class Presenter : IPresenter
         }
 
         SetState(PresenterState.Presenting);
+        _guard?.StartPresenting();
     }
 
     private bool PartsPending => _partsSent < _parts.Count;
+
+    private void RecordActivity()
+    {
+        if (_state == PresenterState.Presenting && _guard?.Activity() == true)
+            LimitWarning?.Invoke(new PresenterLimitWarning(EndReasons.Idle, null));
+    }
+
+    private void CancelRun()
+    {
+        try { _runCts?.Cancel(); }
+        catch (ObjectDisposedException) { }
+    }
+
+    private void StopGuard()
+    {
+        Interlocked.Exchange(ref _guard, null)?.Dispose();
+    }
+
+    private async Task OnGuardElapsedAsync()
+    {
+        if (_guard is null || _state is PresenterState.Idle or PresenterState.Ending) return;
+        var due = _guard.Due();
+        if (due.Max)
+        {
+            await EndAsyncCore(false, EndReasons.MaxLength).ConfigureAwait(false);
+            return;
+        }
+        if (due.Idle)
+        {
+            await EndAsyncCore(false, EndReasons.Idle).ConfigureAwait(false);
+            return;
+        }
+        if (due.MaxWarning) RaiseLimitWarning(EndReasons.MaxLength);
+        if (due.IdleWarning) RaiseLimitWarning(EndReasons.Idle);
+        if (due.Pause) await SuspendUpstreamAsync().ConfigureAwait(false);
+    }
+
+    private void RaiseLimitWarning(string kind)
+    {
+        LogMessage("warn", $"limit: {kind} warning, {TalkGuard.WarningLead} s left");
+        LimitWarning?.Invoke(new PresenterLimitWarning(kind, TalkGuard.WarningLead));
+        if (_state == PresenterState.Presenting && _session is not null)
+            _session.AppendInstructions(PromptBuilder.LimitWarningInstruction(kind), $"limit-{kind}-warning");
+    }
 
     private int SlideCount => _presentation?.Slides.Count ?? 0;
 
@@ -2109,7 +2545,8 @@ public sealed class Presenter : IPresenter
         _session?.Id,
         _sessionInfo?.ExpiresAt,
         _usageSeconds,
-        AdvanceSilenceMs);
+        AdvanceSilenceMs,
+        _suspended);
 
     private void LogMessage(string level, string message) =>
         Log?.Invoke(new PresenterLog(level, UntrustedLogText.Sanitize(message, 1024)));
@@ -2138,9 +2575,34 @@ public sealed class Presenter : IPresenter
         public string? InvocationCallId { get; set; }
     }
 
-    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex) : PresenterEvent
+    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex, int? MaxMinutes,
+        StartTicket Ticket) : PresenterEvent
     {
         public TaskCompletionSource<PresenterStartResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>
+    /// One Start's cancellation handle, created when StartAsync enqueues it. Once accepted it is the talk's handle
+    /// (load, connects, reconnects) until the next accepted Start. The end reason is first-wins.
+    /// </summary>
+    private sealed class StartTicket
+    {
+        private readonly CancellationTokenSource _cts = new();
+        private string? _endReason;
+
+        public CancellationToken Token => _cts.Token;
+        public string? EndReason => Volatile.Read(ref _endReason);
+
+        public void RecordEndReason(string? endReason)
+        {
+            if (endReason is not null) Interlocked.CompareExchange(ref _endReason, endReason, null);
+        }
+
+        public void Cancel(string? endReason = null)
+        {
+            RecordEndReason(endReason);
+            _cts.Cancel();
+        }
     }
     private sealed record NextCommand : Command;
     private sealed record PrevCommand : Command;
@@ -2151,7 +2613,8 @@ public sealed class Presenter : IPresenter
     private sealed record MuteCommand : Command;
     private sealed record UnmuteCommand : Command;
     private sealed record SendAudioCommand(byte[] Pcm16) : Command;
-    private sealed record EndCommand(bool Resumable) : Command;
+    private sealed record EndCommand(bool Resumable, string EndReason) : Command;
+    private sealed record GuardElapsed(TalkGuard Source, long Generation) : PresenterEvent;
     private sealed record AudioReceived(ILiveSession Session, byte[] Bytes, long? StartMs, long? EndMs) : PresenterEvent;
     private sealed record TranscriptReceived(ILiveSession Session, string Role, string Delta, long? StartMs, long? EndMs) : PresenterEvent;
     private sealed record UsageReceived(ILiveSession Session, double Seconds, double? Ratio) : PresenterEvent;

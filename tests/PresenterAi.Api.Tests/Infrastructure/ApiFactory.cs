@@ -3,6 +3,9 @@ using System.Security.Claims;
 using System.Text;
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Time.Testing;
+using PresenterAi.Api.Realtime;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -23,6 +26,28 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     public string EnvironmentName { get; set; } = "Testing";
     public bool UseQueuedPresenter { get; set; }
     public ISessionToolSource? SessionToolSource { get; set; }
+    private FakeTimeProvider? _fakeClock;
+
+    public FakeTimeProvider UseFakeClock() => _fakeClock ??= new FakeTimeProvider();
+
+    /// <summary>Wraps the fake clock so tests can count <see cref="ITimer.Change"/> calls on the timers it creates.</summary>
+    public CountingTimeProvider CountTimerChanges() => _countingClock ??= new CountingTimeProvider(UseFakeClock());
+
+    private CountingTimeProvider? _countingClock;
+
+    public async Task AdvanceAndSettleAsync(TimeSpan span)
+    {
+        var clock = _fakeClock ?? throw new InvalidOperationException("Call UseFakeClock before creating the host.");
+        clock.Advance(span);
+        if (Services.GetRequiredService<IPresenter>() is Presenter presenter)
+        {
+            // A timer callback may queue a close, which in turn queues the upstream's closed event.
+            await presenter.WaitUntilIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        var bridge = Services.GetRequiredService<PresenterBridge>();
+        var release = bridge.CurrentReleasedForTestAsync();
+        if (release.IsCompleted) await release;
+    }
 
     public HttpClient CreateAuthenticatedClient(string? userId = null, string? email = null, string role = "user")
     {
@@ -94,8 +119,13 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             }
         }
 
-        builder.ConfigureServices(services =>
+        builder.ConfigureTestServices(services =>
         {
+            if (_fakeClock is not null)
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton<TimeProvider>(_countingClock ?? (TimeProvider)_fakeClock);
+            }
             // The real MCP source reads Postgres, which these tests do not run; a test that needs external tools
             // supplies its own source.
             services.RemoveAll<ISessionToolSource>();
@@ -110,6 +140,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<ITicketStore>();
             services.RemoveAll<IPresentationRepository>();
             services.AddScoped<IPresentationRepository, TestPresentationRepository>();
+            services.AddSingleton<TestLoadGate>();
             services.AddSingleton<TestTicketStore>();
             services.AddSingleton<ITicketStore>(serviceProvider => serviceProvider.GetRequiredService<TestTicketStore>());
             services.RemoveAll<ISessionRecorderFactory>();
@@ -201,13 +232,23 @@ internal sealed class TestQueuedPresenter : IPresenter
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
+/// <summary>When <see cref="Gate"/> is set, presentation loads wait on it and ignore cancellation.</summary>
+internal sealed class TestLoadGate
+{
+    public TaskCompletionSource? Gate { get; set; }
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
 internal sealed class TestPresentationRepository : IPresentationRepository
 {
     private readonly FilePresentationRepository _source;
+    private readonly TestLoadGate _loadGate;
 
-    public TestPresentationRepository(IOptions<ContentOptions> options, IWebHostEnvironment environment)
+    public TestPresentationRepository(IOptions<ContentOptions> options, IWebHostEnvironment environment,
+        TestLoadGate loadGate)
     {
         _source = new FilePresentationRepository(Path.GetFullPath(options.Value.RootDir, environment.ContentRootPath));
+        _loadGate = loadGate;
     }
 
     public async Task<PresentationListResult> ListAsync(
@@ -223,10 +264,15 @@ internal sealed class TestPresentationRepository : IPresentationRepository
         return new PresentationListResult(rows.Skip(skip).Take(pageSize).ToArray(), rows.Count);
     }
 
-    public Task<LoadedPresentation> LoadAsync(string ownerId, string id, CancellationToken cancellationToken = default)
+    public async Task<LoadedPresentation> LoadAsync(string ownerId, string id, CancellationToken cancellationToken = default)
     {
         EnsureOwner(ownerId);
-        return _source.ReadAsync(id, cancellationToken);
+        if (_loadGate.Gate is { } gate)
+        {
+            _loadGate.Entered.TrySetResult();
+            await gate.Task.ConfigureAwait(false); // deliberately ignores cancellation
+        }
+        return await _source.ReadAsync(id, cancellationToken).ConfigureAwait(false);
     }
 
     public Task<string?> FindIdBySlugAsync(string ownerId, string slug, CancellationToken cancellationToken = default)
@@ -274,6 +320,7 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
     public int EndCount { get; private set; }
     public bool BeginBeforeEnd { get; private set; }
     public bool ClosedBeforeEnd { get; private set; }
+    public PresenterClosed? LastClosed { get; private set; }
 
     public void Attach(IPresenter presenter)
     {
@@ -281,8 +328,9 @@ internal sealed class TestSessionRecorder(TestSessionRecorderFactory factory) : 
         _slide = _ => { };
         _transcript = _ => { };
         _usage = _ => { };
-        _closed = _ =>
+        _closed = closed =>
         {
+            LastClosed = closed;
             if (Volatile.Read(ref _ended) == 0) ClosedBeforeEnd = true;
         };
         presenter.Slide += _slide;
@@ -355,4 +403,30 @@ internal sealed class EmptySessionToolSource : ISessionToolSource
 {
     public Task<SessionToolSet> LoadAsync(string ownerId, CancellationToken cancellationToken = default) =>
         Task.FromResult(new SessionToolSet(tools: [], hostedTools: [], notes: [], disposable: null));
+}
+
+public sealed class CountingTimeProvider(TimeProvider inner) : TimeProvider
+{
+    private int _changes;
+
+    public int Changes => Volatile.Read(ref _changes);
+    public override TimeZoneInfo LocalTimeZone => inner.LocalTimeZone;
+    public override long TimestampFrequency => inner.TimestampFrequency;
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+    public override long GetTimestamp() => inner.GetTimestamp();
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+        new CountingTimer(inner.CreateTimer(callback, state, dueTime, period), this);
+
+    private sealed class CountingTimer(ITimer timer, CountingTimeProvider owner) : ITimer
+    {
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            Interlocked.Increment(ref owner._changes);
+            return timer.Change(dueTime, period);
+        }
+
+        public void Dispose() => timer.Dispose();
+        public ValueTask DisposeAsync() => timer.DisposeAsync();
+    }
 }

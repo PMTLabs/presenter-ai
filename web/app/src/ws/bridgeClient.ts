@@ -5,6 +5,7 @@ export interface Snapshot {
   muted: boolean;
   sessionId?: string;
   usageSeconds?: number;
+  suspended?: boolean;
 }
 export type BridgeEventMap = {
   open: [];
@@ -19,10 +20,13 @@ export type BridgeEventMap = {
   error: [BridgeMessage];
   closed: [BridgeMessage];
   pong: [];
+  ping: [];
   busy: [BridgeMessage];
   "taken-over": [];
   audio: [ArrayBuffer];
   flush: []; // Server {type:"flush"}: discard queued playback audio.
+  limit_warning: [BridgeMessage];
+  upstream: [BridgeMessage];
 };
 export type BridgeMessage = { type: string; [key: string]: unknown };
 type Handler<T extends keyof BridgeEventMap> = (
@@ -113,7 +117,7 @@ export class BridgeClient {
     ws.addEventListener("close", (event) => {
       if (this.ws !== ws) return;
       this.ws = null;
-      this.snapshot = { ...this.snapshot, state: "idle" };
+      this.snapshot = { ...this.snapshot, state: "idle", suspended: false };
       this.emit("state", this.snapshot);
       this.emit("close");
       if (event.code === 4409) this.markTakenOver();
@@ -154,8 +158,13 @@ export class BridgeClient {
     if (this.ws?.readyState === this.WebSocketImpl.OPEN)
       this.ws.send(JSON.stringify(message));
   }
-  start(presentation: string, fromIndex?: number) {
-    this.send({ type: "start", presentation, ...(fromIndex === undefined ? {} : { fromIndex }) });
+  start(presentation: string, fromIndex?: number, maxMinutes?: number) {
+    this.send({
+      type: "start",
+      presentation,
+      ...(fromIndex === undefined ? {} : { fromIndex }),
+      ...(maxMinutes === undefined ? {} : { maxMinutes }),
+    });
   }
   next() {
     this.send({ type: "next" });
@@ -183,6 +192,9 @@ export class BridgeClient {
   }
   ping() {
     this.send({ type: "ping" });
+  }
+  pong() {
+    this.send({ type: "pong" });
   }
   sendAudio(buffer: ArrayBuffer) {
     if (
@@ -234,8 +246,18 @@ export class BridgeClient {
       case "closed":
         this.emit("closed", message);
         break;
+      case "ping":
+        this.send({ type: "pong" });
+        this.emit("ping");
+        break;
       case "pong":
         this.emit("pong");
+        break;
+      case "limit_warning":
+        this.emit("limit_warning", message);
+        break;
+      case "upstream":
+        this.emit("upstream", message);
         break;
       case "busy":
         this.emit("busy", message);

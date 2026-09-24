@@ -172,6 +172,9 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
             entity.Property(session => session.Upstream).HasColumnName("upstream").IsRequired();
             entity.Property(session => session.UpstreamSessionId).HasColumnName("upstream_session_id");
             entity.Property(session => session.CloseReason).HasColumnName("close_reason");
+            entity.Property(session => session.EndReason).HasColumnName("end_reason");
+            entity.Property(session => session.UsageConfirmed).HasColumnName("usage_confirmed");
+            entity.Property(session => session.EstimatedSeconds).HasColumnName("estimated_seconds");
             entity.HasIndex(session => new { session.UserId, session.StartedAt })
                 .IsDescending(false, true)
                 .HasDatabaseName("ix_sessions_user_id_started_at");

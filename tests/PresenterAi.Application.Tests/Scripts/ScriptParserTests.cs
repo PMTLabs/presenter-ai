@@ -70,6 +70,37 @@ public sealed class ScriptParserTests
     }
 
     [Fact]
+    public void Parses_max_minutes()
+    {
+        var script = ScriptParser.Parse("---\ndeck: d\nmaxMinutes: 45\n---\n## Slide 1\nx", "p");
+
+        Assert.Equal(45, script.Meta.MaxMinutes);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-5")]
+    [InlineData("abc")]
+    [InlineData("12abc")]
+    [InlineData("1.5")]
+    [InlineData("1.0")]
+    public void Rejects_non_positive_or_non_integer_max_minutes(string value)
+    {
+        var exception = Assert.Throws<ScriptParseException>(() =>
+            ScriptParser.Parse($"---\ndeck: d\nmaxMinutes: {value}\n---\n## Slide 1\nx", "p"));
+
+        Assert.Contains("maxMinutes must be a positive whole number of minutes", exception.Detail);
+    }
+
+    [Fact]
+    public void Keeps_above_ceiling_max_minutes()
+    {
+        var script = ScriptParser.Parse("---\ndeck: d\nmaxMinutes: 241\n---\n## Slide 1\nx", "p");
+
+        Assert.Equal(241, script.Meta.MaxMinutes);
+    }
+
+    [Fact]
     public void Headings_must_be_contiguous_from_1()
     {
         var exception = Assert.Throws<ScriptParseException>(() =>

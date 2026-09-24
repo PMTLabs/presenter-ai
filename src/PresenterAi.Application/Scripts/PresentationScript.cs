@@ -10,6 +10,7 @@ public sealed record PresentationMeta(
     string? Voice,
     string? Context,
     int? AdvanceSilenceMs,
-    int ChunkChars = 1400);
+    int ChunkChars = 1400,
+    int? MaxMinutes = null);
 
 public sealed record Slide(int Index, int Number, string Title, string Narration, string? Notes);

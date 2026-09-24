@@ -5,4 +5,5 @@ public sealed record PresenterStartResult(
     string PresentationId,
     string? Upstream,
     string? UpstreamSessionId,
-    string? Model);
+    string? Model,
+    DateTimeOffset? ConnectedAt = null);

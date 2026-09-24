@@ -24,6 +24,7 @@ public sealed class PresenterBridge : IAsyncDisposable
     // Beyond this 90-second observation bound cleanup proceeds; a run lost in that window is best-effort
     // recording (D8).
     private static readonly TimeSpan StartObservationBound = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan StartObservationCleanupBound = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ServerCloseBound = TimeSpan.FromSeconds(1);
     private TimeSpan _takeOverBound = TimeSpan.FromSeconds(15);
     private const int MaxAuthenticationFrameBytes = 4 * 1024;
@@ -36,6 +37,9 @@ public sealed class PresenterBridge : IAsyncDisposable
     private readonly ITicketStore _ticketStore;
     private readonly ISessionRecorderFactory _recorderFactory;
     private readonly TimeSpan _authFrameTimeout;
+    private readonly TimeSpan _heartbeatInterval;
+    private readonly TimeSpan _heartbeatTimeout;
+    private readonly TimeProvider _clock;
     private readonly SemaphoreSlim _pendingAuth;
     private ClientConnection? _client;
     private int _outboundCapacity = 500;
@@ -46,9 +50,12 @@ public sealed class PresenterBridge : IAsyncDisposable
         ILogger<PresenterBridge> logger,
         ITicketStore ticketStore,
         ISessionRecorderFactory recorderFactory,
-        IOptions<SessionRedisOptions> sessionOptions)
+        IOptions<SessionRedisOptions> sessionOptions, TimeProvider clock)
     {
         _presenter = presenter;
+        _clock = clock;
+        _heartbeatInterval = TimeSpan.FromSeconds(sessionOptions.Value.HeartbeatIntervalSeconds);
+        _heartbeatTimeout = TimeSpan.FromSeconds(sessionOptions.Value.HeartbeatTimeoutSeconds);
         _logger = logger;
         _ticketStore = ticketStore;
         _recorderFactory = recorderFactory;
@@ -61,7 +68,12 @@ public sealed class PresenterBridge : IAsyncDisposable
         presenter.Flush += () => Current?.EnqueueText(new { type = "flush" });
         presenter.Transcript += transcript => Current?.EnqueueText(new { type = "transcript", role = transcript.Role, delta = transcript.Delta, start_ms = transcript.StartMs, end_ms = transcript.EndMs });
         presenter.Usage += usage => Current?.EnqueueText(new { type = "usage", seconds = usage.Seconds, ratio = usage.Ratio });
-        presenter.Closed += closed => Current?.EnqueueText(new { type = "closed", reason = closed.Reason, seconds = closed.Seconds });
+        presenter.Closed += closed => Current?.EnqueueText(new { type = "closed", reason = closed.Reason,
+            seconds = closed.Seconds, endReason = closed.EndReason, usageConfirmed = closed.UsageConfirmed,
+            estimatedSeconds = closed.EstimatedSeconds });
+        presenter.LimitWarning += warning => Current?.EnqueueText(new { type = "limit_warning",
+            kind = warning.Kind, secondsLeft = warning.SecondsLeft });
+        presenter.UpstreamStatus += status => Current?.EnqueueText(new { type = "upstream", status = status.Status });
         presenter.Log += log => Current?.EnqueueText(new { type = "log", level = log.Level, message = log.Message });
         presenter.UpstreamError += error => Current?.EnqueueText(new { type = "error", message = error.Message, code = error.Code });
     }
@@ -82,7 +94,8 @@ public sealed class PresenterBridge : IAsyncDisposable
         if (authentication is null)
             return;
 
-        var connection = new ClientConnection(socket, authentication.Value.UserId, _logger, Volatile.Read(ref _outboundCapacity), Volatile.Read(ref _beforeSocketSendAsync));
+        var connection = new ClientConnection(socket, authentication.Value.UserId, _logger, Volatile.Read(ref _outboundCapacity),
+            Volatile.Read(ref _beforeSocketSendAsync), _clock, _heartbeatInterval, _heartbeatTimeout);
         var holder = Interlocked.CompareExchange(ref _client, connection, null);
         if (holder is not null && authentication.Value.TakeOver && string.Equals(holder.UserId, connection.UserId, StringComparison.Ordinal))
         {
@@ -127,12 +140,14 @@ public sealed class PresenterBridge : IAsyncDisposable
         try
         {
             connection.EnqueueText(StateFrame(_presenter.Snapshot()));
-            await ReceiveLoopAsync(socket, connection, context.RequestAborted).ConfigureAwait(false);
+            connection.StartHeartbeat();
+            using var receive = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, connection.Aborted);
+            await ReceiveLoopAsync(socket, connection, receive.Token).ConfigureAwait(false);
         }
         catch (WebSocketException)
         {
         }
-        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested || connection.Aborted.IsCancellationRequested)
         {
         }
         finally
@@ -146,11 +161,20 @@ public sealed class PresenterBridge : IAsyncDisposable
                 {
                     // StartAsync only means the command was queued until its task completes. In particular, do not
                     // inspect idle or retire the recorder until ObserveStartAsync has also attempted BeginAsync.
-                    await connection.WaitForStartObservationAsync(_logger, StartObservationBound).ConfigureAwait(false);
-                    if (_presenter.Snapshot().State != "idle")
+                    if (connection.AbortReason is not null) _presenter.AbortPendingStart();
+                    var observed = await connection.WaitForStartObservationAsync(_logger, StartObservationBound).ConfigureAwait(false);
+                    var endReason = connection.AbortReason ?? (connection.TakeOverRequested
+                        ? EndReasons.Takeover : EndReasons.Disconnect);
+                    if (!observed)
                     {
-                        await ObserveEndAsync(connection.TakeOverRequested).ConfigureAwait(false);
+                        _presenter.AbortPendingStart();
+                        await ObserveEndAsync(endReason).ConfigureAwait(false);
+                        // Never release ownership while the observer can still open or record an upstream.
+                        await connection.WaitForStartObservationCompletionAsync(_logger,
+                            StartObservationCleanupBound).ConfigureAwait(false);
                     }
+                    if (_presenter.Snapshot().State != "idle")
+                        await ObserveEndAsync(endReason).ConfigureAwait(false);
 
                     await connection.EndRecorderAsync().ConfigureAwait(false);
                     await connection.DetachAndDisposeRecorderAsync().ConfigureAwait(false);
@@ -296,6 +320,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             do
             {
                 result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+                connection.MarkAlive();
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     return;
@@ -359,12 +384,24 @@ public sealed class PresenterBridge : IAsyncDisposable
                     }
 
                     int? fromIndex = document.RootElement.TryGetProperty("fromIndex", out var from) && from.TryGetInt32(out var value) ? value : null;
+                    int? maxMinutes = null;
+                    if (document.RootElement.TryGetProperty("maxMinutes", out var maximum))
+                    {
+                        if (maximum.ValueKind != JsonValueKind.Number || !maximum.TryGetInt32(out var minutes)
+                            || minutes < 5)
+                        {
+                            connection.EnqueueText(new { type = "error", message = "start.maxMinutes must be an integer >= 5",
+                                code = "protocol" });
+                            return;
+                        }
+                        maxMinutes = minutes;
+                    }
                     _logger.LogDebug("Starting presentation {PresentationId} for user {UserId}", presentation.GetString(), connection.UserId);
                     var recorder = connection.PrepareRecorder(_recorderFactory, _presenter);
                     // Once queued, a presenter command cannot be withdrawn. Its observer must outlive this
                     // request so disconnect cleanup sees the actual start and its recorder BeginAsync attempt.
                     connection.ObserveStart(ObserveStartAsync(
-                        _presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, CancellationToken.None),
+                        _presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, maxMinutes, CancellationToken.None),
                         connection,
                         recorder));
                     return;
@@ -380,6 +417,7 @@ public sealed class PresenterBridge : IAsyncDisposable
                 case "unmute": ObserveCommand(_presenter.UnmuteAsync(cancellationToken), connection, type, false); return;
                 case "end": ObserveCommand(_presenter.EndAsync(cancellationToken: cancellationToken), connection, type, false); return;
                 case "ping": connection.EnqueueText(new { type = "pong" }); return;
+                case "pong": return;
                 default: connection.EnqueueText(new { type = "error", message = $"unknown command: {type}", code = "protocol" }); return;
             }
         }
@@ -412,7 +450,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         try
         {
             var result = await task.ConfigureAwait(false);
-            if (result.Started)
+            if (result.Started && !connection.StartObservationExpired)
             {
                 if (recorder is not null)
                 {
@@ -436,7 +474,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
     }
 
-    private async Task ObserveEndAsync(bool resumable = false)
+    private async Task ObserveEndAsync(string endReason)
     {
         // EndAsync returns once the close is requested, with the presenter still "ending"; it turns idle only when
         // the loop handles the upstream close queued behind that command. Releasing the slot before then lets the
@@ -449,20 +487,31 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
 
         _presenter.State += OnState;
+        // The whole End-to-idle observation is bounded, including EndAsync itself: its command waits behind whatever
+        // the presenter loop is running, e.g. a Start stuck in a loader that ignores cancellation. EndAsync cancels
+        // every queued or running Start before it enqueues (Presenter.EndWithReasonAsync → CancelConnect), so after
+        // the bound that Start can no longer create an upstream and releasing the slot is safe.
+        var ending = EndAndWaitForIdleAsync(endReason, idle.Task);
         try
         {
-            await _presenter.EndAsync(resumable).ConfigureAwait(false);
-            if (_presenter.Snapshot().State != "idle")
-            {
-                await idle.Task.WaitAsync(EndToIdleBound).ConfigureAwait(false);
-            }
+            await ending.WaitAsync(EndToIdleBound, _clock).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            _logger.LogWarning("Presenter was not idle {Bound} after browser disconnect; releasing the slot anyway", EndToIdleBound);
+            _logger.LogWarning("Presenter was not idle {Bound} after ending ({EndReason}); releasing the slot anyway",
+                EndToIdleBound, endReason);
+            _ = ending.ContinueWith(
+                task => _logger.LogError(task.Exception, "Presenter end after browser disconnect failed"),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         }
         catch (Exception exception) { _logger.LogError(exception, "Presenter end after browser disconnect failed"); }
         finally { _presenter.State -= OnState; }
+    }
+
+    private async Task EndAndWaitForIdleAsync(string endReason, Task idle)
+    {
+        await _presenter.EndAsync(endReason, endReason == EndReasons.Takeover).ConfigureAwait(false);
+        if (_presenter.Snapshot().State != "idle") await idle.ConfigureAwait(false);
     }
 
     internal void ConfigureOutboundForTest(int capacity, Func<Task>? beforeSocketSendAsync)
@@ -488,7 +537,8 @@ public sealed class PresenterBridge : IAsyncDisposable
     private static object StateFrame(PresenterSnapshot snapshot) => new
     {
         type = "state", snapshot.State, snapshot.PresentationId, snapshot.Title, snapshot.SlideIndex, snapshot.SlideCount,
-        snapshot.Paused, snapshot.Muted, snapshot.SessionId, snapshot.ExpiresAt, snapshot.UsageSeconds, snapshot.AdvanceSilenceMs
+        snapshot.Paused, snapshot.Muted, snapshot.SessionId, snapshot.ExpiresAt, snapshot.UsageSeconds,
+        snapshot.AdvanceSilenceMs, snapshot.Suspended
     };
 
     private static async Task SendBusyAsync(WebSocket socket, bool canTakeOver, CancellationToken cancellationToken)
@@ -498,12 +548,29 @@ public sealed class PresenterBridge : IAsyncDisposable
         await CloseServerInitiatedAsync(socket, (WebSocketCloseStatus)1013, "busy").ConfigureAwait(false);
     }
 
+    public async Task ShutdownAsync(CancellationToken cancellationToken)
+    {
+        Current?.Abort(EndReasons.Shutdown);
+        _presenter.AbortPendingStart();
+        await ObserveEndAsync(EndReasons.Shutdown).WaitAsync(EndToIdleBound, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal Task CurrentReleasedForTestAsync() => Current?.Released.Task ?? Task.CompletedTask;
+
     public async ValueTask DisposeAsync()
     {
-        if (_presenter is IAsyncDisposable disposable)
+        if (_presenter is not IAsyncDisposable disposable) return;
+        // Presenter.DisposeAsync is bounded (Presenter.ShutdownBound) and reports an abandoned loop only through its
+        // Log event; no browser is attached at disposal, so route warnings and errors to the host log meanwhile.
+        void OnLog(PresenterLog log)
         {
-            await disposable.DisposeAsync().ConfigureAwait(false);
+            if (log.Level is "warn" or "error") _logger.LogWarning("Presenter disposal: {Message}", log.Message);
         }
+
+        _presenter.Log += OnLog;
+        try { await disposable.DisposeAsync().ConfigureAwait(false); }
+        finally { _presenter.Log -= OnLog; }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -518,6 +585,17 @@ public sealed class PresenterBridge : IAsyncDisposable
         private readonly Func<Task>? _beforeSocketSendAsync;
         private readonly Task _writer;
         private readonly CancellationTokenSource _takeOverAbort = new();
+        private readonly CancellationTokenSource _abort = new();
+        private readonly TimeProvider _clock;
+        private readonly TimeSpan _heartbeatInterval;
+        private readonly TimeSpan _heartbeatTimeout;
+        private ITimer? _pingTimer;
+        private ITimer? _deadlineTimer;
+        private readonly object _heartbeatLock = new();
+        private long _lastInboundTicks;
+        private string? _abortReason;
+        internal CancellationToken Aborted => _abort.Token;
+        internal string? AbortReason => Volatile.Read(ref _abortReason);
         private int _failed;
         private int _takeOverRequested;
         private readonly object _recorderLock = new();
@@ -527,12 +605,19 @@ public sealed class PresenterBridge : IAsyncDisposable
         private bool _recorderActive;
         private readonly object _startLock = new();
         private Task? _startObservation;
+        private int _startObservationExpired;
+        internal bool StartObservationExpired => Volatile.Read(ref _startObservationExpired) != 0;
         internal TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool TakeOverRequested => Volatile.Read(ref _takeOverRequested) != 0;
 
-        public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync)
+        public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync, TimeProvider clock,
+            TimeSpan heartbeatInterval, TimeSpan heartbeatTimeout)
         {
             _socket = socket;
+            _clock = clock;
+            _heartbeatInterval = heartbeatInterval;
+            _heartbeatTimeout = heartbeatTimeout;
+            _lastInboundTicks = clock.GetUtcNow().UtcTicks;
             UserId = userId;
             _logger = logger;
             _beforeSocketSendAsync = beforeSocketSendAsync;
@@ -543,6 +628,44 @@ public sealed class PresenterBridge : IAsyncDisposable
                 SingleWriter = false
             });
             _writer = Task.Run(WriteLoopAsync);
+        }
+
+        internal void StartHeartbeat()
+        {
+            lock (_heartbeatLock)
+            {
+                _pingTimer = _clock.CreateTimer(_ => EnqueueText(new { type = "ping" }), null,
+                    _heartbeatInterval, _heartbeatInterval);
+                _deadlineTimer = _clock.CreateTimer(_ => CheckDeadline(), null, _heartbeatTimeout,
+                    Timeout.InfiniteTimeSpan);
+            }
+        }
+
+        internal void MarkAlive() => Interlocked.Exchange(ref _lastInboundTicks, _clock.GetUtcNow().UtcTicks);
+
+        private void CheckDeadline()
+        {
+            lock (_heartbeatLock)
+            {
+                var remaining = new DateTimeOffset(Interlocked.Read(ref _lastInboundTicks), TimeSpan.Zero)
+                    + _heartbeatTimeout - _clock.GetUtcNow();
+                if (remaining > TimeSpan.Zero)
+                {
+                    _deadlineTimer?.Change(remaining, Timeout.InfiniteTimeSpan);
+                    return;
+                }
+            }
+            Abort(EndReasons.Heartbeat);
+        }
+
+        internal void Abort(string reason)
+        {
+            if (Interlocked.CompareExchange(ref _abortReason, reason, null) is not null) return;
+            _logger.LogInformation("Aborting browser WebSocket for user {UserId}: {Reason}", UserId, reason);
+            try { _abort.Cancel(); }
+            catch (ObjectDisposedException) { return; }
+            try { _socket.Abort(); }
+            catch (ObjectDisposedException) { }
         }
 
         private async Task WriteLoopAsync()
@@ -564,18 +687,24 @@ public sealed class PresenterBridge : IAsyncDisposable
                     }
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
             {
             }
-            catch (WebSocketException exception)
+            catch (Exception exception)
             {
-                _logger.LogDebug(exception, "Browser WebSocket writer stopped");
+                // Includes a cancellation that is not ours (the send hook or the socket): the writer stopped, so the
+                // connection must end rather than keep receiving with no one sending.
+                _logger.LogError(exception, "Browser WebSocket writer failed");
+                Abort(EndReasons.WriterFailed);
             }
             finally
             {
-                if (Volatile.Read(ref _failed) != 0 && !TakeOverRequested && _socket.State == WebSocketState.Open)
+                if (Volatile.Read(ref _failed) != 0 && !TakeOverRequested)
                 {
-                    await CloseServerInitiatedAsync(_socket, (WebSocketCloseStatus)1011, "server cannot keep up").ConfigureAwait(false);
+                    if (_socket.State == WebSocketState.Open)
+                        await CloseServerInitiatedAsync(_socket, (WebSocketCloseStatus)1011, "server cannot keep up")
+                            .ConfigureAwait(false);
+                    Abort(EndReasons.Backpressure);
                 }
             }
         }
@@ -606,7 +735,7 @@ public sealed class PresenterBridge : IAsyncDisposable
                 await Task.Delay(ServerCloseBound, _takeOverAbort.Token).ConfigureAwait(false);
                 if (_socket.State is WebSocketState.Open or WebSocketState.CloseSent or WebSocketState.CloseReceived)
                 {
-                    _socket.Abort();
+                    Abort(EndReasons.Takeover);
                 }
             }
             catch (OperationCanceledException)
@@ -646,7 +775,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             }
         }
 
-        internal async Task WaitForStartObservationAsync(ILogger logger, TimeSpan bound)
+        internal async Task<bool> WaitForStartObservationAsync(ILogger logger, TimeSpan bound)
         {
             Task? observation;
             lock (_startLock)
@@ -654,24 +783,36 @@ public sealed class PresenterBridge : IAsyncDisposable
                 observation = _startObservation;
             }
 
-            if (observation is null)
-            {
-                return;
-            }
+            if (observation is null) return true;
 
             try
             {
-                await observation.WaitAsync(bound).ConfigureAwait(false);
+                await observation.WaitAsync(bound, _clock).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
-                logger.LogWarning("Presenter start observation exceeded {Bound}; releasing the browser slot", bound);
+                logger.LogWarning("Presenter start observation exceeded {Bound}; aborting pending start", bound);
+                return false;
             }
             catch (Exception exception)
             {
                 // ObserveStartAsync normally handles and reports its own failure. Keep cleanup safe if an
                 // unexpected observer failure escaped before it could do so.
                 logger.LogError(exception, "Presenter start observation failed during browser disconnect cleanup");
+            }
+            return true;
+        }
+
+        internal async Task WaitForStartObservationCompletionAsync(ILogger logger, TimeSpan bound)
+        {
+            Task? observation;
+            lock (_startLock) observation = _startObservation;
+            if (observation is null) return;
+            try { await observation.WaitAsync(bound, _clock).ConfigureAwait(false); }
+            catch (TimeoutException exception)
+            {
+                Volatile.Write(ref _startObservationExpired, 1);
+                logger.LogError(exception, "Presenter start observer did not finish within {Bound}", bound);
             }
         }
 
@@ -811,6 +952,15 @@ public sealed class PresenterBridge : IAsyncDisposable
             _lifetime.Cancel();
             try { await _writer.ConfigureAwait(false); } catch (OperationCanceledException) { }
             _takeOverAbort.Cancel();
+            lock (_heartbeatLock)
+            {
+                _pingTimer?.Dispose();
+                _deadlineTimer?.Dispose();
+                _pingTimer = null;
+                _deadlineTimer = null;
+            }
+            _abort.Cancel();
+            // StopAsync may race with this receive-owner cleanup; keep the cancellation token readable.
             _takeOverAbort.Dispose();
             _lifetime.Dispose();
         }

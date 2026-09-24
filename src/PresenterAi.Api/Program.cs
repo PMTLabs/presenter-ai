@@ -60,6 +60,7 @@ builder.Services.AddFileContent(builder.Configuration, builder.Environment.Conte
 builder.Services.AddLiveSessions();
 builder.Services.AddPresenter();
 builder.Services.AddPresenterBridge();
+builder.Services.AddHostedService<PresenterShutdownService>();
 var jwtSettings = builder.Configuration.GetSection(JwtSettings.SectionName).Get<JwtSettings>() ?? new JwtSettings();
 var jwtSigningKey = Encoding.UTF8.GetBytes(jwtSettings.SecretKey);
 if (jwtSigningKey.Length < 32)
@@ -230,6 +231,8 @@ try
         throw new InvalidOperationException("Missing required setting: ConnectionStrings:Redis");
     _ = app.Services.GetRequiredService<IOptions<JwtSettings>>().Value;
     _ = app.Services.GetRequiredService<IOptions<OAuthSettings>>().Value;
+    _ = app.Services.GetRequiredService<IOptions<PresenterOptions>>().Value;
+    _ = app.Services.GetRequiredService<IOptions<PresenterAi.Infrastructure.Redis.SessionRedisOptions>>().Value;
     app.Run();
 }
 catch (OptionsValidationException ex) when (!isTesting)

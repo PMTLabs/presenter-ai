@@ -21,6 +21,10 @@ public static class ScriptWriter
         WriteYamlString(output, "context", script.Meta.Context);
         WriteYamlScalar(output, "advanceSilenceMs", script.Meta.AdvanceSilenceMs);
         WriteYamlScalar(output, "chunkChars", script.Meta.ChunkChars);
+        if (script.Meta.MaxMinutes is not null)
+        {
+            WriteYamlScalar(output, "maxMinutes", script.Meta.MaxMinutes);
+        }
         output.AppendLine("---");
 
         for (var i = 0; i < script.Slides.Count; i++)
