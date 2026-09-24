@@ -148,7 +148,7 @@ internal static class AskProbeCommand
             var stats = recorder.Stats;
             await output.WriteLineAsync(
                 $"recorder: recorded {Seconds(stats.RecordedMs)}, kept {Seconds(stats.KeptMs)} (voiced {Seconds(stats.VoicedMs)}) + {Seconds(stats.TailMs)} tail, " +
-                $"{chunks.Count} chunks, last voice at {Seconds(stats.LastVoicedAtMs ?? 0)}; rms bands {stats.Bands}{(stats.Full ? "; CAP REACHED (120 s): part 2 may be cut" : string.Empty)}").ConfigureAwait(false);
+                $"{chunks.Count} chunks, last voice at {Seconds(stats.LastVoicedAtMs ?? 0)}; rms bands {stats.Bands}{(stats.Full ? $"; CAP REACHED ({AskRecorder.MaxRetainedMs / 1000} s): part 2 may be cut" : string.Empty)}").ConfigureAwait(false);
 
             // 4. Ask done: unmute, mark, burst, mark.
             observer.AnswerClientDelegations = true;

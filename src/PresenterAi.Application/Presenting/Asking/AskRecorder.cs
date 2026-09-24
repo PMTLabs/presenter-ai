@@ -3,7 +3,8 @@ namespace PresenterAi.Application.Presenting.Asking;
 /// <summary>
 /// Plan 011 §4.1: an online, energy-based silence compressor for the audio of one ask (24 kHz mono PCM16).
 /// It classifies 20 ms windows by RMS, keeps pauses up to 500 ms verbatim, squeezes longer pauses to a head and a
-/// tail of 160 ms each, trims leading and trailing silence to 160 ms, caps the retained audio at 120 s and, on
+/// tail of 160 ms each, trims leading and trailing silence to 160 ms, caps the retained audio at 25 s of kept speech (P-1: an unpaced
+/// burst is ingested upstream only up to about 30 s; silence squeezed out does not count) and, on
 /// <see cref="Complete"/>, appends a zero tail and cuts the result into 200 ms chunks. Pure and single-threaded: the
 /// presenter loop owns it. No audio content ever leaves it except through <see cref="Complete"/>.
 /// </summary>
@@ -19,7 +20,7 @@ public sealed class AskRecorder
     public const int TrailMs = 160;
     public const int DefaultTailSilenceMs = 1_000;
     public const int MinSpeechMs = 200;
-    public const int MaxRetainedMs = 120_000;
+    public const int MaxRetainedMs = 25_000;
     public const int ChunkMs = 200;
     public const int ChunkBytes = ChunkMs * BytesPerMs;
 
