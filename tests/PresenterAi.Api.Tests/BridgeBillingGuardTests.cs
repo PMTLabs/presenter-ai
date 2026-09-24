@@ -78,6 +78,24 @@ public sealed class BridgeBillingGuardTests
         closed!.EndReason.Should().Be(EndReasons.Heartbeat);
     }
 
+    [Fact]
+    public async Task Inbound_frames_do_not_rearm_the_heartbeat_timer()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        var timers = factory.CountTimerChanges();
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong");
+        var before = timers.Changes;
+        for (var i = 0; i < 100; i++)
+            await BridgeTestSupport.SendAsync(socket, "{\"type\":\"pong\"}");
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong");
+        // MarkAlive only stamps the time; the deadline timer is re-armed when it fires, not once per frame.
+        (timers.Changes - before).Should().Be(0);
+    }
+
     [Theory]
     [InlineData("4")]
     [InlineData("5.5")]

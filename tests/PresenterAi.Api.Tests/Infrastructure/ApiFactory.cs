@@ -30,6 +30,11 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
     public FakeTimeProvider UseFakeClock() => _fakeClock ??= new FakeTimeProvider();
 
+    /// <summary>Wraps the fake clock so tests can count <see cref="ITimer.Change"/> calls on the timers it creates.</summary>
+    public CountingTimeProvider CountTimerChanges() => _countingClock ??= new CountingTimeProvider(UseFakeClock());
+
+    private CountingTimeProvider? _countingClock;
+
     public async Task AdvanceAndSettleAsync(TimeSpan span)
     {
         var clock = _fakeClock ?? throw new InvalidOperationException("Call UseFakeClock before creating the host.");
@@ -119,7 +124,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             if (_fakeClock is not null)
             {
                 services.RemoveAll<TimeProvider>();
-                services.AddSingleton<TimeProvider>(_fakeClock);
+                services.AddSingleton<TimeProvider>(_countingClock ?? (TimeProvider)_fakeClock);
             }
             // The real MCP source reads Postgres, which these tests do not run; a test that needs external tools
             // supplies its own source.
@@ -398,4 +403,30 @@ internal sealed class EmptySessionToolSource : ISessionToolSource
 {
     public Task<SessionToolSet> LoadAsync(string ownerId, CancellationToken cancellationToken = default) =>
         Task.FromResult(new SessionToolSet(tools: [], hostedTools: [], notes: [], disposable: null));
+}
+
+public sealed class CountingTimeProvider(TimeProvider inner) : TimeProvider
+{
+    private int _changes;
+
+    public int Changes => Volatile.Read(ref _changes);
+    public override TimeZoneInfo LocalTimeZone => inner.LocalTimeZone;
+    public override long TimestampFrequency => inner.TimestampFrequency;
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+    public override long GetTimestamp() => inner.GetTimestamp();
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+        new CountingTimer(inner.CreateTimer(callback, state, dueTime, period), this);
+
+    private sealed class CountingTimer(ITimer timer, CountingTimeProvider owner) : ITimer
+    {
+        public bool Change(TimeSpan dueTime, TimeSpan period)
+        {
+            Interlocked.Increment(ref owner._changes);
+            return timer.Change(dueTime, period);
+        }
+
+        public void Dispose() => timer.Dispose();
+        public ValueTask DisposeAsync() => timer.DisposeAsync();
+    }
 }
