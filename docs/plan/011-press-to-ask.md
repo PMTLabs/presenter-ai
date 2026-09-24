@@ -1,7 +1,7 @@
 # 011 — Press-to-ask
 
 **Date:** 2026-09-24
-**Status:** Blocked at T1 (2026-09-24) — approved 2026-09-24; T1 near-cap burst truncated upstream, see work log
+**Status:** Approved (2026-09-24) — T1 passed 2026-09-24 (see work log)
 **Size:** M (presenter event loop, a pure recorder/compressor, a transcriber port, ordered `/ws` admission, web
 presenter app, a CLI live probe, docs; no persistence, no HTTP change).
 **Area:** `src/PresenterAi.{Application,Api,Cli,Infrastructure}`, `web/app`, `docs/`.
@@ -76,20 +76,24 @@ burst, and it answers the whole question once, then checks in and resumes the se
 | G1-3 | Quiet timeout | 90 s; done if speech was heard, else cancel and stay paused |
 | G1-4 | **Extend** (owner edit) | Restarts the 90 s quiet timer; UI counts down near the timeout |
 | G1-5 | **Transcription** (owner edit) | `IAskTranscriber` port with a disabled default; the lexicon and suffix matching sit behind it, unit-tested |
-| P-1 | Buffer bound and overflow | 120 s of **retained** audio, counted after the online silence compression (§4.1), so thinking time does not fill it. At the cap the ask is **sent automatically** (`reason:"limit_sent"`, toast). Wall time is bounded by the quiet timer, Extend presses and the talk's max length |
+| P-1 | Buffer bound and overflow (**owner, 2026-09-24, after the T1 cap sweep**) | **25 s of kept speech**, counted after the online silence compression (§4.1), so silence and thinking time do not count; raw recorded time is not capped. The burst is sent **unpaced**. At the cap the ask finishes on its own (`reason:"limit_sent"`, toast), and the UI shows the remaining speech time. Why: an unpaced burst is ingested only up to about 30 s and the rest is dropped silently; pacing delays the answer and let the model answer during the send (work log, T1 cap sweep). Wall time is bounded by the quiet timer, Extend presses and the talk's max length |
 | P-2 | How the answer is triggered | Natural upstream VAD end after the burst plus an explicit 1 s zero tail; no extra event. `response.create` only if T1 shows VAD never answers (§4.1) |
 | P-3 | Ask from Paused | Same answer path as from narration: the check-in decides; "yes" or its timeout resumes; "no" or Pause stays (code fact, §9) |
-| P-4 | Ask while mic-muted | The UI shows a local warning for A and keeps the button disabled with a hint; the server still refuses (`refused_muted`). Mute during an ask cancels it |
-| P-5 | User Resume, navigation or Mute during an ask | Cancels the ask (recording discarded), then does the command. Tool-originated commands are refused while listening |
+| P-4 | Ask while mic-muted | The UI shows a local warning for A and keeps the button disabled with a hint; the server still refuses (`refused_muted`). Mute while listening cancels the ask; Mute during the answer or check-in stops the mic but never the upstream input clock (P-16) |
+| P-5 | User Resume, navigation or Mute while listening | Cancels the ask (recording discarded), then does the command. Tool-originated commands are refused while listening. In the answer phases, Continue (`resume`) ends the exchange and resumes |
 | P-6 | Keys while listening | Space is ignored, so it cannot cancel the question. Escape keeps its meaning (End). Arrow keys navigate (and cancel) |
 | P-7 | Phrase-stripped question text | Stays on the finished ask (logged by length only); not sent upstream until the real transcriber pass |
 | P-8 | One ask exchange | A single loop-only phase from Ask start to check-in resolution; every model-facing emitter consults it (§4.1 site list) |
 | P-9 | Work started before Ask | Abandoned at Ask start: run generation bumped and tool rounds cleared, as navigation does; no result is submitted and no `response.create` is sent for it |
 | P-10 | Ordered bridge admission | Audio and every presenter command except `start`/`end` enter the presenter through one serial, bounded, cancellable queue per connection |
-| P-11 | Waiting for the answer | An answer-start budget set from T1's near-cap measurement replaces the generic 15 s question hold during the exchange |
+| P-11 | Waiting for the answer | `AnswerStartBudgetMs` = **15,000** (T1 suite: the longest first-answer latency at 24 s of kept speech was about 9.7 s) replaces the generic 15 s question hold during the exchange, with the finite ceiling of §4.1 |
 | P-12 | Send failure | A refused append mid-burst resets the upstream (serialized reset transition, §4.1; the next Ask or Resume reconnects); never `sent` after a detected failure |
-| P-13 | Burst vs live speech at check-in | Input-clock provenance: a user delta whose `start_ms` falls before the burst's end on the upstream input clock is burst text in every phase. T1 must confirm the clock; otherwise the bounded fallback in §4.1 needs the owner's agreement |
+| P-13 | Burst vs live speech at check-in (**owner, 2026-09-24; replaces the `start_ms` provenance design**) | Turn-taking rule: at check-in, only a **new** user utterance counts as yes/no. Its first transcript delta must arrive after the check-in began **and** after at least 1.5 s with no user transcript. Barge-in while the check-in is still being spoken is allowed. An unclear reply gets the existing follow-up, asked once more. **Continue** always works. Why: upstream `start_ms` drifted up to 4.3 s past our input clock under upload lag, and in every run the last question delta arrived around answer start |
 | P-14 | Admission overflow | The receive loop never blocks. A full admission queue closes the socket with 1011 (the existing backpressure close), and disconnect → End cleans up |
+| P-15 | Probe-only input marks | `ILiveSession.MarkInputPosition`/`InputPositionMarked` (built in T1) stay **probe-only**; the presenter does not use them |
+| P-16 | Upstream output is paced by input audio (T1 finding) | The answer never gets ahead of the input audio the upstream has received, and it stalls if input stops. After the burst and through the answer and check-in, input keeps flowing: live mic frames, or the `LiveSession` pump's silence when the browser sends none. The upstream `Mute` is never sent during the answer phases (§4.1) |
+| P-17 | **Continue** button (owner, 2026-09-24) | While the answer or check-in runs, "Continue" shows next to Pause. It skips the check-in and resumes narration from where it was interrupted. It is driven by the additive `answering` state of `ask_state` (§4.3 frame sequence) |
+| P-18 | Clipped burst start (T1 finding) | Ask done waits, without blocking, for the upstream's `session.input_audio.unmuted` ack (at most 2 s; on timeout it logs and proceeds), then sends a 200 ms zero lead-in and the burst. Evidence: the burst reached the wire at +29 ms, before the unmuted event at +56 ms, and the start of the question was lost (vi: "Chương trình đã thay đổi", once all of part 1; en: "What") |
 | C2 | Ask question transcript (owner, 2026-09-24) | "Record like any question": saved through `SessionRecorder` like any spoken question; no ask audio and no ask-specific transcript store |
 
 ## 3. Current state (as built on `feature/010-live-presenter-training` @ `dea8208`)
@@ -110,6 +114,15 @@ burst, and it answers the whole question once, then checks in and resumes the se
   48 bytes/ms = 24 kHz PCM16 mono). **A burst sent faster than real time stops the fill until wall time catches up,
   so the silence that lets VAD end the turn must be sent explicitly.** A `PumpFrame` can be enqueued between burst
   chunks. It fills nothing once chunks are ahead of wall time, but zero frames can land before the first chunk.
+- The pump runs whenever the session is Open, **whatever the mute state**. `PumpLoopAsync` checks only
+  `State == Open` (`:405-426`), and `Mute` only enqueues the `session.input_audio.mute` command (`:219-227`). So with
+  no browser mic frames, the input clock still advances at wall time once any burst lead has been consumed. Whether
+  the upstream still advances its input clock for audio appended while muted is not verified. The plan therefore
+  never mutes upstream during the answer phases (P-16).
+- The upstream acknowledges `session.input_audio.unmute` with `session.input_audio.unmuted` (FakeLiveServer mirrors
+  it, `tests/…/Live/FakeLiveServer.cs:296`). `LiveSession`'s receive switch has **no case for it**
+  (`LiveSession.cs:544-600`), and `Unmute` only enqueues the command (`:232-235`). So nothing can wait for the ack
+  today (P-18).
 - The send loop counts every appended ms, pump silence included, in `_sentMs` (`SendAudioFrameAsync :444-457`). That
   is the upstream input clock. `session.input_transcript.delta` carries `start_ms`/`end_ms`, which reach the presenter
   unchanged (`:521-522`); whether they are on that input clock is unverified (T1).
@@ -236,10 +249,10 @@ drop it).**
 | Phase | Entered by | Talk state | Upstream mic | Ends with |
 |---|---|---|---|---|
 | `Listening` | Ask start (atomic, below) | Paused, grace stopped | muted; mic → `AskRecorder` | Ask done / quiet / cap / phrase → `Sending`; cancel reasons → end `Stay`; End → end `Ended` |
-| `Sending` | inside the Ask-done handler only | Paused | unmute + chunks enqueued | all queued → `AwaitingAnswer`; refused append → end `Stay` with `send_failed` + upstream reset |
-| `AwaitingAnswer` | burst queued | Presenting, hold open | live | first voiced assistant audio with no backend delegation pending (`:1068`) → `Answering`; answer budget expiry → end `Resume` (`no_answer` log) |
-| `Answering` | as above | Presenting | live | the existing 700 ms quiet → `AwaitingCarryOn` → `CheckIn` |
-| `CheckIn` | `AwaitingCarryOn` | Presenting | live | yes, or `FollowUpWaitMs` → end `Resume`; no → end `Stay` (`WaitingOnSlide`) |
+| `Sending` | Ask done | Paused | unmute enqueued; **sub-phase `AwaitingUnmuteAck`** (no mic forwarded or recorded), then lead-in + chunks enqueued | ack or 2 s timeout → lead-in + burst queued → `AwaitingAnswer`; refused unmute/append → end `Stay` with `send_failed` + upstream reset; End/max/disconnect → end `Ended`; a user command → as in `Listening` |
+| `AwaitingAnswer` | burst queued | Presenting, hold open | live, never muted (P-16) | first voiced assistant audio with no backend delegation pending (`:1068`) → `Answering`; answer budget expiry → end `Resume` (`no_answer` log) |
+| `Answering` | as above | Presenting | live, never muted (P-16) | the existing 700 ms quiet → `AwaitingCarryOn` → `CheckIn` |
+| `CheckIn` | `AwaitingCarryOn` | Presenting | live, never muted (P-16) | a qualifying yes (site 15), **Continue**, or `FollowUpWaitMs` → end `Resume`; a qualifying no → end `Stay` (`WaitingOnSlide`); an unclear qualifying reply → the existing follow-up, once more (the model answers it and the check-in runs again), and a second unclear reply is left to the timeout |
 
 In any phase, navigation ends it with `Navigated`, and End, max length, disconnect or upstream loss with `Ended`. A
 user Pause in `AwaitingAnswer`/`Answering`/`CheckIn` ends it with `Stay`; in `Listening` a Pause is a no-op.
@@ -274,7 +287,7 @@ event arriving **after** Ask start):
 | 12 | `OnNudge` / `ArmNudge` (`:1886`, `:2386`) | Not armed or acted on during an exchange |
 | 13 | `RaiseLimitWarning` instruction (`:2556-2557`) | Deferred; the `limit_warning` frame (toast) is immediate |
 | 14 | `UnmuteCore` (`:2170-2180`) via `/ws` `unmute` | `Listening`: refused; the upstream stays muted and `_muted` is unchanged |
-| 15 | `OnTranscript` → assembler / hold (`:1110-1128`), incl. the out-of-range GoTo reply (`:1199-1211`) | **Provenance (P-13):** a user delta with `start_ms < burstEndMs + 250` (burst range on the upstream input clock, below), or any delta before the end mark has arrived, is **burst text in every phase, CheckIn included**. It goes to the UI only: no assembler, no hold reset, no `_answerVoiced` reset, never yes/no. A delta with null `start_ms` is never read as yes/no. Before `CheckIn`, live deltas are also UI-only. In `CheckIn`, a live utterance's intent is filtered **right after matching** (before the GoTo range branch): only Yes/No/Resume/Pause act; any other match is a follow-up question (the existing `newQuestionDuringCarryOn` path), never navigation or End |
+| 15 | `OnTranscript` → assembler / hold (`:1110-1128`), incl. the out-of-range GoTo reply (`:1199-1211`) and the "model speaking" command filter (`:1188`, `:1193-1197`) | **Turn-taking rule (P-13).** Before `CheckIn`, every user delta is UI-only: no assembler, no hold reset, no `_answerVoiced` reset. In `CheckIn`, a delta **opens a new utterance** only if it arrives (loop time) after `CheckIn` began **and** at least 1,500 ms after the previous user delta of any kind. Every non-qualifying delta, e.g. a late fragment of the question, stays UI-only and restarts the 1.5 s quiet window. A qualifying utterance may start while the check-in is still being spoken (barge-in), so the existing "ignored (model speaking)" filter does not apply to it. Its intent is filtered **right after matching**, before the GoTo range branch: only Yes/No/Resume/Pause act; anything else is unclear (see `CheckIn` above), never navigation or End. `start_ms` is not used |
 | 16 | Tool-originated commands (`InvocationCallId`: Next/Prev/Goto/Pause/Resume/ConfirmEnd) | `Listening`: refused. Later: navigation ends the exchange `Navigated` |
 | 17 | `OnWrapUpFallbackAsync` (`:1920`) | Already returns while the hold is open; the exchange keeps `_questionHoldOpen` set |
 | 18 | `OnScriptEditDeclined` (`Presenter.Training.cs:360-363`), reached from a `revise_script` confirmation that is declined or times out (`Presenter.cs:1363-1368`, `:1752-1759`) during `AwaitingAnswer`/`Answering` | Deferred notice |
@@ -285,9 +298,9 @@ event arriving **after** Ask start):
 `OnUpstreamError :1539`) and `OpenOrExtendQuestionHold :2472`.
 - Outside an exchange it calls `ArmQuestionHold()`, as today.
 - In `Listening` it does nothing.
-- In `AwaitingAnswer` it re-arms one generation-guarded budget timer for
-  `AnswerStartBudgetMs = max(15,000, 1.5 × the longest Ask-done→first-answer-audio measured in T1, near-cap run
-  included)`, rounded up to 5 s (T1 writes the value into §10 and the constant).
+- In `AwaitingAnswer` it re-arms one generation-guarded budget timer for `AnswerStartBudgetMs = 15,000`. That comes
+  from the T1 suite: the longest Ask-done → first-answer-audio at 24 s of kept speech was about 9.7 s, and
+  1.5 × 9.7 s rounded up to 5 s is 15 s.
 - Re-arms never extend past a **finite ceiling**, `AwaitingAnswer` start + `AnswerStartBudgetMs` + 60,000 ms, even
   while tool or backend work is outstanding.
 - In `Answering`/`CheckIn` it does nothing: the existing interaction timers own those phases.
@@ -295,18 +308,22 @@ event arriving **after** Ask start):
 On expiry: log `ask: no answer within N s`, end `Resume`. A late answer then plays like any late answer after a hold
 release today. The generic 15 s hold timer is ignored during an exchange (site 11).
 
-**Burst provenance (P-13).** The input clock lives where pump silence is created, in `LiveSession` (`_sentMs`, §3).
-- New `ILiveSession.MarkInputPosition()` enqueues a marker frame in the FIFO outbound channel. When the send loop
-  reaches it, it raises `InputPositionMarked(markId, _sentMs)` (ms of input appended so far, pump silence included).
-- At Ask done the presenter enqueues one mark before the first chunk and one after the zero tail. It records
-  `[burstStartMs, burstEndMs]` when the marks come back through `QueueFromProducer`, dropped unless session and
-  exchange match.
-- Until the end mark arrives, every user delta counts as burst text. A pump frame landing between the start mark and
-  the first chunk shifts only `burstStartMs`, which is logged, not used.
-- **T1 must confirm that `start_ms` is on this clock.** If it is not, T1 records it and the plan returns to the owner
-  for the stated bounded fallback, which is not chosen now: at CheckIn, ignore yes/no until 1,500 ms after the last
-  user delta. Its limitation: a genuine immediate yes/no inside that gap is ignored, and the follow-up timeout
-  decides.
+**Input keeps flowing (P-16, T1 finding).** The upstream paces its output by the input audio it has received: an
+answer never gets ahead of it, and it stalls if input stops.
+- After the burst, and throughout `AwaitingAnswer`, `Answering` and `CheckIn`, input comes from:
+  - live mic frames, forwarded by `SendAudioCore` unless the user muted;
+  - the `LiveSession` pump's zeros when the browser sends none. The pump is independent of mute and of the
+    presenter (§3).
+- Nothing in this plan stops that. The upstream `Mute()` is sent only in `Listening`, and `Unmute()` precedes the
+  burst.
+- A user Mute during the answer phases sets `_muted` (the mic is no longer forwarded; the pump keeps the clock) and
+  **defers the upstream `Mute()` to the exchange end**. The exchange continues.
+- A suspension cannot happen during an exchange (grace stopped in `Listening`; Presenting afterwards).
+
+**Input marks are probe-only (P-15).** `ILiveSession.MarkInputPosition()`/`InputPositionMarked` (built in T1,
+`ILiveSession.cs:21-25`, `:59-61`) measure the burst's position on the upstream input clock for the probe. The
+presenter does not use them. T1 showed upstream `start_ms` drifting up to 4.3 s past that clock under upload lag,
+so check-in uses the turn-taking rule (site 15) instead.
 
 **Ask start (atomic on the loop, `AskStartCore`, command `ask_start`):**
 1. **Checks:**
@@ -355,7 +372,7 @@ compressor over 20 ms windows (960 bytes; odd bytes and partial windows carry ov
 | `LeadMs` / `TrailMs` | 160 / 160 | Leading and trailing silence trimmed |
 | `TailSilenceMs` | 1,000 (zeros) | The pump fill stalls after a burst (§3); VAD needs silence to end the turn |
 | `MinSpeechMs` | 200 voiced | Below this, the ask is empty |
-| `MaxRetainedMs` | 120,000 (5.76 MB) | P-1 cap, counted after compression |
+| `MaxRetainedMs` | 25,000 (1.2 MB) of kept speech | P-1 cap (owner): counted after compression; silence does not count. An unpaced burst is ingested only up to about 30 s upstream |
 | `ChunkMs` | 200 (9,600 bytes) | One `input_audio.append` per chunk; distinguishable on the wire from 960-byte pump frames |
 
 Algorithm: after the first voiced window, quiet windows accumulate in `pending`. On the next voiced window, a run of
@@ -366,21 +383,39 @@ chunks. Stats (recorded, kept, voiced ms; RMS bands <30 / 30–120 / 120–500 /
 quiet timer and the log. T1 may retune only `TailSilenceMs` (500–2,000) and the kept gap (200–400 ms), recording
 each attempt.
 
-**Ask done → `Sending` (one loop handler, no await; a reset closes off-loop, below):**
+**Ask done → `Sending` (event-driven; no loop handler awaits; a reset closes off-loop, below):**
 1. Stop the tick and dispose the transcription. Below `MinSpeechMs` voiced → end `Stay` with `empty`.
-2. `chunks = recorder.Complete()`, then `_session.Unmute()`, `MarkInputPosition()`, `SendAudio(chunk)` for each
-   chunk, and `MarkInputPosition()` after the tail. `true` means only *queued on the live session*.
-3. **Failure boundary (P-12).** If `Unmute` or any append returns false (the session is closing and chunks 1…N−1 may
+2. **Unmute and wait for the ack (P-18).**
+   - `chunks = recorder.Complete()` is kept on the exchange. `_session.Unmute()` is called (false → failure boundary,
+     step 3), and the sub-phase becomes `AwaitingUnmuteAck`.
+   - A generation-guarded 2,000 ms timer is armed, and the handler returns: the loop is free.
+   - New `ILiveSession.InputAudioUnmuted` event (default empty accessors). `LiveSession` raises it on
+     `session.input_audio.unmuted`, as a new case in the receive switch. The presenter wires it in `WireSession` →
+     `QueueFromProducer(UnmuteAcked(session))`.
+   - On the loop, the first of `UnmuteAcked` (for the current session) or `UnmuteAckTimeout(generation)` proceeds,
+     guarded by sub-phase and generation, so it proceeds exactly once. A timeout logs `ask: unmute ack timed out
+     after 2000 ms; sending`. The later of the two is ignored.
+   - Mic frames during the wait are neither recorded nor forwarded; the pump keeps the input clock (P-16).
+   - **End, max length, disconnect or upstream loss** during the wait → `EndExchange(Ended)`: the stored chunks are
+     dropped and the timer generation bumped, so a late ack or timeout finds no exchange and **nothing is sent**.
+   - A user Resume, navigation, Mute or `ask_cancel` during the wait → the `Listening` column of the command table,
+     i.e. discard the question, with no burst.
+3. **Proceed:** `SendAudio(200 ms of zeros)` as a lead-in, then `SendAudio(chunk)` for each chunk, **unpaced** (P-1:
+   at most 25 s of kept speech, within the ~30 s the upstream ingests from an unpaced burst). `true` means only
+   *queued on the live session*. T1 measured ≤ 100 ms to put a 24 s burst on the wire locally, with upstream
+   ingest lag up to 7.7 s.
+4. **Failure boundary (P-12).** If `Unmute` or any append returns false (the session is closing and chunks 1…N−1 may
    already be on the wire), the ask ends `Stay` with `off{send_failed}`, never `sent`, followed by the **upstream
    reset transition** below. The toast says the connection was reset; the next Ask or Resume reconnects a **new**
    session. A failure *after* every chunk was queued (the send loop fails) is upstream loss: `SessionClosed` →
    `OnClosed`, the talk ends `upstream_lost` and the exchange `Ended`.
 
-   **`off{sent}` therefore means "fully queued on the live session", and the protocol doc says so.**
-4. Variant B only (T1): a 3 s generation-guarded one-shot calls `ContinueResponses()` if the phase is still
+   **`answering{sent}` therefore means "fully queued on the live session", and the protocol doc says so.**
+5. Variant B only (T1): a 3 s generation-guarded one-shot calls `ContinueResponses()` if the phase is still
    `AwaitingAnswer`.
-5. `SetState(Presenting)`, `_guard.StartPresenting()`, `_questionHoldOpen = true` (null end), phase
-   `AwaitingAnswer`, arm the budget, emit `off{reason}`.
+6. `SetState(Presenting)`, `_guard.StartPresenting()`, `_questionHoldOpen = true` (null end), phase
+   `AwaitingAnswer`, arm the budget, emit `answering{reason}` (after the burst is queued, not at Ask done). `EndExchange` later emits the one `off` frame with the
+   outcome's reason.
 
    Log: `ask: sent (<reason>) — recorded 34.2 s, kept 12.1 s (voiced 9.8 s) + 1.0 s tail, 67 chunks; rms bands …`.
    No content is logged.
@@ -420,9 +455,9 @@ tail, no event. **Variant B** (the step-4 one-shot) is built only if T1 shows A 
 | Command | `Listening` | `AwaitingAnswer` / `Answering` / `CheckIn` |
 |---|---|---|
 | Pause | no-op | end `Stay`, then pause |
-| Resume | end `Stay` (`resumed`, `_replayOnResume` set), then `ResumeCore` consumes it | as today (it ends the exchange: `Resume`) |
+| Resume / **Continue** | end `Stay` (`resumed`, `_replayOnResume` set), then `ResumeCore` consumes it | end `Resume` (`continued`) in every answer phase, incl. `CheckIn`: deferred notices once, then the replay or `ResumeAfterQuestion`. It always works, whatever the transcript is doing |
 | Next/Prev/Goto | end `Navigated` (`navigated`), then navigate | end `Navigated`, then navigate |
-| Mute | end `Stay` (`muted`), then mute | end `Stay`, then mute |
+| Mute | end `Stay` (`muted`), then mute | `_muted = true` (mic not forwarded); the upstream `Mute()` is deferred to the exchange end, so the input clock keeps running (P-16); the exchange continues |
 | Unmute | refused (site 14) | as today |
 | Trainer toggle / Train on this | allowed; notices deferred (site 8) | same |
 | End / max length / disconnect / upstream loss | end `Ended`: no burst, no unmute; `off{ended}` precedes `closed` while the socket is still open (a disconnected socket gets nothing) | end `Ended` |
@@ -495,8 +530,12 @@ items with one reader.
 **Web.**
 - New `components/AskControls.tsx` next to Pause.
   - Idle: **Ask**, `aria-keyshortcuts="A"`. While muted it is disabled, with the visible hint "Unmute to ask".
-  - Listening: `role="status"` "Listening… m:ss", plus **Ask done**, **Extend** and **Cancel**. Under 20 s of quiet
-    remaining it adds "Sending in 0:15 if quiet" or "Closing in 0:15 if quiet".
+  - Listening: `role="status"` "Listening… m:ss", plus **Ask done**, **Extend** and **Cancel**, and the remaining
+    speech time, e.g. "0:07 of speech left", from `speechRemainingMs`. Under 20 s of quiet remaining it adds "Sending
+    in 0:15 if quiet" or "Closing in 0:15 if quiet".
+  - Answering (`ask_state` `answering`, through the answer and check-in): "Answering…" and a **Continue** button
+    next to Pause (P-17). It sends `resume`, which skips the check-in and resumes narration from the interrupted
+    sentence (`EndExchange(Resume)`). It always works.
 - `presenterStore.ask` holds the last `ask_state` and is cleared on `closed` or idle.
 - Keys, keeping the input, select, textarea and switch early return:
   - While listening:
@@ -531,11 +570,17 @@ items with one reader.
 | Dir | Frame | Rules |
 |---|---|---|
 | C→S | `{"type":"ask_start"}` | Answered by `ask_state` (`listening`, or `off` with `refused_*`/`unavailable`) |
-| C→S | `{"type":"ask_done"}` | While listening → `off` `sent`, `empty` or `send_failed`; otherwise ignored (no frame) |
+| C→S | `{"type":"ask_done"}` | While listening → `answering` `sent`, or `off` `empty`/`send_failed`; otherwise ignored (no frame) |
 | C→S | `{"type":"ask_extend"}` | While listening → `listening` with `quietRemainingMs` 90000; otherwise ignored |
-| C→S | `{"type":"ask_cancel"}` | While listening → `off` `cancelled`; otherwise ignored |
-| S→C | `{"type":"ask_state","state":"listening","elapsedMs":23000,"quietRemainingMs":67000,"heard":true,"transcribing":false,"reason":null}` | On start, every 1 s, and on extend |
-| S→C | `{"type":"ask_state","state":"off","elapsedMs":41000,"quietRemainingMs":null,"heard":true,"transcribing":false,"reason":"sent"}` | Exactly one per ask, and one per refused start. `reason` ∈ `sent` (the whole burst queued on the live session), `quiet_sent`, `limit_sent`, `phrase_sent`, `cancelled`, `empty`, `quiet_cancelled`, `muted`, `resumed`, `navigated`, `send_failed`, `ended`, `unavailable`, `refused_muted`, `refused_not_live` |
+| C→S | `{"type":"ask_cancel"}` | While listening, or during the unmute-ack wait → `off` `cancelled`; otherwise ignored |
+| S→C | `{"type":"ask_state","state":"listening","elapsedMs":23000,"quietRemainingMs":67000,"speechRemainingMs":13400,"heard":true,"transcribing":false,"reason":null}` | On start, every 1 s, and on extend |
+| S→C | `{"type":"ask_state","state":"answering","elapsedMs":41000,"quietRemainingMs":null,"speechRemainingMs":null,"heard":true,"transcribing":false,"reason":"sent"}` | Once, when the burst is queued. `reason` ∈ `sent` (the whole burst queued on the live session), `quiet_sent`, `limit_sent`, `phrase_sent` |
+| S→C | `{"type":"ask_state","state":"off","elapsedMs":…,"quietRemainingMs":null,"speechRemainingMs":null,"heard":…,"transcribing":false,"reason":"continued"}` | Exactly one per ask, and one per refused start. While listening: `cancelled`, `empty`, `quiet_cancelled`, `muted`, `resumed`, `navigated`, `send_failed`, `ended`, `unavailable`, `refused_muted`, `refused_not_live`. After `answering`: `continued` (yes, Continue, follow-up timeout, budget expiry), `waiting` ("no"), `paused`, `navigated`, `ended` |
+
+**Frame sequence (changed in this revision, additive):** `listening` (every 1 s) → [unmute-ack wait, at most 2 s,
+no frame] → `answering` (once, burst queued) → `off` (once, the exchange outcome). A cancellation while listening
+goes straight from `listening` to `off`. The earlier sequence (`listening` → `off{sent}`) no longer exists;
+`docs/reference/001` §8 documents the new one (T5).
 
 Extra fields on the four commands are ignored, as for `pause`. `unmute` while listening is ignored, and the server
 logs `ask: unmute refused while listening`. The `state` frame shows `paused:true` while listening.
@@ -549,7 +594,7 @@ logs `ask: unmute refused while listening`. The `state` frame shows `paused:true
 | `empty` | info | No question was heard — still paused. |
 | `quiet_cancelled` | info | Nothing was heard for 90 s — Ask cancelled; still paused. |
 | `quiet_sent` | info | Sent your question after 90 s of quiet. |
-| `limit_sent` | info | Two-minute limit reached — your question was sent. |
+| `limit_sent` | info | 25-second speech limit reached — your question was sent. |
 | `send_failed` | error | Couldn't send your question — the connection was reset. Press Ask to try again. |
 | `resumed` / `navigated` / `muted` / `cancelled` | info | Ask cancelled. |
 
@@ -573,7 +618,7 @@ There is no config key.
 
 **`IPresenter` additions** (default bodies): `AskStartAsync`, `AskDoneAsync`, `AskExtendAsync`, `AskCancelAsync`
 (`Task<bool>`, default `false`) and `event Action<PresenterAskState>? AskState`.
-`PresenterAskState(string State, long ElapsedMs, long? QuietRemainingMs, bool Heard, bool Transcribing, string? Reason)`.
+`PresenterAskState(string State, long ElapsedMs, long? QuietRemainingMs, long? SpeechRemainingMs, bool Heard, bool Transcribing, string? Reason)` (`State` ∈ `listening`, `answering`, `off`).
 
 ### 4.4 Sequences
 
@@ -602,14 +647,16 @@ sequenceDiagram
   U->>A: ask_done (button / A / Enter)
   A->>P: AskDoneAsync (after every earlier PCM frame)
   P->>R: Complete() → kept audio + 1 s zero tail, 200 ms chunks
-  P->>L: unmute, mark, input_audio.append × N, mark (all queued; else send_failed + reset transition)
+  P->>L: unmute (sub-phase AwaitingUnmuteAck; 2 s timer; loop free)
+  L-->>P: session.input_audio.unmuted → UnmuteAcked (or the 2 s timeout, logged)
+  P->>L: 200 ms zero lead-in, then input_audio.append × N (all queued; else send_failed + reset transition)
   P->>P: Presenting, hold open, phase AwaitingAnswer, ArmAnswerWait
-  P-->>U: ask_state off{sent}, state{presenting}
-  L-->>P: InputPositionMarked × 2 → burst range [start, end] on the input clock
-  L-->>P: burst transcript (start_ms < burstEnd) → UI only in every phase, never yes/no
+  P-->>U: ask_state answering{sent}, state{presenting}
+  Note over P,L: input keeps flowing (mic frames, or pump zeros); the upstream is never muted in the answer phases (P-16)
+  L-->>P: question transcript deltas (arriving up to about answer start) → UI only
   L-->>P: (optional delegation → ArmAnswerWait, capped) answer audio → Answering
-  P->>P: 700 ms quiet → AwaitingCarryOn = CheckIn (live deltas only: yes/no/resume/pause honoured)
-  P->>P: yes / FollowUpWaitMs → EndExchange(Resume): deferred notices once, replay-due or resume instruction
+  P->>P: 700 ms quiet → AwaitingCarryOn = CheckIn (turn-taking: a new utterance after check-in start and 1.5 s of transcript quiet; Continue always works)
+  P->>P: qualifying yes / Continue / FollowUpWaitMs → EndExchange(Resume): deferred notices once, replay-due or resume instruction; off{continued}
   P->>L: notices, then ResumeAfterQuestionInstruction (or slide replay)
 ```
 
@@ -699,10 +746,12 @@ sequenceDiagram
 |---|---|---|
 | PCM and ask/control frames → loop | socket receive → admission → presenter | **Ordered admission**: nonblocking `TryWrite` into one bounded queue per connection (full → close 1011); a single pump with at most one presenter call in flight, awaiting each completion, so loop order = socket order; disconnect completes it, and cleanup aborts pending starts, awaits the pump (≤ 5 s), then ends |
 | `end` | bridge → loop | Always read at once (the receive loop never blocks); bypasses admission; existing off-loop `CancelConnect` + End command. Items delivered later find the talk not live (ignored) |
-| Burst range (input-clock marks) | send loop → loop | Marker frames in the same FIFO outbound channel; `InputPositionMarked` via `QueueFromProducer`, dropped unless session and exchange match (**loop-only**); before the end mark arrives, every user delta counts as burst |
+| User transcript at check-in | session → loop | Existing queue; the turn-taking rule uses **loop arrival time** only (check-in start, last user delta time), both **loop-only** state; no upstream timestamp is trusted |
+| Input clock after the burst | browser mic / pump timer → upstream | Mic frames via ordered admission → `SendAudioCore`; otherwise `LiveSession`'s pump (`PumpLoopAsync` timer → FIFO outbound, independent of mute and of the presenter). No ask code stops either; the upstream `Mute()` is never sent in the answer phases (P-16) |
 | Upstream reset close | loop → thread pool → loop | Detach and suspend on the loop; close off-loop; `UpstreamResetClosed(session, generation)` re-enters and is applied only if `_pendingReset` matches (**loop-only generation**); the session is disposed exactly once; `OnClosed` folds a pending segment |
 | 1 s tick, answer wait (budget and ceiling), variant-B one-shot, phrase debounce | timer threads → loop | `QueueFromProducer(event(generation))`, dropped unless the generation is current (**loop-only**) |
 | Transcriber updates | transcriber thread → loop | `QueueFromProducer(AskTranscriptChanged(askId, update))`; dropped unless the id matches and `Revision > lastRevision` (**loop-only, monotonic**); end of utterance by update-time debounce |
+| Unmute ack → burst | session receive thread / ack timer → loop | `InputAudioUnmuted` → `QueueFromProducer(UnmuteAcked(session))`, plus a generation-guarded 2 s `UnmuteAckTimeout`. The first one proceeds, guarded by sub-phase, session and generation (**loop-only**); End clears the exchange, so both become no-ops |
 | Mute → unmute → chunks → (continue) | loop → upstream | One FIFO outbound channel, enqueued by one loop handler with no await. `true` = queued only; wire failure → `SessionClosed` (current session) or reset (refused append). Pump zero frames may interleave and are distinguishable by size |
 | Pre-Ask tool/delegation/approval completions | tool tasks, session → loop | Existing queue; made inert by the run-generation bump + tracker clear at Ask start (**loop-only generation**) and consulted through `ExchangeAllows` |
 | Trainer `Changed` → reconcile | service → loop | Existing idempotent reconcile; model-facing effects routed through `DeferUntilExchangeEnds` / replay-due (**loop-only**, consumed once in `EndExchange`) |
@@ -747,6 +796,9 @@ an await.
    runs.
 4. Unmute paths: `UnmuteCore` (refused while listening), `ReconnectAsync` (cannot run while listening: the grace is
    stopped and Resume/navigation end the exchange first) and the exchange exits.
+5. Paths that could stop upstream input during an answer: `MuteCore` (upstream `Mute()` deferred to the exchange
+   end), suspension (impossible during an exchange), session close (ends the talk). The browser sends mic frames only
+   while presenting or paused (`bridgeClient.ts:209-215`); with none, the pump fills.
 
 ### 4.5 Surface list
 
@@ -754,7 +806,8 @@ an await.
 |---|---|---|
 | `Application/Presenting/Asking/AskRecorder.cs` | Online compressor, cap, stats | T1 |
 | `Cli/AskProbeCommand.cs`, `Cli/Program.cs` | Live probe | T1 |
-| `ILiveSession.cs` (`MarkInputPosition`, `InputPositionMarked`, default no-op) + `LiveSession.cs` (marker frame in the send loop) | Input clock marks | T1 |
+| `ILiveSession.cs` (`MarkInputPosition`, `InputPositionMarked`, default no-op) + `LiveSession.cs` (marker frame in the send loop) | Input clock marks, probe-only (P-15) | T1 |
+| `ILiveSession.cs` (`InputAudioUnmuted`, default empty accessors) + `LiveSession.cs` (receive case `session.input_audio.unmuted`) + `FakeSession` (controllable ack) | Unmute ack (P-18) | T2 |
 | `IPresenter.cs`, `PresenterEvents.cs`, `Asking/{IAskTranscriber,AskTranscriptUpdate,DisabledAskTranscriber}.cs`, `DependencyInjection.cs`, test `FakeSession` (bytes; refuse append at N; controllable marks; gated `CloseAsync`), `TestAskTranscriber` | Contracts | T2 |
 | `Presenting/VoiceCommands/AskDoneLexicon.cs` | Lexicon + suffix matcher | T3 |
 | New `Presenter.Asking.cs` (exchange, gate, deferral, budget); hooks in `Presenter.cs` (sites 1–7, 11–17, 19, `ArmAnswerWait`, reset transition, `SendAudioCore`, `ProcessCommandAsync`, `EndAsyncCore`, `OnClosed`, `StartAsyncCore`, loop switch) and `Presenter.Training.cs` (sites 8–10, 18) | Loop behaviour | T4 |
@@ -771,7 +824,7 @@ an await.
 | Backward compatibility — existing data / sessions / configs? Migration? | Additive frames and commands, defaulted `IPresenter` members, optional constructor parameter. Admission keeps existing command semantics (same socket order, now guaranteed). No config, schema or HTTP change |
 | Error recovery — what happens on failure; can it recover? | Mute or `Begin` failure → rollback (grace re-armed, unmuted or upstream reset). Refused append → `send_failed`, upstream reset, Ask again on a new session. No answer within the budget → resume as after an unanswered question |
 | Logging & debugging — enough to diagnose in the field? | One line per transition, with recorded, kept and voiced ms, chunk count, RMS bands, deferred counts and budget expiry; no audio or text content |
-| Edge cases — empty, huge, repeated, concurrent, interrupted? | Empty → `Stay`; the cap → auto send; a repeated start is idempotent while listening; done/extend/cancel when not listening → ignored; key repeat is guarded; End/max/disconnect while an item waits for admission, a full admission queue, and a burst partly on the wire are tested (T5); a late burst transcript (by input clock) is inert in every phase, incl. check-in; edits on both sides of Ask done replay once after the exchange |
+| Edge cases — empty, huge, repeated, concurrent, interrupted? | Empty → `Stay`; the cap → auto send; a repeated start is idempotent while listening; done/extend/cancel when not listening → ignored; key repeat is guarded; End/max/disconnect while an item waits for admission, a full admission queue, and a burst partly on the wire are tested (T5); a late question delta is inert before check-in, and at check-in unless it opens a new utterance after 1.5 s of transcript quiet; edits on both sides of Ask done replay once after the exchange |
 
 **Deliberate `/ws` addition:** four commands and one server frame (§8 and the `AGENTS.md` frame line, T5). No existing
 frame changes shape. Admission changes only how the bridge hands frames to the presenter.
@@ -786,10 +839,15 @@ frame changes shape. Admission changes only how the bridge hands frames to the p
   output could be taken as the answer's start; the T1 mid-narration observation bounds it.
 - R4 — A fixed 120 RMS threshold in a noisy room → noise suppression and AGC on; Ask done always works; the cap
   bounds memory; RMS bands are logged.
-- R5 — A late delta of the burst's transcript read as a check-in yes/no → input-clock provenance (P-13, site 15).
+- R5 — A late delta of the question's transcript read as a check-in yes/no → the turn-taking rule (P-13, site 15).
+  In every T1 run the last question delta arrived around answer start, well before check-in. Residual risk: a
+  question fragment delayed by more than the whole answer plus 1.5 s; Continue and the follow-up still recover.
   T1 records `start_ms` against the computed burst range on every run. If the clock does not match, the stated
   bounded fallback applies only with the owner's agreement.
-- R6 — Answer latency on a near-cap question → the budget is derived from the T1 near-cap measurement.
+- R6 — Answer latency on a question at the cap → `AnswerStartBudgetMs` 15 s, against the measured maximum of about
+  9.7 s at 24 s of kept speech. Upstream ingest lag reached 7.7 s.
+- R9 — Upstream output is paced by input audio (P-16) → input never stops in the answer phases (mic or pump); T4 and
+  T5 pin it.
 - R7 — `Presenter.cs` size → `Presenter.Asking.cs`; hooks only in `Presenter.cs` and `Presenter.Training.cs`.
 - R8 — Admission adds per-frame await latency → one loop round trip per 20 ms frame. A loop wedged for about 5 s
   fills the 256-item queue and closes the socket with 1011, which ends the talk (P-14); that is a deliberate
@@ -812,10 +870,13 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
 ### T1 — Recorder and live probe (gate)  (AC1, AC2, AC6)
 - **Files:** new `src/PresenterAi.Application/Presenting/Asking/AskRecorder.cs`, new `src/PresenterAi.Cli/AskProbeCommand.cs`,
   `src/PresenterAi.Cli/Program.cs`, `src/PresenterAi.Application/Presenting/ILiveSession.cs` +
-  `src/PresenterAi.Infrastructure/Live/LiveSession.cs` (input-position marker, §4.1 P-13; default no-op elsewhere),
-  new `tests/PresenterAi.Application.Tests/Presenting/Asking/AskRecorderTests.cs`,
-  `tests/PresenterAi.Infrastructure.Tests/Live/LiveSessionInputMarkTests.cs`, `tests/PresenterAi.Cli.Tests/CliTests.cs`.
-- **Change:** `AskRecorder` per §4.1; `MarkInputPosition`/`InputPositionMarked` per §4.1. `presenter-cli ask-probe --provider azure|openai --part1 <wav> --part2 <wav>
+  `src/PresenterAi.Infrastructure/Live/LiveSession.cs` (input-position marker; probe-only, P-15; default no-op
+  elsewhere), `scripts/make-ask-probe-wavs-tts.ps1` (`gpt-audio-1.5` TTS, en + vi WAVs outside the repo),
+  `scripts/run-ask-probe-suite.ps1` (the T1 matrix plus `presenter-cli ask-probe-summary` verdict), new
+  `tests/PresenterAi.Application.Tests/Presenting/Asking/AskRecorderTests.cs`,
+  `tests/PresenterAi.Infrastructure.Tests/Live/LiveSessionInputMarkTests.cs`, `tests/PresenterAi.Cli.Tests/CliTests.cs`,
+  `tests/PresenterAi.Cli.Tests/AskProbeSuiteTests.cs`.
+- **Change:** `AskRecorder` per §4.1; `MarkInputPosition`/`InputPositionMarked` (probe-only). `presenter-cli ask-probe --provider azure|openai --part1 <wav> --part2 <wav>
   [--gap-seconds 10] [--variant vad|continue|raw] [--tail-ms 1000] [--gap-keep-ms 320] [--observe-interrupt]`,
   modelled on `SmokeCommand`:
   - WAVs must be 24 kHz mono PCM16; otherwise it prints the `ffmpeg -ar 24000 -ac 1 -c:a pcm_s16le` hint.
@@ -833,10 +894,11 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   2. **Mute control:** `Mute()`, append `PauseInstruction()`, then send 3 s of part 1 at real-time pace. Expect no
      assistant audio and no user transcript.
   3. Feed the recording through `AskRecorder` in 20 ms frames (`raw` skips compression) and print the stats.
-  4. `Unmute()`, `MarkInputPosition()`, send all chunks unpaced, `MarkInputPosition()`, and time the send. This
-     gives the burst range on the input clock. `continue`: `ContinueResponses()` if no voiced assistant audio arrives
-     within 3 s.
-  4a. **Live reply:** after the answer ends, send a short "yes" WAV (`--reply <wav>`) at real-time pace.
+  4. `Unmute()`, wait for `session.input_audio.unmuted` (≤ 2 s), then `MarkInputPosition()`, a 200 ms zero lead-in,
+     all chunks unpaced, `MarkInputPosition()`, and time the send (P-18). The marks
+     are evidence only (upload lag, truncation). `continue`: `ContinueResponses()` if no voiced assistant audio
+     arrives within 3 s.
+  4a. **Live reply** (evidence): after the answer ends, send a short "yes" WAV (`--reply <wav>`) at real-time pace.
   5. Observe for up to 60 s:
      - user transcript deltas (text, `start_ms`/`end_ms`, arrival time), grouped into user turns separated by any
        assistant output;
@@ -844,34 +906,38 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
      - delegation and tool events, upstream errors;
      - first answer audio relative to the last chunk queued;
      - the arrival of the last burst-transcript delta relative to answer start and end (R5);
-     - **every user delta's `start_ms` against the burst range `[burstStartMs, burstEndMs]`**, and the reply's
-       `start_ms`.
+     - user deltas' `start_ms` against the marked burst range, and the truncation detector (evidence for P-1 and
+       P-13).
 
      Then close and print `usage.seconds`.
-  6. Runs:
+  6. Runs (`scripts/run-ask-probe-suite.ps1`, `gpt-audio-1.5` TTS WAVs, every run unpaced):
      - English ×3 (10 s gap);
      - Vietnamese ×1;
-     - **near-cap** ×1: English, with parts read slowly so the kept audio is about 110 s;
-     - one `raw` control.
+     - **cap** ×3 at 24 s of kept speech;
+     - over-cap controls at 28 s and 40 s, expected to truncate or fail;
+     - one `raw` control;
+     - one `--observe-interrupt`.
   7. **`--observe-interrupt`** (observation for R3/D1; not a pass criterion). While narration audio is playing, and
      separately while a delegation is active (a part-1-only question about an absent fact triggers it), apply Mute +
      `PauseInstruction()`. Record the ms of assistant audio the upstream still produces, and any delegation finish or
      tool call after the mute.
-- **Pass (every run of the chosen variant, including the near-cap run):**
+- **Pass (every required run of the chosen variant, including the 24 s cap runs):**
   - (i) no upstream error;
   - (ii) the mute control is silent;
   - (iii) no voiced assistant audio before the last chunk is queued;
-  - (iv) **exactly one user turn** after the burst, containing a part-1 keyword ("Da Nang" / its vi equivalent)
-    **before** a part-2 keyword ("Hanoi"), with no assistant audio, response start or delegation between them;
+  - (iv) **one question by arrival:** the question's transcript deltas arrive within the answer window (from the
+    burst until the answer ends), with a part-1 keyword ("Da Nang" / its vi equivalent) **before** a part-2 keyword
+    ("Hanoi"), and no other response or delegation starts in that window. Arrival order against assistant text is
+    **not** a criterion: the upstream streams its answer while the question transcript is still arriving;
   - (v) **one answer** whose assistant transcript contains fact A ("paperless") **and** fact B ("4.2"/"four point
     two"), each scored independently and quoted in the log;
   - (vi) no second unsolicited response within 15 s after it ends. The "Shall I carry on?" check-in is part of the
-    answer.
-
-  **Provenance check** (it decides P-13, not variant eligibility): every burst delta has
-  `start_ms < burstEndMs + 250`, and the reply's delta has `start_ms ≥ burstEndMs`. If this fails on any run, record
-  it and return to the owner for the stated bounded fallback (§4.1) **before T4 implements site 15**. The rest of T1
-  still decides the variant.
+    answer;
+  - (vii) **the question transcript finished before the answer ended** (its last delta arrives before the last answer
+    audio);
+  - no TRUNCATED flag, meaning the whole burst was ingested;
+  - (viii) **the question's start is present**: the user transcript contains the first words of part 1 ("What did
+    the programme…" / "Chương trình đã thay đổi…"). A clipped start fails the run.
 
   A part-1-discarding implementation fails (iv) and (v). **A split, partial or wrong answer is a FAIL.**
 - **Decision rule:**
@@ -879,13 +945,15 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   - If `vad` fails **only** because no answer starts at all → run `continue`; if that passes all runs → variant B.
   - Before declaring failure, retry `--tail-ms` 500/2000 and `--gap-keep-ms` 200/400, logging each attempt.
   - From the passing runs, set `AnswerStartBudgetMs = max(15 s, 1.5 × the longest Ask-done→first-answer-audio)`,
-    rounded up to 5 s, and record the near-cap send duration.
+    rounded up to 5 s, and record the send duration. **Result so far (T1 suite):** 15,000 ms (max about 9.7 s at
+    24 s); send ≤ 100 ms on the wire locally; upstream ingest lag up to 7.7 s. The over-cap controls must truncate or
+    fail; if one passes, the summary fails T1.
   - **Stop-and-return rule:** any other failure, or no passing setting → record everything in the work log, set this
     plan's status to "Blocked at T1", start nothing else, and return to the owner with the Option 1 fallback.
   - The `raw` control and `--observe-interrupt` are evidence only.
 - **Verify:** `dotnet test tests/PresenterAi.Application.Tests --filter AskRecorder`; probe results recorded in
   `docs/progress/002-work-log-phase0.md` (variant, constants, criteria per run, latencies, send duration, timestamp
-  behaviour, the provenance check per run, interrupt observation, usage seconds); a §10 row.
+  behaviour, truncation, interrupt observation, usage seconds); a §10 row.
 - **Test that dies if this breaks:** `AskRecorderTests`:
   - `Silence_run_over_500_ms_becomes_320_ms_with_160_ms_kept_each_side`;
   - `Pauses_up_to_500_ms_are_kept_verbatim`;
@@ -893,14 +961,15 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   - `Window_at_rms_120_is_voiced_and_119_is_quiet`;
   - `Frames_not_aligned_to_20_ms_carry_over_bytes`;
   - `Under_200_ms_voiced_is_not_speech`;
-  - `Reports_full_at_120_seconds_retained_and_ignores_silence_toward_the_cap`;
+  - `Reports_full_at_25_seconds_of_kept_speech_and_ignores_silence_toward_the_cap`;
   - `Chunks_are_200_ms_and_concatenate_to_the_compressed_stream`;
   - `Stats_bands_and_last_voice_time_are_reported`.
 
   `CliTests.Ask_probe_requires_both_parts_and_rejects_unknown_options`.
 
-  `LiveSessionInputMarkTests.Marks_report_sent_ms_in_fifo_order_including_pump_silence` (FakeLiveServer; a
-  pump-filled gap before the first chunk is counted, and the end mark equals start + chunk ms + tail).
+  `LiveSessionInputMarkTests.Marks_report_sent_ms_in_fifo_order_including_pump_silence` (probe-only evidence).
+  `AskProbeSuiteTests.Summary_passes_a_complete_matrix_and_derives_the_answer_budget`,
+  `Summary_fails_when_a_required_run_fails_is_truncated_or_the_over_cap_control_passes`.
 
 ### T2 — Contracts, transcriber port, DI, harness  (AC5 foundation)
 - **Files:** `Presenting/IPresenter.cs`, `Presenting/PresenterEvents.cs`, new
@@ -909,11 +978,13 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   (optional constructor parameter), `tests/…/Presenting/FakeSession.cs` (`SentAudio` bytes in `Sent` order;
   `RefuseAudioFromChunk`; controllable `InputPositionMarked`; gated `CloseAsync`), new `tests/…/Presenting/Asking/TestAskTranscriber.cs` (records appended bytes;
   `Publish(revision, text, final)` from a thread-pool thread).
-- **Change:** §4.3 `IPresenter` members and `PresenterAskState`; the port per §4.1.
+- **Change:** §4.3 `IPresenter` members and `PresenterAskState`; the port per §4.1; `ILiveSession.InputAudioUnmuted`
+  and its `LiveSession` receive case (P-18).
 - **Verify:** `dotnet build PresenterAi.slnx -warnaserror`; `dotnet test tests/PresenterAi.Api.Tests --filter Startup`;
   `dotnet test tests/PresenterAi.Cli.Tests`.
 - **Test that dies if this breaks:**
   - `Api.Tests/StartupTests.Production_container_uses_the_disabled_ask_transcriber` (real `Program` DI).
+  - `Infrastructure.Tests/Live/LiveSessionTests.Unmuted_server_event_raises_InputAudioUnmuted` (FakeLiveServer).
   - `Cli.Tests/CliTests.Owner_and_file_mode_build_the_presenter_with_the_disabled_ask_transcriber` (`BuildRunServices`
     and `BuildServices` with `ValidateOnBuild` resolve `IPresenter` and `IAskTranscriber` =
     `DisabledAskTranscriber`).
@@ -967,12 +1038,18 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
     - `Tool_call_outlasting_the_budget_keeps_waiting_until_the_ceiling_then_resumes_once`
     - `Every_question_hold_re_arm_during_an_exchange_goes_through_the_answer_wait` (tool call, delegated response,
       backend finish, hold open)
-  - **Provenance (D6):**
-    - `Delayed_burst_yes_after_check_in_begins_then_real_no_gives_one_stay`
-    - `Delayed_burst_no_after_check_in_begins_then_real_yes_gives_one_resume`
-    - `Delayed_burst_delta_after_the_follow_up_timeout_changes_nothing`
-    - `Delta_before_the_end_mark_arrives_is_burst_text`
-    - `Null_start_ms_in_check_in_is_never_a_yes_or_no`
+  - **Check-in turn-taking (P-13):**
+    - `Delayed_question_delta_after_check_in_begins_is_ignored` (a "yes" fragment arrives within 1.5 s of the
+      previous user delta → no resume)
+    - `Real_yes_after_one_and_a_half_seconds_of_transcript_quiet_counts`
+    - `Real_no_after_quiet_gives_one_stay_even_after_an_ignored_late_yes`
+    - `Barge_in_yes_while_the_check_in_is_still_spoken_counts`
+    - `Unclear_reply_gets_one_more_follow_up_then_the_timeout_decides`
+    - `Continue_ends_the_exchange_in_every_answer_phase` (theory: `AwaitingAnswer`, `Answering`, `CheckIn`)
+    - `Delayed_question_delta_after_the_follow_up_timeout_changes_nothing`
+  - **Input keeps flowing (P-16):**
+    - `User_mute_during_the_answer_defers_the_upstream_mute_to_the_exchange_end`
+    - `No_upstream_mute_is_sent_between_ask_done_and_the_exchange_end`
   - **Reset serialization (D8):**
     - `Reset_close_finishing_after_end_max_length_or_take_over_records_usage_once_and_publishes_nothing` (theory)
     - `Late_old_session_closed_after_reset_is_ignored_and_the_session_is_disposed_once`
@@ -988,8 +1065,14 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
     - `Ask_during_narration_mutes_pauses_and_flushes_and_forwards_no_mic_audio`
     - `Ten_second_and_ninety_second_silences_while_listening_send_no_part_nudge_resume_or_advance`
   - **AC2:**
-    - `Ask_done_unmutes_then_queues_the_compressed_burst_in_order` (for variant B: `continue_responses` once after
-      3 s without answer audio, never after answer audio)
+    - `Ask_done_unmutes_then_queues_the_compressed_burst_in_order`: `unmute`, the ack, a 9,600-byte zero lead-in,
+      then the chunks. For variant B, `continue_responses` once after 3 s without answer audio, never after answer
+      audio.
+    - `Burst_is_not_queued_before_the_unmuted_ack` (no `audio` entry after `unmute` until `UnmuteAcked`; the loop
+      processes other events meanwhile)
+    - `Ack_timeout_after_2_s_logs_and_sends_the_burst_once` (a late ack afterwards sends nothing more)
+    - `End_max_length_or_disconnect_during_the_ack_wait_sends_nothing` (theory; a late ack or timeout is a no-op)
+    - `Resume_navigation_or_cancel_during_the_ack_wait_discards_the_question`
     - `Answer_audio_enters_answering_despite_skewed_timestamps`
     - `Burst_transcript_next_slide_is_not_a_command`
     - `Second_ask_done_sends_nothing`
@@ -1001,7 +1084,7 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
     - `Quiet_90_s_without_speech_cancels_unmutes_and_stays_paused_with_grace_rearmed`
     - `Extend_at_80_s_keeps_listening_until_170_s`
     - `Ticks_emit_elapsed_and_quiet_remaining_every_second`
-    - `Retained_cap_sends_with_limit_sent`
+    - `Speech_cap_of_25_s_sends_with_limit_sent_and_silence_does_not_count` (and `speechRemainingMs` in the ticks)
     - `Ask_done_without_speech_is_empty_and_stays_paused`
   - **AC4, atomic start:**
     - `Ask_just_before_grace_expiry_with_the_guard_event_already_queued_does_not_suspend`
@@ -1064,13 +1147,16 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
     - `Max_length_while_ask_done_waits_for_admission_ends_the_talk_without_a_burst`.
   - `BridgeAskTests`:
     - `Ask_over_ws_mutes_records_and_bursts_in_order`. `FakeLiveServer.Received` has `session.input_audio.mute`
-      before the pause instruction, no append of the mic frames sent while listening, then `unmute` and the burst
-      appends. Filtering out 960-byte all-zero pump frames, the 9,600-byte (or final shorter) appends decode to
+      before the pause instruction, and no append of the mic frames sent while listening. Then `unmute`, the
+      server's `unmuted` ack, and only after it the 9,600-byte zero lead-in and the burst appends. Filtering out 960-byte all-zero pump frames, the 9,600-byte (or final shorter) appends decode to
       exactly the compressed recording, in order.
     - `End_while_the_burst_is_partly_on_the_wire_forwards_no_answer_after_closed` (FakeLiveServer reads gated after
       N appends).
     - `Upstream_socket_failure_after_the_burst_was_queued_ends_the_talk_upstream_lost`.
     - `Unmute_frame_while_listening_keeps_the_upstream_muted`.
+    - `Answer_audio_keeps_flowing_while_the_browser_sends_no_mic_frames` (P-16). FakeLiveServer paces its answer
+      audio by the input ms it has received, emulating the upstream. After `ask_done` the client sends no mic frames;
+      the server keeps receiving 960-byte pump frames, and every answer frame reaches the client.
     - `Ask_commands_ignore_extra_fields_and_unknown_ask_type_is_protocol_error`.
     - `Refused_ask_start_while_muted_reports_refused_muted` (raw `/ws`).
     - `Ask_done_when_not_asking_sends_no_frame`.
@@ -1088,6 +1174,9 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   - `AskControls.spec.tsx`:
     - `shows Listening with elapsed time, Ask done, Extend and Cancel`;
     - `shows the quiet countdown under 20 s with sending or closing wording`;
+    - `shows the remaining speech time while listening`;
+    - `shows Continue next to Pause only while ask_state is answering, and it sends resume`;
+    - `frame sequence listening → answering → off drives the control; listening → off (cancel) hides it`;
     - `Ask is disabled with the unmute hint when muted`.
   - `routes/Present.spec.tsx`. These are action-level tests: a mocked WebSocket answers the real key or button action.
     - `A starts an ask and A or Enter finishes it`;
@@ -1101,7 +1190,8 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
     - `pressing A answered by refused_not_live shows its toast`;
     - `Ask done answered by send_failed shows the reset toast`;
     - `Resume while listening answered by off resumed shows Ask cancelled`;
-    - `quiet_cancelled and limit_sent frames show their toasts`.
+    - `quiet_cancelled and limit_sent frames show their toasts` (limit text "25-second speech limit…");
+    - `Continue during check-in sends resume and the off continued frame clears the control`.
   - Existing: all of `Present.spec.tsx` (incl. `Space on the trainer switch does not pause, and Escape closes its
     tooltip without ending the talk`) and `Present.layout.spec.tsx`.
 
@@ -1136,14 +1226,15 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
 | key/button → client frame (incl. muted local warning) | `Present.spec A starts an ask…`, `A while muted shows the unmute warning…`, `bridgeClient.spec sends the four ask commands` |
 | socket → ordered admission → loop | `BridgeAdmissionTests.Admission_queue_filled_to_capacity_records_exactly_the_pcm_before_ask_done_in_order`, `Admission_calls_the_presenter_one_at_a_time_in_exact_socket_order` |
 | disconnect / End / max / overflow vs admission | `BridgeAdmissionTests.Full_admission_queue_closes_1011_…`, `End_frame_with_the_pump_blocked_…`, `Disconnect_while_items_wait_…`, `End_bypasses_admission_…`, `Max_length_while_ask_done_waits_…` |
-| burst range on the input clock → provenance | `LiveSessionInputMarkTests.Marks_report_sent_ms_…`, `PresenterAskTests.Delayed_burst_yes_after_check_in_begins_…`, `Delta_before_the_end_mark_arrives_is_burst_text`, T1 provenance check |
+| check-in turn-taking | `PresenterAskTests.Delayed_question_delta_after_check_in_begins_is_ignored`, `Real_yes_after_one_and_a_half_seconds_…`, `Continue_ends_the_exchange_in_every_answer_phase` |
+| input keeps flowing through the answer | `PresenterAskTests.No_upstream_mute_is_sent_between_ask_done_and_the_exchange_end`, `BridgeAskTests.Answer_audio_keeps_flowing_while_the_browser_sends_no_mic_frames` |
 | answer wait (all hold re-arms, ceiling) | `PresenterAskTests.Tool_call_outlasting_the_budget_…`, `Every_question_hold_re_arm_…`, site test 19 |
 | reset transition (off-loop close, generation) | `PresenterAskTests.Reset_close_finishing_after_end_…`, `Late_old_session_closed_after_reset_…`, `No_paused_or_suspended_snapshot_after_closed` |
 | atomic start (grace, reconnect, rollback) | `PresenterAskTests.Ask_just_before_grace_expiry_…`, `Mute_refused_at_ask_start_…`, `Transcriber_begin_throwing_…` |
 | mic frame → recorder, not upstream | `PresenterAskTests.Ask_during_narration_…`, `BridgeAskTests.Ask_over_ws_mutes_records_and_bursts_in_order` |
 | recorder → compressed stream | `AskRecorderTests.Silence_run_over_500_ms_becomes_320_ms_…` |
 | every emitter → exchange gate | `PresenterAskTests` site tests 1–19 |
-| Ask done → unmute → burst (loop and wire) | `PresenterAskTests.Ask_done_unmutes_then_queues_the_compressed_burst_in_order`, `BridgeAskTests.Ask_over_ws_…` |
+| Ask done → unmute → ack → lead-in → burst (loop and wire) | `PresenterAskTests.Ask_done_unmutes_then_queues_the_compressed_burst_in_order`, `Burst_is_not_queued_before_the_unmuted_ack`, `Ack_timeout_after_2_s_…`, `End_max_length_or_disconnect_during_the_ack_wait_sends_nothing`, `LiveSessionTests.Unmuted_server_event_raises_InputAudioUnmuted`, `BridgeAskTests.Ask_over_ws_…` |
 | send failure boundary | `PresenterAskTests.Append_refused_at_chunk_n_…`, `BridgeAskTests.Upstream_socket_failure_after_the_burst_was_queued_…`, `End_while_the_burst_is_partly_on_the_wire_…` |
 | burst → answer → check-in → exchange end (deferred once, replay once) | `PresenterAskTests.Answer_then_check_in_then_resume_instruction`, site tests 10 and 15, `Check_in_no_keeps_the_replay_…` |
 | quiet / extend / cap / budget | `PresenterAskTests.Quiet_90_s_*`, `Extend_at_80_s_…`, `Retained_cap_…`, `Answer_budget_expiry_…` |
@@ -1151,14 +1242,14 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
 | event → frame → store → control/toast | `BridgeAskTests.Ask_over_ws_…`, `presenterStore.spec keeps the last ask_state…`, `AskControls.spec shows Listening…`, `Present.spec … toasts` |
 | transcriber port (revisions, debounce) → phrase → done | `PresenterAskTests.Stale_duplicate_or_reversed_revisions_are_ignored`, `Final_update_with_the_phrase_…`, `AskDoneLexiconTests.*` |
 | DI default is disabled (API, both CLI modes) | `StartupTests.Production_container_uses_the_disabled_ask_transcriber`, `CliTests.Owner_and_file_mode_build_…` |
-| real upstream (both halves answered, near-cap latency, interrupt observation) | T1 probe, T8 live run |
+| real upstream (both halves answered, 24 s cap latency, over-cap truncation, interrupt observation) | T1 suite, T8 live run |
 
 ### AC → task matrix
 
 | AC | Tasks |
 |---|---|
 | 1 stop within ~1 s; nothing spoken or delegated until done, across 10 s silence | T1 (mute control, no early answer, interrupt observation), T4 (site tests 1–7, 14, 16), T5 (admission, wire order), T6, T8 (flush latency, no playback) |
-| 2 one answer to the whole question | T1 (both-halves oracle, near-cap, provenance), T4 (burst order, send failure and reset, site 15 provenance, answer wait), T5, T8 |
+| 2 one answer to the whole question | T1 (both-halves oracle, (vii), 24 s cap, no truncation), T4 (burst order, 25 s cap, send failure and reset, answer wait, input flow), T5 (answer flows without mic frames), T8 |
 | 3 check-in then resume; quiet 90 s; Extend | T4 (outcomes, budget, quiet/extend), T6, T8 |
 | 4 from Paused, Trainer; End/disconnect/reconnect clean; idle | T4 (atomic start, sites 8–10 and 18, outcomes, guards, reset serialization), T5 (disconnect/End/max/overflow vs admission and wire), T8 |
 | 5 transcriber port disabled; phrases with a test transcriber | T2 (API + CLI DI), T3, T4 (revisions, debounce) |
@@ -1183,7 +1274,9 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   - Issuing admission items without awaiting each completion → `Admission_calls_the_presenter_one_at_a_time_in_exact_socket_order`.
   - Awaiting a full admission write in the receive loop → `End_frame_with_the_pump_blocked_…`,
     `Full_admission_queue_closes_1011_…`.
-  - Reading check-in yes/no by phase alone → `Delayed_burst_yes_after_check_in_begins_then_real_no_gives_one_stay`.
+  - Reading any check-in delta as yes/no → `Delayed_question_delta_after_check_in_begins_is_ignored`.
+  - Muting upstream during the answer → `No_upstream_mute_is_sent_between_ask_done_and_the_exchange_end`,
+    `Answer_audio_keeps_flowing_while_the_browser_sends_no_mic_frames`.
   - Leaving one `ArmQuestionHold` caller un-routed → `Every_question_hold_re_arm_during_an_exchange_goes_through_the_answer_wait`.
   - Applying a reset completion without a generation check → `Reset_close_finishing_after_end_…`.
   - Gating only new tool calls → site tests 3–6.
@@ -1199,7 +1292,7 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
   - Deciding the utterance end from mic energy → `Phrase_followed_by_trailing_words_within_700_ms_does_not_finish`.
   - Compressing gaps to 0 ms or keeping 10 s gaps → `Silence_run_over_500_ms_becomes_320_ms…`.
   - `>` vs `≥` on the threshold → `Window_at_rms_120_is_voiced_and_119_is_quiet`.
-  - Counting silence toward the cap → `Reports_full_at_120_seconds_retained_…`.
+  - Counting silence toward the cap → `Reports_full_at_25_seconds_of_kept_speech_…`.
   - Disabling the Ask button without the local warning path → `A while muted shows the unmute warning…`.
   - Enter clicking a focused button → `Enter on a focused End button…`.
   - Key repeat finishing the ask → `holding A does not finish the ask it started`.
@@ -1219,7 +1312,9 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
 | 9 | Ask, then **End** (or close the tab) mid-question | Talk ends; no answer afterwards; reopen → idle |
 | 10 | Mute, press **A**; hover the Ask button | Toast "Unmute the microphone to ask a question."; button disabled with the hint |
 | 11 | Vietnamese deck (Khóa 2 Bài 1): ask with a pause | One Vietnamese answer covering the whole question |
-| 12 | End; record `usage` seconds and latencies | Work log entry |
+| 12 | Ask and keep talking past 25 s of speech | "0:0x of speech left" counts down; at the cap the question is sent (toast "25-second speech limit…"); one answer |
+| 13 | During the answer, press **Mute**; then at the check-in press **Continue** | The answer keeps playing to the end; Continue resumes at once |
+| 14 | End; record `usage` seconds and latencies | Work log entry |
 
 ## 8. Rollout / phasing
 
@@ -1237,10 +1332,9 @@ None. These decisions were forced by code facts and need confirmation at G2:
 3. From Paused, the answer uses the Presenting question path, because the 1.5 s paused speech permit
    (`Presenter.cs:1005-1010`, `:1300-1306`) would cut a delegated answer; the check-in decides (P-3).
 4. A 1 s zero tail is appended because the pump fill stalls after audio ahead of real time (`LiveSession.cs:428-442`).
-5. Answer detection ignores output timestamps. Check-in provenance uses the user deltas' `start_ms` against the burst
-   range on the upstream input clock (`LiveSession.cs:444-457`, `:521-522`), subject to T1 confirming that clock; the
-   bounded fallback needs the owner's agreement.
-6. The P-1 cap counts retained audio.
+5. Answer detection ignores output timestamps. Check-in uses the turn-taking rule on loop arrival times (owner P-13),
+   because T1 showed upstream `start_ms` drifting up to 4.3 s past the input clock under upload lag.
+6. The P-1 cap is 25 s of kept speech (owner), because an unpaced burst is ingested only up to about 30 s.
 7. Work started before Ask can only be abandoned, not cancelled (no upstream cancel, research 005:241-244). The
    invariant is "nothing audible or newly acted on", not "the upstream produces nothing".
 8. `SendAudio` success means queued (`LiveSession.cs:729-731`); `sent` is defined as fully queued, and a refused append
@@ -1251,6 +1345,8 @@ None. These decisions were forced by code facts and need confirmation at G2:
     `SuspendUpstreamAsync` awaits `CloseAsync` (`Presenter.cs:2035-2052`), which would block the loop and End.
 11. A full admission queue closes the socket with 1011 instead of blocking the receive loop (P-14). This ends the talk
     when the loop has been wedged for about 5 s.
+12. Upstream output is paced by input audio. The pump keeps input flowing regardless of mute (`LiveSession.cs:405-426`),
+    and the upstream `Mute()` is deferred through the answer phases (P-16).
 
 ## 10. Approval log
 
@@ -1260,5 +1356,13 @@ None. These decisions were forced by code facts and need confirmation at G2:
 | 2026-09-24 | External plan review round 1 (pi gpt-6-sol:high) | 5 blockers + 5 improvements folded in; class fix: single ask-exchange phase consulted by every model-facing emitter, ordered bridge admission — see docs/review/025 |
 | 2026-09-24 | Owner decision C2 | "Record like any question": the ask question's upstream transcript is saved through `SessionRecorder` like any spoken question; no ask audio and no ask-specific transcript store (§2 constraint, §5) |
 | 2026-09-24 | External plan review round 2 (confirmation) | 2 blockers + 3 improvements folded in: input-clock burst provenance for check-in (D6, T1-confirmed, with a stated owner fallback), nonblocking admission with a 1011 overflow close (D7), decline notice + one answer-wait helper with a ceiling (A4), serialized off-loop reset (D8), a one-in-flight admission oracle (B2) — see docs/review/026 |
-| | T1 live probe | variant (A/B), tuned constants, `AnswerStartBudgetMs`, near-cap send duration, provenance check (clock confirmed or fallback agreed), latencies, usage seconds — to be filled by T1 |
 | 2026-09-24 | Owner decision P-14 + plan approved (G2) | Owner accepted the 1011 `backpressure` overflow close (talk ends rather than stalling with End unread); "External review, then approve" — approved after round 2 |
+| 2026-09-24 | T1 live probe (first matrix) | FAIL: a 107 s near-cap burst was truncated upstream (about 30 s ingested); (iv) arrival-order oracle wrong. Plan blocked at T1 (work log) |
+| 2026-09-24 | T1 cap sweep | An unpaced burst is ingested only up to about 30 s; pacing delays the answer and let the model answer during the send (work log) |
+| 2026-09-24 | Owner decision P-1 | Cap at **25 s of kept speech**, sent unpaced; auto-finish at the cap with a toast; UI shows the remaining speech time |
+| 2026-09-24 | Owner decision P-13 | Check-in turn-taking rule (a new utterance after check-in start and 1.5 s of transcript quiet; barge-in allowed; one more follow-up when unclear; Continue always works) replaces `start_ms` provenance. Evidence: `start_ms` drift up to 4.3 s under upload lag; the last question delta arrived around answer start in every run |
+| 2026-09-24 | T1 finding P-16 | Upstream output is paced by input audio; input keeps flowing (mic or pump) through the answer and check-in, and the upstream is never muted then |
+| 2026-09-24 | Owner decision P-17 | Continue button confirmed: shown next to Pause during the answer and check-in; skips the check-in and resumes from the interrupted sentence; additive `answering` state; frame sequence `listening → answering → off` |
+| 2026-09-24 | T1 finding P-18 | The upstream clipped the burst start (burst on the wire at +29 ms, before `unmuted` at +56 ms; vi and en question starts lost). Fix: wait for the `unmuted` ack (≤ 2 s, event-driven), a 200 ms zero lead-in, then the burst; T1 check (viii) "question start present" |
+| 2026-09-24 | T1 suite facts | `AnswerStartBudgetMs` 15,000 (max first answer about 9.7 s at 24 s); send ≤ 100 ms on the wire locally; ingest lag up to 7.7 s; harness = `gpt-audio-1.5` TTS + `scripts/run-ask-probe-suite.ps1`; T1 oracle updated ((iv) by arrival within the answer window, (vii) question finished before the answer ended). Status set after the rerun |
+| 2026-09-24 | T1 PASS — plan unblocked | Suite run 3 (`f2b42d8`): en ×3, vi ×3, cap-24 ×3, cap-28, raw pass (i)–(viii) + reply check; cap-40 fails as expected; unmute ack 38–45 ms; answer start ≤ 11.0 s. Status back to Approved; T2 next |

@@ -702,3 +702,23 @@ and Cli pass with no container. `secrets-guard: clean`.
   with a toast, and the UI shows the remaining speech time. Also: (iv) is redefined by `start_ms` inside the burst
   range, and the probe audio is generated with `gpt-audio-1.5` TTS through an automated suite (en + vi), which
   confirms the cap. Sweep usage ≈ 726 s.
+
+### T1 automated suite (2026-09-24, `gpt-audio-1.5` TTS voice `marin`, `scripts/run-ask-probe-suite.ps1`)
+
+- **Run 1** (`d790ccb`, 728 s): the mechanism worked, but upstream `start_ms` drifted up to +4.3 s past our input
+  clock when the upload lagged (0.4–7.7 s). Owner chose the **turn-taking check-in rule** (a new utterance after
+  ≥ 1.5 s of user quiet), which replaces timestamp provenance.
+- **Run 2** (`188cf6f`, 738 s): English and caps passed; **vi lost the start of the question** (the whole of part 1
+  once, "Chương trình đã thay đổi" in the other runs). The burst reached the wire before `session.input_audio.unmuted`
+  was acknowledged. Fix: wait for the unmute ack (≤ 2 s), then a 200 ms silence lead-in, then the burst. Check
+  (viii), "question start present", added.
+- **Run 3** (`f2b42d8`, 856 s incl. one cap-40 rerun after an upstream start hiccup): **T1 verdict PASS.**
+  - en ×3, vi ×3, cap-24 ×3, cap-28 and raw passed (i)–(viii) and the reply check.
+  - The unmute ack took 38–45 ms.
+  - First answer audio: en/vi 2.3–3.6 s, 24 s questions 9.3–9.4 s, 28 s 11.0 s. `AnswerStartBudgetMs` = 15000.
+  - Over the cap, 40 s fails as expected ("Got it.").
+  - Interrupt: 0.6 s of narration audio still arrived after the mute (the last at +514 ms); no delegation was
+    triggered, so there was nothing to observe there.
+- **Plan updates from T1:** 25 s cap (P-1), turn-taking check-in (P-13), input pacing — never mute upstream during
+  an answer, since the answer only advances with input audio (P-16), Continue button (P-17), unmute-ack wait
+  before the burst (P-18).
