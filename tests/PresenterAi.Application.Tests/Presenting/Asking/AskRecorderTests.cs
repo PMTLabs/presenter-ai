@@ -121,15 +121,16 @@ public sealed class AskRecorderTests
     }
 
     [Fact]
-    public void Reports_full_at_120_seconds_retained_and_ignores_silence_toward_the_cap()
+    public void Reports_full_at_25_seconds_of_kept_speech_and_ignores_silence_toward_the_cap()
     {
         var recorder = new AskRecorder();
-        Assert.False(Feed(recorder, Windows(5_000, Voice)));
+        Assert.Equal(25_000, AskRecorder.MaxRetainedMs);
+        Assert.False(Feed(recorder, Windows(500, Voice)));
         Assert.False(Feed(recorder, Windows(3_000, 0)));
-        Assert.False(Feed(recorder, Windows(950, Voice)));
+        Assert.False(Feed(recorder, Windows(718, Voice)));
         Assert.False(recorder.IsFull);
-        Assert.Equal(119_320, recorder.Stats.KeptMs);
-        Assert.Equal(179_000, recorder.Stats.RecordedMs);
+        Assert.Equal(24_680, recorder.Stats.KeptMs);
+        Assert.Equal(84_360, recorder.Stats.RecordedMs);
 
         Assert.True(Feed(recorder, Windows(50, Voice)));
         Assert.True(recorder.IsFull);
