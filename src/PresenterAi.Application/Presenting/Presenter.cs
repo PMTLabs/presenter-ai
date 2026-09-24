@@ -522,6 +522,9 @@ public sealed partial class Presenter : IPresenter
                     case TrainingEvent training:
                         OnTrainingEvent(training);
                         break;
+                    case AskEvent askEvent:
+                        await OnAskEventAsync(askEvent).ConfigureAwait(false);
+                        break;
                     case Barrier barrier:
                         barrier.Completion.TrySetResult();
                         break;
@@ -638,10 +641,16 @@ public sealed partial class Presenter : IPresenter
     {
         try
         {
-            // Plan 011 T2: ask commands are inert until T4 gives them behaviour, so they record no activity yet.
-            if (command is not (SendAudioCommand or EndCommand or AskCommand)) RecordActivity();
+            if (command is not (SendAudioCommand or EndCommand)) RecordActivity();
             if (command is NextCommand or PrevCommand or GotoCommand or PauseCommand or ResumeCommand or EndCommand)
                 CancelToolConfirmation();
+            // Plan 011: a command that arrives while an ask exchange runs first applies the exchange's command table.
+            if (TryHandleCommandDuringExchange(command, out var handled))
+            {
+                command.Completion.TrySetResult(handled);
+                return;
+            }
+
             var result = command switch
             {
                 NextCommand next => await NavigateAfterReconnectAsync(() => NextCore(next.InvocationCallId)).ConfigureAwait(false),
@@ -656,7 +665,10 @@ public sealed partial class Presenter : IPresenter
                 EndCommand end => await EndAsyncCore(end.Resumable, end.EndReason).ConfigureAwait(false),
                 TrainerModeCommand trainer => SetTrainerModeCore(trainer.OwnerId, trainer.On),
                 TrainOnTurnCommand turn => TrainOnTurnCore(turn.OwnerId, turn.Question, turn.Answer, turn.SlideIndex),
-                AskCommand => false,
+                AskStartCommand => await AskStartCore().ConfigureAwait(false),
+                AskDoneCommand => AskDoneCore("sent"),
+                AskExtendCommand => AskExtendCore(),
+                AskCancelCommand => AskCancelCore(),
                 _ => false
             };
             command.Completion.TrySetResult(result);
@@ -679,6 +691,7 @@ public sealed partial class Presenter : IPresenter
 
         ResetUtterance();
         SetInteraction(Interaction.None);
+        _askTrailingDeltaAt = null;
         _voicedIntervals.Clear();
         _lastVoicedAt = 0;
         _endResumable = false;
@@ -924,6 +937,7 @@ public sealed partial class Presenter : IPresenter
         session.ToolCallRequested += (delegationId, callId, name, arguments) => QueueFromProducer(new ToolCallReceived(session, delegationId, callId, name, arguments));
         session.HostedToolActivity += (delegationId, type, status) => QueueFromProducer(new HostedActivityReceived(session, delegationId, type, status));
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
+        session.InputAudioUnmuted += () => QueueFromProducer(new UnmuteAcked(session));
     }
 
     private void PresentSlide(int index, bool interrupt)
@@ -1007,8 +1021,10 @@ public sealed partial class Presenter : IPresenter
         }
 
         var voiced = AudioLevel.IsVoiced(audio.Bytes);
-        var forwarded = _state == PresenterState.Presenting || (_state == PresenterState.Paused && _speechPermit &&
-            (_permitBarrierMs is null || audio.StartMs is null || audio.StartMs >= _permitBarrierMs));
+        // Site 1 (plan 011): nothing the upstream produces is audible while the audience is asking.
+        var forwarded = ExchangeAllows(ModelAction.ForwardAudio) && (_state == PresenterState.Presenting ||
+            (_state == PresenterState.Paused && _speechPermit &&
+            (_permitBarrierMs is null || audio.StartMs is null || audio.StartMs >= _permitBarrierMs)));
         if (forwarded)
         {
             Audio?.Invoke(new PresenterAudio(audio.Bytes, audio.StartMs, audio.EndMs));
@@ -1089,6 +1105,7 @@ public sealed partial class Presenter : IPresenter
                 _lastAnswerAt = _timeProvider.GetTimestamp();
                 SetInteraction(Interaction.Answering);
                 ArmInteraction(700);
+                MarkExchangeAnswering();
             }
             else if (_interaction != Interaction.WaitingOnSlide)
             {
@@ -1114,6 +1131,14 @@ public sealed partial class Presenter : IPresenter
 
         if (transcript.Role == "user" && (_state is PresenterState.Presenting or PresenterState.Paused) && !string.IsNullOrWhiteSpace(transcript.Delta))
         {
+            // Site 15 (plan 011, P-13): during an exchange a user delta is UI-only unless it opens a check-in reply.
+            if (_exchange is { } exchange)
+            {
+                OnExchangeUserDelta(exchange, transcript);
+                return;
+            }
+
+            if (IsTrailingAskDelta()) return;
             if (_state == PresenterState.Presenting)
             {
                 if (_interaction == Interaction.WaitingOnSlide)
@@ -1183,6 +1208,12 @@ public sealed partial class Presenter : IPresenter
     {
         if (_utterance.Length == 0)
         {
+            return;
+        }
+
+        if (_exchange is { UtteranceOpen: true } exchange)
+        {
+            CompleteExchangeUtterance(exchange);
             return;
         }
 
@@ -1348,6 +1379,7 @@ public sealed partial class Presenter : IPresenter
                     break;
                 }
                 SetInteraction(Interaction.AwaitingCarryOn);
+                MarkExchangeCheckIn();
                 var remaining = FollowUpWaitMs + 700 - (int)_timeProvider.GetElapsedTime(_lastAnswerAt).TotalMilliseconds;
                 if (remaining <= 0)
                 {
@@ -1361,7 +1393,10 @@ public sealed partial class Presenter : IPresenter
                 break;
             case Interaction.AwaitingCarryOn:
                 SetInteraction(Interaction.None);
-                ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
+                if (_exchange is not null)
+                    EndExchange(AskOutcome.Resume, "continued", $"question: no follow-up after {FollowUpWaitMs} ms; resuming");
+                else
+                    ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
                 break;
             case Interaction.AwaitingConfirmQuestion:
                 if (!_endQuestionVoiced) LogMessage("warn", "tool: confirmation question not voiced after 8 s");
@@ -1457,7 +1492,7 @@ public sealed partial class Presenter : IPresenter
         // A delegation that arrives while paused, ending or closed must not make the model talk through that state.
         // A late one after navigation still holds the new slide: GPT-Live speaks its answer regardless (there is no
         // cancel), and the hold keeps the next part from talking over it.
-        if (_state != PresenterState.Presenting)
+        if (_state != PresenterState.Presenting || !ExchangeAllows(ModelAction.OpenDelegationHold))
         {
             return;
         }
@@ -1483,12 +1518,19 @@ public sealed partial class Presenter : IPresenter
             return;
         }
 
+        // Site 4 (plan 011): pre-Ask delegations were forgotten at Ask start; while listening nothing re-arms or continues.
+        if (!ExchangeAllows(ModelAction.DelegatedResponse))
+        {
+            LogMessage("info", $"question: delegated response for {response.DelegationId} ignored while the audience is asking");
+            return;
+        }
+
         var result = _toolRoundTracker.OnDelegatedResponseFinished(response.DelegationId, response.Type);
         switch (result)
         {
             case ToolRoundTracker.ResponseFinishedResult.ToolRound:
                 LogMessage("info", $"question: backend tool round completed for {response.DelegationId}");
-                if (_questionHoldOpen) ArmQuestionHold();
+                if (_questionHoldOpen) ArmAnswerWait();
                 if (_toolRoundTracker.ShouldSendContinueResponses())
                 {
                     TryContinueResponses();
@@ -1521,7 +1563,7 @@ public sealed partial class Presenter : IPresenter
         }
 
         // Give the live model a fresh window to speak the injected answer.
-        ArmQuestionHold();
+        ArmAnswerWait();
     }
 
     private void OnUpstreamError(UpstreamErrorReceived error)
@@ -1555,6 +1597,14 @@ public sealed partial class Presenter : IPresenter
 
         RecordActivity();
 
+        // Site 2 (plan 011): a new tool call while listening is answered busy at once, with no confirmation or permit.
+        if (!ExchangeAllows(ModelAction.AcceptToolCall))
+        {
+            LogMessage("info", "ask: tool call refused (busy)");
+            _session?.SubmitToolOutput(call.CallId, ToolResult.Failure(AskBusyMessage).ToJsonString());
+            return;
+        }
+
         if (_toolRoundTracker.IsCallDuplicate(call.CallId))
         {
             LogMessage("info", $"tool call for {call.CallId} ignored: duplicate call id");
@@ -1567,7 +1617,7 @@ public sealed partial class Presenter : IPresenter
             return;
         }
 
-        if (_questionHoldOpen) ArmQuestionHold();
+        if (_questionHoldOpen) ArmAnswerWait();
         LogMessage("info", $"tool: {call.Name} ({call.CallId}) requested for delegation {call.DelegationId}");
         ToolResolution? resolution = null;
         try
@@ -1720,6 +1770,13 @@ public sealed partial class Presenter : IPresenter
             return;
         }
 
+        // Site 3 (plan 011): no output is submitted while the audience is asking.
+        if (!ExchangeAllows(ModelAction.SubmitToolOutput))
+        {
+            LogMessage("info", $"tool invocation for {completed.CallId} dropped: the audience is asking");
+            return;
+        }
+
         if (_session?.SubmitToolOutput(completed.CallId, result.ToJsonString()) != true)
         {
             LogMessage("warn", $"tool: {completed.CallId} output refused");
@@ -1736,6 +1793,8 @@ public sealed partial class Presenter : IPresenter
 
     private void TryContinueResponses()
     {
+        // Site 6 (plan 011): never a response.create while the audience is asking.
+        if (!ExchangeAllows(ModelAction.ContinueResponses)) return;
         if (_toolRoundTracker.ShouldSendContinueResponses() && _session?.ContinueResponses() == true)
         {
             _toolRoundTracker.OnResponsesContinued();
@@ -1760,6 +1819,7 @@ public sealed partial class Presenter : IPresenter
         _pendingTool = null;
         SetInteraction(Interaction.None);
         ClosePermit();
+        RestoreExchangeAnswerTimers();
         if (reason is not null) LogMessage("info", $"tool: {pending.Tool.Source}.{pending.Tool.Name} {reason}");
         if (reason is not null && pending.Intent is not null) OnScriptEditDeclined();
     }
@@ -1788,7 +1848,8 @@ public sealed partial class Presenter : IPresenter
     private void OnApprovedToolCompleted(ApprovedToolCompleted completed)
     {
         var pending = completed.Pending;
-        if (ReferenceEquals(pending.Session, _session) && pending.Generation == _runGeneration)
+        if (ReferenceEquals(pending.Session, _session) && pending.Generation == _runGeneration &&
+            ExchangeAllows(ModelAction.AnnounceTool))
         {
             _approvedTools[pending.Key] = new ApprovedToolCall(_timeProvider.GetTimestamp(), completed.Result);
             // A script edit was acknowledged when it was enqueued; its tool result is not external data.
@@ -1890,7 +1951,8 @@ public sealed partial class Presenter : IPresenter
 
     private void OnNudge()
     {
-        if (_state != PresenterState.Presenting || _heardOutput || _presentation is null || NarrationHeld)
+        if (_state != PresenterState.Presenting || _heardOutput || _presentation is null || NarrationHeld ||
+            !ExchangeAllows(ModelAction.Nudge))
         {
             return;
         }
@@ -1924,7 +1986,7 @@ public sealed partial class Presenter : IPresenter
 
     private async Task OnWrapUpFallbackAsync()
     {
-        if (_questionHoldOpen)
+        if (_questionHoldOpen || !ExchangeAllows(ModelAction.WrapUpEnd))
         {
             return;
         }
@@ -2058,14 +2120,20 @@ public sealed partial class Presenter : IPresenter
 
     private void AccumulateSegment(double? seconds)
     {
+        var connectedAt = _connectedAt;
+        _connectedAt = null;
+        AccumulateSegment(seconds, connectedAt, publish: true);
+    }
+
+    private void AccumulateSegment(double? seconds, DateTimeOffset? connectedAt, bool publish)
+    {
         _usageConfirmed &= seconds.HasValue;
-        var estimated = _connectedAt is { } connected
+        var estimated = connectedAt is { } connected
             ? Math.Max(0, (_timeProvider.GetUtcNow() - connected).TotalSeconds) : 0;
         _priorEstimatedSeconds += estimated;
         _priorUsageSeconds += seconds ?? estimated;
-        _connectedAt = null;
         _usageSeconds = _priorUsageSeconds;
-        Usage?.Invoke(new PresenterUsage(_usageSeconds, _usageRatio));
+        if (publish) Usage?.Invoke(new PresenterUsage(_usageSeconds, _usageRatio));
     }
 
     private async Task<bool> ReconnectAsync()
@@ -2174,6 +2242,13 @@ public sealed partial class Presenter : IPresenter
 
     private bool UnmuteCore()
     {
+        // Site 14 (plan 011): the upstream stays muted while listening and _muted is unchanged.
+        if (!ExchangeAllows(ModelAction.Unmute))
+        {
+            LogMessage("info", "ask: unmute refused while listening");
+            return false;
+        }
+
         _muted = false;
         if (_state is PresenterState.Presenting or PresenterState.Paused)
         {
@@ -2184,8 +2259,11 @@ public sealed partial class Presenter : IPresenter
         return true;
     }
 
-    private bool SendAudioCore(byte[] pcm16) =>
-        (_state is PresenterState.Presenting or PresenterState.Paused) && !_muted && (_session?.SendAudio(pcm16) ?? false);
+    private bool SendAudioCore(byte[] pcm16)
+    {
+        if (_exchange is { Phase: AskPhase.Listening or AskPhase.Sending } exchange) return RecordAskAudio(exchange, pcm16);
+        return (_state is PresenterState.Presenting or PresenterState.Paused) && !_muted && (_session?.SendAudio(pcm16) ?? false);
+    }
 
     private async Task<bool> EndAsyncCore(bool resumable, string endReason)
     {
@@ -2194,6 +2272,8 @@ public sealed partial class Presenter : IPresenter
             return false;
         }
 
+        // Plan 011: off{ended} precedes closed; no burst, no unmute.
+        EndExchange(AskOutcome.Ended, "ended");
         endReason = _talk?.EndReason ?? endReason;
         Debug.Assert(EndReasons.All.Contains(endReason));
         _requestedEndReason = endReason;
@@ -2263,6 +2343,10 @@ public sealed partial class Presenter : IPresenter
 
     private void OnClosed(string reason, double? seconds, string endReason)
     {
+        EndExchange(AskOutcome.Ended, "ended");
+        _askTrailingDeltaAt = null;
+        // A reset segment whose close has not completed is estimated once here; its late completion only disposes.
+        FoldPendingReset(publish: false);
         CancelRun();
         Debug.Assert(EndReasons.All.Contains(endReason));
         _talkEndedAt ??= _timeProvider.GetUtcNow();
@@ -2328,6 +2412,8 @@ public sealed partial class Presenter : IPresenter
 
     private void OnQuestionHoldElapsed()
     {
+        // Site 11 (plan 011): the answer budget and EndExchange own the hold during an exchange.
+        if (!ExchangeAllows(ModelAction.ReleaseQuestionHold)) return;
         if (!_questionHoldOpen || _interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide or Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer)
         {
             return;
@@ -2340,7 +2426,7 @@ public sealed partial class Presenter : IPresenter
     // model is told to resume the slide; the ordinary timers take over from there.
     private bool HoldBlocksProgress()
     {
-        if (_pendingTool is not null || NarrationHeld) return true;
+        if (_pendingTool is not null || NarrationHeld || !ExchangeAllows(ModelAction.ReleaseQuestionHold)) return true;
         if (!_questionHoldOpen)
         {
             return false;
@@ -2391,6 +2477,7 @@ public sealed partial class Presenter : IPresenter
     private void ArmNudge()
     {
         ClearNudgeTimer();
+        if (!ExchangeAllows(ModelAction.Nudge)) return;
         var generation = ++_nudgeGeneration;
         _nudgeTimer = _timeProvider.CreateTimer(
             _ => QueueFromProducer(new NudgeElapsed(generation)),
@@ -2474,7 +2561,7 @@ public sealed partial class Presenter : IPresenter
         _questionOpenedAt = _timeProvider.GetTimestamp();
         ClearSilenceTimer();
         ClearWrapUpTimer();
-        ArmQuestionHold();
+        ArmAnswerWait();
     }
 
     private void ClearQuestionHold()
@@ -2558,8 +2645,10 @@ public sealed partial class Presenter : IPresenter
     {
         LogMessage("warn", $"limit: {kind} warning, {TalkGuard.WarningLead} s left");
         LimitWarning?.Invoke(new PresenterLimitWarning(kind, TalkGuard.WarningLead));
-        if (_state == PresenterState.Presenting && _session is not null)
-            _session.AppendInstructions(PromptBuilder.LimitWarningInstruction(kind), $"limit-{kind}-warning");
+        // Site 13 (plan 011): the frame above is immediate; the instruction waits for the exchange end.
+        if ((_state == PresenterState.Presenting || _exchange is not null) && _session is not null)
+            EmitOrDefer("limit warning",
+                () => _session?.AppendInstructions(PromptBuilder.LimitWarningInstruction(kind), $"limit-{kind}-warning"));
     }
 
     private int SlideCount => _presentation?.Slides.Count ?? 0;
