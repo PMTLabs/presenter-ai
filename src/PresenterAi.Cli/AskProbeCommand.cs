@@ -212,20 +212,37 @@ internal static class AskProbeCommand
             if (answerStart is not null)
             {
                 answerEnd = await observer.WaitForAnswerEndAsync(answerStart.Value, AnswerEndQuietMs, answerStart.Value + AnswerMaxMs, endSignalTypes, cancellationToken).ConfigureAwait(false);
-                // A delivery stall can continue the answer after the quiet: keep the 15 s window behind the answer's end
-                // as the output-clock rule computes it from what has arrived so far.
-                var capAt = answerStart.Value + AnswerMaxMs + SecondResponseWindowMs;
+                // The upstream's output clock cannot run ahead of the input clock: after a burst that is ahead of wall time
+                // the answer stalls until the pump's silence (or the next append) moves the input on. So the answer has
+                // ended only when, besides the 3 s quiet, the input clock is at least 3 s past the answer's last output
+                // end_ms and nothing new came; the reply goes out 15 s after that end (the (vi) window).
+                var capAt = answerStart.Value + AnswerMaxMs + SecondResponseWindowMs + stats.KeptMs + stats.TailMs;
+                var lastMarkAt = 0L;
                 while (answerEnd is not null && observer.Now < capAt)
                 {
-                    var segments = Segments(askDoneAt, endSignalTypes.Count > 0, endSignalTypes, observer.Snapshot());
+                    if (observer.Now - lastMarkAt >= 250)
+                    {
+                        observer.Untraced(session.MarkInputPosition());
+                        lastMarkAt = observer.Now;
+                    }
+
+                    var snapshot = observer.Snapshot();
+                    var segments = Segments(askDoneAt, endSignalTypes.Count > 0, endSignalTypes, snapshot);
                     var answerEndSoFar = segments.FirstOrDefault(segment => segment.End >= answerStart.Value)?.End ?? answerEnd.Value;
-                    if (observer.Now >= Math.Max(answerEnd.Value, answerEndSoFar) + SecondResponseWindowMs)
+                    var outputEndMs = snapshot.Where(e => e.Kind == EventKind.Assistant && e.At >= askDoneAt).Max(e => e.EndMs);
+                    var inputMs = observer.LatestInputMs();
+                    var inputPassedOutput = outputEndMs is null || (inputMs is { } input && input >= outputEndMs + AnswerEndQuietMs);
+                    if (inputPassedOutput && observer.Now >= Math.Max(answerEnd.Value, answerEndSoFar) + SecondResponseWindowMs)
                     {
                         break;
                     }
 
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
+
+                await output.WriteLineAsync(
+                    $"reply wait: answer output clock ended at {Ms(observer.Snapshot().Where(e => e.Kind == EventKind.Assistant && e.At >= askDoneAt).Max(e => e.EndMs))} ms, " +
+                    $"input clock at {Ms(observer.LatestInputMs())} ms when the reply went out").ConfigureAwait(false);
             }
 
             // 4a. The live reply ("yes") at real-time pace.
@@ -887,7 +904,7 @@ internal static class AskProbeCommand
         return pcm;
     }
 
-    private static byte[] Noise(double seconds)
+    internal static byte[] Noise(double seconds)
     {
         // Uniform integers in [-35, 35] have an RMS of about 20.5: audible room noise, well under the voice threshold.
         var random = new Random(11);
@@ -1029,6 +1046,7 @@ internal static class AskProbeCommand
         private readonly List<ProbeEvent> _events = [];
         private readonly Dictionary<string, (long SentMs, long At)> _marks = [];
         private readonly HashSet<string> _pendingBackend = [];
+        private readonly HashSet<string> _untracedMarks = [];
         private readonly ILiveSession _session;
         private double? _usage;
 
@@ -1084,7 +1102,16 @@ internal static class AskProbeCommand
                     _marks[id] = (sentMs, Now);
                 }
 
-                Add(new ProbeEvent(Now, EventKind.Mark, $"{id} at input {sentMs} ms"));
+                bool traced;
+                lock (_gate)
+                {
+                    traced = !_untracedMarks.Contains(id);
+                }
+
+                if (traced)
+                {
+                    Add(new ProbeEvent(Now, EventKind.Mark, $"{id} at input {sentMs} ms"));
+                }
             };
             if (session is LiveSession live)
             {
@@ -1123,6 +1150,29 @@ internal static class AskProbeCommand
             lock (_gate)
             {
                 return [.. _events.OrderBy(e => e.At)];
+            }
+        }
+
+        /// <summary>A polling mark: it updates <see cref="LatestInputMs"/> but is left out of the trace.</summary>
+        public void Untraced(string? markId)
+        {
+            if (markId is null)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                _untracedMarks.Add(markId);
+            }
+        }
+
+        /// <summary>The input clock (ms appended upstream) at the latest mark that came back from the send loop.</summary>
+        public long? LatestInputMs()
+        {
+            lock (_gate)
+            {
+                return _marks.Count == 0 ? null : _marks.Values.MaxBy(mark => mark.At).SentMs;
             }
         }
 
@@ -1289,7 +1339,7 @@ internal sealed record ProbeDeck(
         "Kết quả năm đầu tiên",
         "Trong năm đầu tiên, chương trình đã chuyển văn phòng Đà Nẵng sang hợp đồng không giấy. Việc mở rộng tại Hà Nội tốn 4,2 tỷ đồng.",
         "Chương trình đã thay đổi gì ở văn phòng Đà Nẵng trong năm đầu tiên,",
-        "và việc mở rộng ở Hà Nội tốn bao nhiêu tiền?",
+        "và việc mở rộng ở Hà Nội tốn bao nhiêu?",
         ["Đà Nẵng", "Da Nang", "Danang"],
         ["Hà Nội", "Hanoi"],
         ["không giấy", "không dùng giấy", "điện tử", "paperless"],
@@ -1297,7 +1347,7 @@ internal sealed record ProbeDeck(
 }
 
 /// <summary>Reads the PCM payload of a RIFF/WAVE file that is 24 kHz, mono, 16-bit PCM.</summary>
-internal static class PcmWav
+internal static partial class PcmWav
 {
     public static string? TryReadPcm16Mono24k(byte[] file, out byte[] pcm)
     {
