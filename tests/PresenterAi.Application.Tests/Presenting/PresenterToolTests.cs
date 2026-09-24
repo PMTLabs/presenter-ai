@@ -115,6 +115,8 @@ public sealed class PresenterToolTests
     public async Task Confirmed_end_tool_closes_only_after_question_is_ready()
     {
         await using var harness = Create();
+        PresenterClosed? closed = null;
+        harness.Presenter.Closed += value => closed = value;
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
         session.RaiseToolCall("d", "ask", "end_presentation", "{\"confirmed\":false}");
@@ -128,6 +130,8 @@ public sealed class PresenterToolTests
         await harness.WaitForSentAsync(s => s.Type == "close");
         await harness.Flush();
         Assert.Equal("idle", harness.Presenter.Snapshot().State);
+        Assert.Equal(EndReasons.User, closed?.EndReason);
+        Assert.Equal("close_requested", closed?.Reason);
     }
 
     [Fact]

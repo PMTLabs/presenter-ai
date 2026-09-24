@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Time.Testing;
 using PresenterAi.Infrastructure.Tools.Mcp;
 using PresenterAi.Infrastructure.Tools;
 using System.Net;
@@ -22,6 +23,7 @@ public sealed class IntegrationApiFactory(
     string primaryModel = "gpt-live-1") : WebApplicationFactory<Program>
 {
     public ILoggerProvider? ToolLogSink { get; set; }
+    public FakeTimeProvider? Clock { get; set; }
     public bool AllowLoopbackTools { get; set; }
     public string? ToolCredentialKey { get; set; }
     public string? ToolRedirectUri { get; set; }
@@ -58,6 +60,12 @@ public sealed class IntegrationApiFactory(
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
+        if (Clock is not null)
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton<TimeProvider>(Clock);
+            });
         if (ToolCredentialKey is not null) builder.UseSetting("Tools:CredentialKey", ToolCredentialKey);
         if (ToolRedirectUri is not null) builder.UseSetting("Tools:OAuthRedirectUri", ToolRedirectUri);
         if (ToolLogSink is not null)

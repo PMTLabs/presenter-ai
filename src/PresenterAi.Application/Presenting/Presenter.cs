@@ -133,6 +133,7 @@ public sealed class Presenter : IPresenter
     private CancellationTokenSource? _startCts;
     private CancellationTokenSource? _runCts;
     private string? _pendingEndReason;
+    private long _startAbortEpoch;
     private bool _suspended;
     private string? _endDiagnostic;
 
@@ -193,7 +194,7 @@ public sealed class Presenter : IPresenter
     public async Task<PresenterStartResult> StartAsync(
         string id, int? fromIndex, string ownerId, int? maxMinutes, CancellationToken cancellationToken = default)
     {
-        var command = new StartCommand(ownerId, id, fromIndex, maxMinutes);
+        var command = new StartCommand(ownerId, id, fromIndex, maxMinutes, Volatile.Read(ref _startAbortEpoch));
         ThrowIfDisposed();
         await WriteAsync(command, cancellationToken).ConfigureAwait(false);
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -240,7 +241,8 @@ public sealed class Presenter : IPresenter
 
     private void CancelConnect(string reason)
     {
-        Interlocked.CompareExchange(ref _pendingEndReason, reason, null);
+        if (Snapshot().State != "idle")
+            Interlocked.CompareExchange(ref _pendingEndReason, reason, null);
         try { Volatile.Read(ref _connectCts)?.Cancel(); }
         catch (ObjectDisposedException) { }
         try { Volatile.Read(ref _startCts)?.Cancel(); }
@@ -249,6 +251,7 @@ public sealed class Presenter : IPresenter
 
     public void AbortPendingStart()
     {
+        Interlocked.Increment(ref _startAbortEpoch);
         try { Volatile.Read(ref _connectCts)?.Cancel(); }
         catch (ObjectDisposedException) { }
         try { Volatile.Read(ref _startCts)?.Cancel(); }
@@ -280,6 +283,7 @@ public sealed class Presenter : IPresenter
         }
 
         CancelConnect(EndReasons.Shutdown);
+        AbortPendingStart();
         CancelRun();
 
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -546,6 +550,11 @@ public sealed class Presenter : IPresenter
 
     private async Task ProcessStartAsync(StartCommand command)
     {
+        if (command.AbortEpoch != Volatile.Read(ref _startAbortEpoch) || Volatile.Read(ref _disposed) != 0)
+        {
+            command.Completion.TrySetResult(new PresenterStartResult(false, command.Id, null, null, null));
+            return;
+        }
         try
         {
             command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex,
@@ -611,6 +620,7 @@ public sealed class Presenter : IPresenter
         _approvedTools.Clear();
         _hostedStarted.Clear();
         _requestedEndReason = null;
+        Interlocked.Exchange(ref _pendingEndReason, null);
         _runCts?.Dispose();
         _runCts = new CancellationTokenSource();
         _talkStartedAt = _timeProvider.GetUtcNow();
@@ -670,6 +680,8 @@ public sealed class Presenter : IPresenter
         var scriptCap = _presentation.Meta.MaxMinutes ?? _settings.MaxTalkMinutes;
         if (scriptCap > _settings.MaxTalkCeilingMinutes)
             LogMessage("warn", $"limit: clamped {scriptCap} → {_settings.MaxTalkCeilingMinutes} min");
+        if (maxMinutes > _settings.MaxTalkCeilingMinutes)
+            LogMessage("warn", $"limit: clamped override {maxMinutes} → {_settings.MaxTalkCeilingMinutes} min");
         var effectiveCap = Math.Min(scriptCap, _settings.MaxTalkCeilingMinutes);
         if (maxMinutes is >= 5) effectiveCap = Math.Min(effectiveCap, maxMinutes.Value);
         _guard.Tighten(effectiveCap);
@@ -2513,7 +2525,8 @@ public sealed class Presenter : IPresenter
         public string? InvocationCallId { get; set; }
     }
 
-    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex, int? MaxMinutes) : PresenterEvent
+    private sealed record StartCommand(string OwnerId, string Id, int? FromIndex, int? MaxMinutes,
+        long AbortEpoch) : PresenterEvent
     {
         public TaskCompletionSource<PresenterStartResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }

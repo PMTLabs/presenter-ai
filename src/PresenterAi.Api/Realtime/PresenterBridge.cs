@@ -24,6 +24,7 @@ public sealed class PresenterBridge : IAsyncDisposable
     // Beyond this 90-second observation bound cleanup proceeds; a run lost in that window is best-effort
     // recording (D8).
     private static readonly TimeSpan StartObservationBound = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan StartObservationCleanupBound = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ServerCloseBound = TimeSpan.FromSeconds(1);
     private TimeSpan _takeOverBound = TimeSpan.FromSeconds(15);
     private const int MaxAuthenticationFrameBytes = 4 * 1024;
@@ -169,7 +170,8 @@ public sealed class PresenterBridge : IAsyncDisposable
                         _presenter.AbortPendingStart();
                         await ObserveEndAsync(endReason).ConfigureAwait(false);
                         // Never release ownership while the observer can still open or record an upstream.
-                        await connection.WaitForStartObservationCompletionAsync().ConfigureAwait(false);
+                        await connection.WaitForStartObservationCompletionAsync(_logger,
+                            StartObservationCleanupBound).ConfigureAwait(false);
                     }
                     if (_presenter.Snapshot().State != "idle")
                         await ObserveEndAsync(endReason).ConfigureAwait(false);
@@ -448,7 +450,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         try
         {
             var result = await task.ConfigureAwait(false);
-            if (result.Started)
+            if (result.Started && !connection.StartObservationExpired)
             {
                 if (recorder is not null)
                 {
@@ -539,9 +541,8 @@ public sealed class PresenterBridge : IAsyncDisposable
     {
         Current?.Abort(EndReasons.Shutdown);
         _presenter.AbortPendingStart();
-        if (_presenter.Snapshot().State != "idle")
-            await ObserveEndAsync(EndReasons.Shutdown).WaitAsync(EndToIdleBound, cancellationToken)
-                .ConfigureAwait(false);
+        await ObserveEndAsync(EndReasons.Shutdown).WaitAsync(EndToIdleBound, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     internal Task CurrentReleasedForTestAsync() => Current?.Released.Task ?? Task.CompletedTask;
@@ -573,7 +574,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         private ITimer? _pingTimer;
         private ITimer? _deadlineTimer;
         private readonly object _heartbeatLock = new();
-        private DateTimeOffset _lastInbound;
+        private long _lastInboundTicks;
         private string? _abortReason;
         internal CancellationToken Aborted => _abort.Token;
         internal string? AbortReason => Volatile.Read(ref _abortReason);
@@ -586,6 +587,8 @@ public sealed class PresenterBridge : IAsyncDisposable
         private bool _recorderActive;
         private readonly object _startLock = new();
         private Task? _startObservation;
+        private int _startObservationExpired;
+        internal bool StartObservationExpired => Volatile.Read(ref _startObservationExpired) != 0;
         internal TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool TakeOverRequested => Volatile.Read(ref _takeOverRequested) != 0;
 
@@ -596,7 +599,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             _clock = clock;
             _heartbeatInterval = heartbeatInterval;
             _heartbeatTimeout = heartbeatTimeout;
-            _lastInbound = clock.GetUtcNow();
+            _lastInboundTicks = clock.GetUtcNow().UtcTicks;
             UserId = userId;
             _logger = logger;
             _beforeSocketSendAsync = beforeSocketSendAsync;
@@ -620,20 +623,14 @@ public sealed class PresenterBridge : IAsyncDisposable
             }
         }
 
-        internal void MarkAlive()
-        {
-            lock (_heartbeatLock)
-            {
-                _lastInbound = _clock.GetUtcNow();
-                _deadlineTimer?.Change(_heartbeatTimeout, Timeout.InfiniteTimeSpan);
-            }
-        }
+        internal void MarkAlive() => Interlocked.Exchange(ref _lastInboundTicks, _clock.GetUtcNow().UtcTicks);
 
         private void CheckDeadline()
         {
             lock (_heartbeatLock)
             {
-                var remaining = _lastInbound + _heartbeatTimeout - _clock.GetUtcNow();
+                var remaining = new DateTimeOffset(Interlocked.Read(ref _lastInboundTicks), TimeSpan.Zero)
+                    + _heartbeatTimeout - _clock.GetUtcNow();
                 if (remaining > TimeSpan.Zero)
                 {
                     _deadlineTimer?.Change(remaining, Timeout.InfiniteTimeSpan);
@@ -675,9 +672,9 @@ public sealed class PresenterBridge : IAsyncDisposable
             catch (OperationCanceledException)
             {
             }
-            catch (WebSocketException exception)
+            catch (Exception exception)
             {
-                _logger.LogDebug(exception, "Browser WebSocket writer stopped");
+                _logger.LogError(exception, "Browser WebSocket writer failed");
                 Abort(EndReasons.WriterFailed);
             }
             finally
@@ -786,11 +783,17 @@ public sealed class PresenterBridge : IAsyncDisposable
             return true;
         }
 
-        internal async Task WaitForStartObservationCompletionAsync()
+        internal async Task WaitForStartObservationCompletionAsync(ILogger logger, TimeSpan bound)
         {
             Task? observation;
             lock (_startLock) observation = _startObservation;
-            if (observation is not null) await observation.ConfigureAwait(false);
+            if (observation is null) return;
+            try { await observation.WaitAsync(bound, _clock).ConfigureAwait(false); }
+            catch (TimeoutException exception)
+            {
+                Volatile.Write(ref _startObservationExpired, 1);
+                logger.LogError(exception, "Presenter start observer did not finish within {Bound}", bound);
+            }
         }
 
         internal ISessionRecorder? PrepareRecorder(ISessionRecorderFactory factory, IPresenter presenter)

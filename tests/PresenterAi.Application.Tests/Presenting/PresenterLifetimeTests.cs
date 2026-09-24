@@ -68,6 +68,57 @@ public sealed class PresenterLifetimeTests
     }
 
     [Fact]
+    public async Task Abort_pending_start_rejects_a_queued_start_without_creating_an_upstream()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var created = 0;
+        await using var presenter = new Presenter((_, _) => { created++; return new FakeSession(); },
+            async (_, id, _) =>
+            {
+                entered.TrySetResult();
+                await gate.Task;
+                return new LoadedPresentation(id,
+                    new PresentationMeta(id, "Title", "deck", "show", null, null, null),
+                    [new Slide(0, 1, "One", "Narration.", null)], null);
+            }, new PresenterSettings(MaxTalkMinutes: 5), new FakeTimeProvider());
+        var first = presenter.StartAsync("deck", null, "owner");
+        await entered.Task;
+        var queued = presenter.StartAsync("deck", null, "owner");
+        presenter.AbortPendingStart();
+        gate.TrySetResult();
+        Assert.False((await first).Started);
+        Assert.False((await queued).Started);
+        Assert.Equal(0, created);
+    }
+
+    [Fact]
+    public async Task Shutdown_with_a_queued_start_does_not_connect_after_the_loop_unblocks()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var created = 0;
+        var presenter = new Presenter((_, _) => { created++; return new FakeSession(); },
+            async (_, id, _) =>
+            {
+                entered.TrySetResult();
+                await gate.Task;
+                return new LoadedPresentation(id,
+                    new PresentationMeta(id, "Title", "deck", "show", null, null, null),
+                    [new Slide(0, 1, "One", "Narration.", null)], null);
+            }, new PresenterSettings(MaxTalkMinutes: 5), new FakeTimeProvider());
+        var first = presenter.StartAsync("deck", null, "owner");
+        await entered.Task;
+        var queued = presenter.StartAsync("deck", null, "owner");
+        var shutdown = presenter.DisposeAsync();
+        gate.TrySetResult();
+        await shutdown;
+        Assert.False((await first).Started);
+        Assert.False((await queued).Started);
+        Assert.Equal(0, created);
+    }
+
+    [Fact]
     public async Task Abort_pending_start_cancels_presentation_load()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

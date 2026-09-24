@@ -180,6 +180,51 @@ public sealed class SessionRecorderTests(PostgresFixture postgres, RedisFixture 
         session.EndedAt.Should().Be(endedAt);
     }
 
+    [Theory]
+    [InlineData(0.2, 500, 1)]
+    [InlineData(10, 200, 10)]
+    public async Task Unconfirmed_usage_uses_elapsed_estimate_even_with_partial_seconds(
+        double elapsed, double partialSeconds, int expected)
+    {
+        var owner = await SeedPresentationAsync("unconfirmed-estimate");
+        await using var services = new ServiceCollection()
+            .AddLogging()
+            .AddDbContext<PresenterAiDbContext>(options => options.UseNpgsql(postgres.ConnectionString))
+            .BuildServiceProvider();
+        await using var recorder = new SessionRecorder(services.GetRequiredService<IServiceScopeFactory>(),
+            TimeProvider.System, NullLogger<SessionRecorder>.Instance);
+        var presenter = new RecorderPresenter();
+        recorder.Attach(presenter);
+        var started = new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero);
+        await recorder.BeginAsync(owner.Id, new PresenterStartResult(true, owner.Presentations.Single().Id,
+            "primary", "sess_estimate", "model", ConnectedAt: started));
+        presenter.RaiseClosed(new PresenterClosed("close_timeout", partialSeconds, EndReasons.User,
+            UsageConfirmed: false, EstimatedSeconds: 0, StartedAt: started,
+            EndedAt: started.AddSeconds(elapsed)));
+        await recorder.EndAsync("disconnect");
+        await using var context = CreateContext();
+        var row = await context.Sessions.SingleAsync(s => s.UserId == owner.Id);
+        row.UsageSeconds.Should().Be(expected);
+        row.EstimatedSeconds.Should().Be(expected);
+        row.UsageConfirmed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Heartbeat_abort_persists_heartbeat_end_reason()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        var owner = await SeedPresentationAsync("heartbeat-row");
+        var clock = new FakeTimeProvider();
+        await using var factory = new IntegrationApiFactory(postgres, redis, fake.Url) { Clock = clock };
+        using var socket = await ConnectAsync(factory, owner.Id);
+        await StartAsync(socket, owner.Presentations.Single().Id);
+        clock.Advance(TimeSpan.FromSeconds(45));
+        await WaitForAsync(async () => await SessionFinalisedAsync(owner.Id, expected: 1));
+        var row = await ReadSingleSessionAsync(owner.Id);
+        row.EndReason.Should().Be(EndReasons.Heartbeat);
+        // Abort closes the transport before its writer can deliver a closed frame.
+    }
+
     [Fact]
     public async Task Bridge_end_without_closed_stores_disconnect_and_unconfirmed()
     {

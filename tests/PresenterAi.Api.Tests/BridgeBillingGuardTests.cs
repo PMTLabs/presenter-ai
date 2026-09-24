@@ -28,7 +28,9 @@ public sealed class BridgeBillingGuardTests
             factory.Services.GetRequiredService<TestSessionRecorderFactory>().Recorders.Single().EndCount == 1);
         closed!.EndReason.Should().Be(EndReasons.Heartbeat);
         var recorder = factory.Services.GetRequiredService<TestSessionRecorderFactory>().Recorders.Single();
+        // TestSessionRecorderFactory is in-memory; persistent-row coverage lives in SessionRecorderTests.
         recorder.LastClosed!.EndReason.Should().Be(EndReasons.Heartbeat);
+        // Abort closes the socket before the queued closed frame can be written; no frame is receivable here.
         presenter.Snapshot().State.Should().Be("idle");
         fake.ConnectionCount.Should().Be(0);
         using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
@@ -51,6 +53,29 @@ public sealed class BridgeBillingGuardTests
         await factory.AdvanceAndSettleAsync(TimeSpan.FromSeconds(30));
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
         await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong");
+    }
+
+    [Fact]
+    public async Task Many_frames_do_not_extend_the_heartbeat_after_the_last_frame()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        factory.UseFakeClock();
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        var presenter = factory.Services.GetRequiredService<IPresenter>();
+        PresenterClosed? closed = null;
+        presenter.Closed += value => closed = value;
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["state"]?.GetValue<string>() == "presenting");
+        for (var i = 0; i < 100; i++)
+            await BridgeTestSupport.SendAsync(socket, "{\"type\":\"pong\"}");
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong");
+        await factory.AdvanceAndSettleAsync(TimeSpan.FromSeconds(44));
+        closed.Should().BeNull();
+        await factory.AdvanceAndSettleAsync(TimeSpan.FromSeconds(2));
+        await BridgeTestSupport.WaitForAsync(() => closed is not null);
+        closed!.EndReason.Should().Be(EndReasons.Heartbeat);
     }
 
     [Theory]
@@ -127,7 +152,7 @@ public sealed class BridgeBillingGuardTests
         factory.Services.GetRequiredService<PresenterBridge>().ConfigureOutboundForTest(500, () =>
         {
             if (Interlocked.CompareExchange(ref fail, 0, 1) == 1)
-                throw new System.Net.WebSockets.WebSocketException("simulated writer failure");
+                throw new InvalidOperationException("simulated writer failure");
             return Task.CompletedTask;
         });
         using var socket = await BridgeTestSupport.ConnectAsync(factory);
@@ -140,8 +165,27 @@ public sealed class BridgeBillingGuardTests
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
         await BridgeTestSupport.WaitForAsync(() => closed is not null);
         closed!.EndReason.Should().Be(EndReasons.WriterFailed);
+        await BridgeTestSupport.WaitForAsync(() => fake.ConnectionCount == 0);
         using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
         next.State.Should().Be(System.Net.WebSockets.WebSocketState.Open);
+    }
+
+    [Fact]
+    public async Task Take_over_produces_takeover_with_provider_reason()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        using var first = await BridgeTestSupport.ConnectAsync(factory);
+        var presenter = factory.Services.GetRequiredService<IPresenter>();
+        PresenterClosed? closed = null;
+        presenter.Closed += value => closed = value;
+        await BridgeTestSupport.SendAsync(first, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["state"]?.GetValue<string>() == "presenting");
+        using var second = await BridgeTestSupport.ConnectWithTicketAsync(factory, takeOver: true);
+        await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["code"]?.GetValue<string>() == "taken_over");
+        await BridgeTestSupport.WaitForAsync(() => closed is not null);
+        closed!.EndReason.Should().Be(EndReasons.Takeover);
+        closed.Reason.Should().Be("client_request");
     }
 
     [Fact]
@@ -187,6 +231,32 @@ public sealed class BridgeBillingGuardTests
         queued.StartGate.TrySetResult();
         using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
         queued.Snapshot().State.Should().Be("idle");
+        fake.ConnectionCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Expired_observer_that_never_completes_releases_the_slot_after_cleanup_bound()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake, queuedPresenter: true);
+        factory.UseFakeClock();
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        var queued = factory.Services.GetRequiredService<TestQueuedPresenter>();
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await queued.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await socket.CloseOutputAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,
+            "disconnect", CancellationToken.None);
+        await factory.AdvanceAndSettleAsync(TimeSpan.FromSeconds(90));
+        // Let the timeout continuation arm its second bound before advancing the fake clock.
+        using var contender = await BridgeTestSupport.ConnectWithTicketAsync(factory);
+        await BridgeTestSupport.ReceiveUntilAsync(contender, frame => frame["code"]?.GetValue<string>() == "busy");
+        await factory.AdvanceAndSettleAsync(TimeSpan.FromSeconds(90));
+        for (var i = 0; i < 20; i++)
+            await factory.AdvanceAndSettleAsync(TimeSpan.FromSeconds(1));
+        using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
+        fake.ConnectionCount.Should().Be(0);
+        queued.StartGate.TrySetResult();
+        await Task.Yield();
         fake.ConnectionCount.Should().Be(0);
     }
 

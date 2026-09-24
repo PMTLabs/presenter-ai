@@ -354,11 +354,6 @@ public sealed class SessionRecorder : ISessionRecorder
             {
                 session.UsageSeconds = ToRoundedSeconds(closed.Seconds ?? estimatedSeconds);
             }
-            else if (closed.Seconds.HasValue && closed.EstimatedSeconds == 0)
-            {
-                // Legacy PresenterClosed(reason, seconds) where UsageConfirmed defaulted to false
-                session.UsageSeconds = ToRoundedSeconds(closed.Seconds.Value);
-            }
             else
             {
                 session.UsageSeconds = estimatedSeconds;
@@ -497,7 +492,7 @@ public sealed class SessionRecorder : ISessionRecorder
     }
 
     private static int ToRoundedSeconds(double seconds) =>
-        Convert.ToInt32(Math.Round(Math.Max(0, seconds), MidpointRounding.AwayFromZero));
+        seconds > 0 ? Math.Max(1, Convert.ToInt32(Math.Round(seconds, MidpointRounding.AwayFromZero))) : 0;
 
     public async ValueTask DisposeAsync()
     {

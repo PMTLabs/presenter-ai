@@ -96,6 +96,30 @@ public sealed class PresenterTalkGuardTests
     }
 
     [Fact]
+    public async Task End_reason_is_reset_between_talks_and_idle_end_does_not_poison_next_talk()
+    {
+        await using var h = Create();
+        await h.Presenter.StartAsync("deck", null, "owner");
+        await h.Presenter.EndAsync();
+        await h.Settle();
+        Assert.Equal(EndReasons.User, h.Closed[0].EndReason);
+        await h.Presenter.EndAsync(); // no talk is active
+        await h.Presenter.StartAsync("deck", null, "owner");
+        h.Clock.Advance(TimeSpan.FromMinutes(5));
+        await h.Settle();
+        Assert.Equal(EndReasons.MaxLength, h.Closed[1].EndReason);
+        Assert.Equal("close_requested", h.Closed[1].Reason);
+    }
+
+    [Fact]
+    public async Task Override_above_ceiling_warns_even_when_script_cap_is_lower()
+    {
+        await using var h = Create(10);
+        await h.Presenter.StartAsync("deck", null, "owner", 200);
+        Assert.Contains(h.Logs, log => log.Level == "warn" && log.Message.Contains("clamped override 200"));
+    }
+
+    [Fact]
     public async Task Above_ceiling_cap_is_clamped_with_a_warning_log()
     {
         await using var h = Create(150);
@@ -210,23 +234,16 @@ public sealed class PresenterTalkGuardTests
         Assert.Equal(EndReasons.User, h.Closed[0].EndReason);
     }
 
-    [Theory]
-    [MemberData(nameof(ExternalReasons))]
-    public async Task End_reasons_are_in_the_vocabulary(string reason)
+    [Fact]
+    public async Task End_button_maps_to_user()
     {
         await using var h = Create();
         await h.Presenter.StartAsync("deck", null, "owner");
-        await h.Presenter.EndAsync(reason);
+        await h.Presenter.EndAsync();
         await h.Settle();
-        var closed = Assert.Single(h.Closed);
-        Assert.Equal(reason, closed.EndReason);
-        Assert.Equal("close_requested", closed.Reason);
-        Assert.Contains(closed.EndReason, EndReasons.All);
+        Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
+        Assert.Equal("close_requested", h.Closed[0].Reason);
     }
-
-    public static IEnumerable<object[]> ExternalReasons() => EndReasons.All
-        .Where(reason => reason is not EndReasons.MaxLength and not EndReasons.Idle)
-        .Select(reason => new object[] { reason });
 
     [Fact]
     public async Task Unrequested_provider_close_maps_to_upstream_lost()
