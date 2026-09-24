@@ -1,7 +1,7 @@
 # 011 — Press-to-ask
 
 **Date:** 2026-09-24
-**Status:** Approved (2026-09-24)
+**Status:** Blocked at T1 (2026-09-24) — approved 2026-09-24; T1 near-cap burst truncated upstream, see work log
 **Size:** M (presenter event loop, a pure recorder/compressor, a transcriber port, ordered `/ws` admission, web
 presenter app, a CLI live probe, docs; no persistence, no HTTP change).
 **Area:** `src/PresenterAi.{Application,Api,Cli,Infrastructure}`, `web/app`, `docs/`.

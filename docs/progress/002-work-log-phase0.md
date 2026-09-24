@@ -650,3 +650,33 @@ and Cli pass with no container. `secrets-guard: clean`.
 - **Verification:** build 0/0; .NET Application 52, Infrastructure 31 + 3 skipped, Api 137, Cli 11, Integration
   40 + 1 skipped; web shared 18 and app 22, lint and both builds; four orchestrator mutations, each caught.
 - **No round 3.** The follow-ups are listed in `docs/review/007` under "Fixes".
+
+## 2026-09-24 — plan 011 T1 live probe (`presenter-cli ask-probe`, Azure `gpt-live-1`, delegation `gpt-5.6-luna`)
+
+- **Code:** `560153d` recorder, input marker, probe; `6ecda36` trace and scoring; `7b5d27a` answer segmentation by
+  output-clock continuity. English WAVs from Windows SAPI (no vi voice on this host; vi run not done).
+- **Runs** (variant `vad`, 10 s gap, tail 1000 ms, gap-keep 320 ms; kept audio 6.4 s unless noted):
+
+  | Run | (i) | (ii) | (iii) | (iv) | (v) | (vi) | Ask done → answer audio | usage s |
+  |---|---|---|---|---|---|---|---|---|
+  | en-1 (pre-trace) | P | P | P | scoring bug | cut by 3 s-quiet bug | — | 2600 ms | 49.8 |
+  | en-2 (trace) | P | P | P | P | complete answer, mis-split by 3 s quiet | — | 3144 ms | 49.0 |
+  | en-3 | P | P | P | F: 5 assistant events arrived between the halves | P | P | 1992 ms | 56.0 |
+  | en-4 | P | P | P | F: 2 events between | P ("It moved the It moved the…" restart) | P | 2449 ms | 57.6 |
+  | en-5 | P | P | P | P | P | P | 3105 ms | 58.0 |
+  | near-cap (106.5 s kept) | P | P | P | F: question never transcribed | F: "Okay. Go ahead." | P | 32893 ms | 59.0 |
+  | raw control (17.6 s) | P | P | P | F: 16 events between | P | P | 2555 ms | 53.8 |
+  | observe-interrupt | narration: 0.7 s audio arrived after mute (last +672 ms); delegation: none triggered | | | | | | | 81.6 |
+
+- **Findings:**
+  - Short asks work: every 6.4 s burst was answered once with both facts; the 10 s thinking gap never split it.
+    Mute is silent. Provenance by `start_ms` holds for short bursts.
+  - (iv) as written (arrival order) fails because the upstream streams its answer while the burst transcript is
+    still arriving: assistant transcript precedes the last user deltas. Not a split: the user deltas are all in the
+    burst range and the answer covers both halves.
+  - Mid-answer delivery stalls of 3+ s occur (en-2); an answer is one response on the output clock.
+  - **Near-cap FAILS:** the upstream input clock advanced only ~38 s for a 107.5 s burst (reply "yes" appended at
+    local 125200 ms got `start_ms` 55600); transcription stopped at the background preamble at ~50400 ms. The
+    upstream ingested about real time and discarded the rest, so the question was never heard.
+- **T1 result: FAIL** (near-cap; (iv) oracle). Plan 011 status set to "Blocked at T1"; returned to the owner.
+  Total probe usage ≈ 465 s.
