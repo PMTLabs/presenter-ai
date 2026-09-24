@@ -487,19 +487,26 @@ public sealed class LiveSessionTests
         await using var server = await FakeLiveServer.StartAsync();
         await using var session = Create(server, new FakeTimeProvider());
         var acks = 0;
-        session.InputAudioUnmuted += () => Interlocked.Increment(ref acks);
+        string? ackedId = null;
+        session.InputAudioUnmuted += id =>
+        {
+            Volatile.Write(ref ackedId, id);
+            Interlocked.Increment(ref acks);
+        };
         ILiveSession port = session;
         var viaPort = 0;
-        port.InputAudioUnmuted += () => Interlocked.Increment(ref viaPort);
+        port.InputAudioUnmuted += _ => Interlocked.Increment(ref viaPort);
         await session.ConnectAsync();
 
         session.Mute().Should().BeTrue();
         await EventuallyAsync(() => server.ReceivedSnapshot().Any(EventTypeIs("session.input_audio.mute")));
         Volatile.Read(ref acks).Should().Be(0, "a mute is not acknowledged as unmuted");
 
-        session.Unmute().Should().BeTrue();
+        session.Unmute(out var unmuteId).Should().BeTrue();
+        unmuteId.Should().StartWith("unmute-");
 
         (await EventuallyAsync(() => Volatile.Read(ref acks) == 1)).Should().BeTrue();
+        Volatile.Read(ref ackedId).Should().Be(unmuteId, "the ack carries the unmute's echoed client_event_id (review r1 #1)");
         Volatile.Read(ref viaPort).Should().Be(1, "the ILiveSession event is the one the presenter subscribes to");
     }
 

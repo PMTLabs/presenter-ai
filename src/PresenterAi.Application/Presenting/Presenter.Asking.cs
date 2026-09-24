@@ -42,6 +42,13 @@ public sealed partial class Presenter
     private long? _askTrailingDeltaAt;
     private long _resetGeneration;
     private PendingReset? _pendingReset;
+    // Review r1 #1: every presenter unmute and every ack of the current session is counted, so an ack without an
+    // echoed id is attributed FIFO; an ack with one must match the ask's own unmute id.
+    private ILiveSession? _unmuteLedgerSession;
+    private long _unmutesSent;
+    private long _unmuteAcks;
+    // Review r1 #2: deferred notices whose exchange ended while the upstream was reset; appended once after reconnect.
+    private readonly List<ModelNotice> _noticesForReconnect = [];
 
     /// <summary>Press-to-ask state for the <c>ask_state</c> frame (plan 011 §4.3); raised on the loop.</summary>
     public event Action<PresenterAskState>? AskState;
@@ -87,9 +94,65 @@ public sealed partial class Presenter
         return true;
     }
 
-    private void EmitOrDefer(string name, Action emit)
+    /// <summary>
+    /// Appends a model-facing instruction now, or keeps it (as content, not bound to a session) until the exchange ends.
+    /// </summary>
+    private void EmitOrDefer(string name, string content, string eventId)
     {
-        if (!DeferUntilExchangeEnds(new ModelNotice(name, emit))) emit();
+        var notice = new ModelNotice(name, content, eventId);
+        if (!DeferUntilExchangeEnds(notice)) _session?.AppendInstructions(notice.Content, notice.EventId);
+    }
+
+    /// <summary>
+    /// Appends deferred notices once. With the upstream reset (send failure) they wait for the reconnect instead of
+    /// being appended to no session (review r1 #2).
+    /// </summary>
+    private void DeliverNotices(IReadOnlyList<ModelNotice> notices)
+    {
+        if (notices.Count == 0) return;
+        if (_session is { } session)
+        {
+            foreach (var notice in notices) session.AppendInstructions(notice.Content, notice.EventId);
+            return;
+        }
+
+        _noticesForReconnect.AddRange(notices);
+        LogMessage("info", $"ask: {notices.Count} deferred notices wait for the reconnect");
+    }
+
+    /// <summary>Called once a reconnect attached a new session: the notices kept over the reset are appended once.</summary>
+    private void DeliverNoticesAfterReconnect()
+    {
+        if (_noticesForReconnect.Count == 0 || _session is not { } session) return;
+        var notices = _noticesForReconnect.ToArray();
+        _noticesForReconnect.Clear();
+        foreach (var notice in notices) session.AppendInstructions(notice.Content, notice.EventId);
+        LogMessage("info", $"ask: {notices.Length} deferred notices appended after the reconnect");
+    }
+
+    /// <summary>Every presenter unmute goes through here, so its ack can be attributed (review r1 #1).</summary>
+    private bool SendUnmute(ILiveSession session, out string? eventId, out long ordinal)
+    {
+        SyncUnmuteLedger(session);
+        var sent = session.Unmute(out eventId);
+        ordinal = sent ? ++_unmutesSent : 0;
+        return sent;
+    }
+
+    private void SyncUnmuteLedger(ILiveSession session)
+    {
+        if (ReferenceEquals(_unmuteLedgerSession, session)) return;
+        _unmuteLedgerSession = session;
+        _unmutesSent = 0;
+        _unmuteAcks = 0;
+    }
+
+    /// <summary>Disposes the ask's transcription exactly once: ownership moves out of the exchange (review r1 #5).</summary>
+    private static void ReleaseTranscription(AskExchange exchange)
+    {
+        var transcription = exchange.Transcription;
+        exchange.Transcription = null;
+        transcription?.Dispose();
     }
 
     // ---- Commands -------------------------------------------------------------------------------------------------
@@ -115,8 +178,10 @@ public sealed partial class Presenter
             return false;
         }
 
-        // A start in a later phase ends that exchange first (Stay), then starts a new one.
-        if (_exchange is not null) EndExchange(AskOutcome.Stay, "paused");
+        // Owner decision (review r1 #4): Ask during the answer is a follow-up question in the same exchange; it keeps
+        // the resume point of the first ask. Only an Ask during the unmute-ack wait ends that exchange first (Stay).
+        var followUp = _exchange is { Phase: AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn } ? _exchange : null;
+        if (_exchange is not null && followUp is null) EndExchange(AskOutcome.Stay, "paused");
 
         if (_suspended)
         {
@@ -142,7 +207,7 @@ public sealed partial class Presenter
         {
             if (_state == PresenterState.Paused) _guard?.Pause();
             LogMessage("warn", "ask: upstream mute refused; not asking");
-            EmitAskOff(null, "unavailable");
+            RefuseStart(followUp, "unavailable");
             return false;
         }
 
@@ -155,9 +220,9 @@ public sealed partial class Presenter
         catch (Exception exception)
         {
             LogMessage("warn", $"ask: transcriber failed to begin ({exception.GetType().Name})");
-            if (!session.Unmute()) ResetUpstream();
+            if (!SendUnmute(session, out _, out _)) ResetUpstream();
             else if (_state == PresenterState.Paused) _guard?.Pause();
-            EmitAskOff(null, "unavailable");
+            RefuseStart(followUp, "unavailable");
             return false;
         }
 
@@ -166,15 +231,27 @@ public sealed partial class Presenter
             transcription.Updated += update => QueueFromProducer(new AskTranscriptChanged(askId, update));
         }
 
-        var from = StateName(_state);
-        var exchange = new AskExchange(askId, new AskRecorder(), transcription, _timeProvider.GetTimestamp())
+        var from = followUp is null ? StateName(_state) : "answer, follow-up";
+        AskExchange exchange;
+        if (followUp is not null)
         {
-            ReplayDue = _replayOnResume,
-            ReplayChanged = _replayOnResumeChanged
-        };
-        _replayOnResume = false;
-        _replayOnResumeChanged = false;
-        _exchange = exchange;
+            // The same exchange listens again: deferred notices, replay-due and the resume point carry over.
+            exchange = followUp;
+            exchange.BeginFollowUp(askId, new AskRecorder(), transcription, _timeProvider.GetTimestamp());
+            StopAskBudget();
+        }
+        else
+        {
+            exchange = new AskExchange(askId, new AskRecorder(), transcription, _timeProvider.GetTimestamp(), _heardOutput)
+            {
+                ReplayDue = _replayOnResume,
+                ReplayChanged = _replayOnResumeChanged
+            };
+            _replayOnResume = false;
+            _replayOnResumeChanged = false;
+            _exchange = exchange;
+        }
+
         _askTrailingDeltaAt = null;
         ResetUtterance();
         // P-9: work started before Ask is abandoned, as navigation does: no result is submitted and no continue sent.
@@ -200,12 +277,19 @@ public sealed partial class Presenter
         return true;
     }
 
+    /// <summary>A refused start reports <c>off</c>; a refused follow-up keeps its answer running and re-announces it.</summary>
+    private void RefuseStart(AskExchange? followUp, string reason)
+    {
+        EmitAskOff(null, reason);
+        if (followUp is not null) EmitAnswering(followUp);
+    }
+
     private bool AskDoneCore(string reason)
     {
         if (_exchange is not { Phase: AskPhase.Listening } exchange) return false;
         StopAskTick();
         StopAskPhrase();
-        exchange.Transcription?.Dispose();
+        ReleaseTranscription(exchange);
         if (!exchange.Recorder.HasSpeech)
         {
             EndExchange(AskOutcome.Stay, "empty");
@@ -217,12 +301,14 @@ public sealed partial class Presenter
         exchange.SentElapsedMs = ElapsedMs(exchange.StartedAt);
         exchange.Phase = AskPhase.Sending;
         exchange.AwaitingUnmuteAck = true;
-        if (_session is not { } session || !session.Unmute())
+        if (_session is not { } session || !SendUnmute(session, out var unmuteId, out var unmuteOrdinal))
         {
             FailSend(0, exchange.Chunks.Count + 1);
             return false;
         }
 
+        exchange.UnmuteEventId = unmuteId;
+        exchange.UnmuteOrdinal = unmuteOrdinal;
         exchange.UpstreamMuted = false;
         // P-18: the loop is free while the upstream acknowledges the unmute; the first of the ack or the timeout sends.
         var generation = ++_askAckGeneration;
@@ -324,9 +410,26 @@ public sealed partial class Presenter
         return true;
     }
 
-    private void OnUnmuteAcked(ILiveSession session)
+    /// <summary>
+    /// An upstream unmute ack. Only the ack of this ask's own unmute sends the burst (review r1 #1): an echoed
+    /// <c>client_event_id</c> must equal the id this ask's unmute sent; an ack without one is attributed FIFO over every
+    /// unmute the presenter sent on this session, so an older ask's (or a user unmute's) late ack is consumed as debt.
+    /// </summary>
+    private void OnUnmuteAcked(ILiveSession session, string? clientEventId)
     {
-        if (!ReferenceEquals(session, _session) || _exchange is not { Phase: AskPhase.Sending, AwaitingUnmuteAck: true } exchange) return;
+        if (!ReferenceEquals(session, _session)) return;
+        SyncUnmuteLedger(session);
+        var ordinal = ++_unmuteAcks;
+        if (_exchange is not { Phase: AskPhase.Sending, AwaitingUnmuteAck: true } exchange) return;
+        var own = clientEventId is not null && exchange.UnmuteEventId is not null
+            ? clientEventId == exchange.UnmuteEventId
+            : ordinal >= exchange.UnmuteOrdinal;
+        if (!own)
+        {
+            LogMessage("info", "ask: unmute ack of an earlier unmute ignored");
+            return;
+        }
+
         SendBurst(exchange);
     }
 
@@ -379,8 +482,7 @@ public sealed partial class Presenter
         exchange.Phase = AskPhase.AwaitingAnswer;
         exchange.AwaitingAnswerSince = _timeProvider.GetTimestamp();
         ArmAnswerWait();
-        AskState?.Invoke(new PresenterAskState("answering", exchange.SentElapsedMs, null, null, true,
-            exchange.Transcription is not null, exchange.SendReason));
+        EmitAnswering(exchange);
     }
 
     /// <summary>P-12: a refused unmute or append ends the ask <c>send_failed</c> (never <c>sent</c>) and resets the upstream.</summary>
@@ -481,7 +583,11 @@ public sealed partial class Presenter
             return;
         }
 
-        if (exchange.Phase == AskPhase.CheckIn && quiet)
+        // Review r1 #3: a pending tool confirmation in an answer phase takes a spoken yes/no by the same rule.
+        var confirming = _pendingTool is not null &&
+            _interaction is Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer &&
+            exchange.Phase is AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn;
+        if ((exchange.Phase == AskPhase.CheckIn || confirming) && quiet)
         {
             ResetUtterance();
             exchange.UtteranceOpen = true;
@@ -516,6 +622,25 @@ public sealed partial class Presenter
         ResetUtterance();
         exchange.UtteranceOpen = false;
         var command = tooLong ? null : VoiceCommandMatcher.Match(phrase);
+        if (_pendingTool is not null && _interaction is Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer)
+        {
+            // Review r1 #3: only yes or no settle the confirmation; nothing else (navigation included) acts.
+            switch (command?.Intent)
+            {
+                case VoiceCommandIntent.Yes:
+                    LogMessage("info", "ask: tool confirmation answered yes");
+                    ApproveToolConfirmation();
+                    return;
+                case VoiceCommandIntent.No:
+                    LogMessage("info", "ask: tool confirmation answered no");
+                    CancelToolConfirmation("declined");
+                    return;
+                default:
+                    LogMessage("info", "ask: unclear confirmation reply; left to the timeout");
+                    return;
+            }
+        }
+
         switch (command?.Intent)
         {
             case VoiceCommandIntent.Yes or VoiceCommandIntent.Resume:
@@ -610,7 +735,7 @@ public sealed partial class Presenter
         StopAskAck();
         StopAskBudget();
         StopAskPhrase();
-        exchange.Transcription?.Dispose();
+        ReleaseTranscription(exchange);
         exchange.Chunks = null;
         if (exchange.UtteranceOpen) ResetUtterance();
         var deferred = exchange.Deferred.ToArray();
@@ -618,11 +743,17 @@ public sealed partial class Presenter
         var wasListening = exchange.Phase is AskPhase.Listening or AskPhase.Sending;
         _askTrailingDeltaAt = outcome is AskOutcome.Resume or AskOutcome.Stay ? exchange.LastUserDeltaAt : null;
 
-        var unmuteFailed = false;
         if (outcome != AskOutcome.Ended && _session is { } session)
         {
-            if (exchange.UpstreamMuted && !_muted) unmuteFailed = !session.Unmute();
-            else if (!exchange.UpstreamMuted && _muted) session.Mute();
+            if (exchange.UpstreamMuted && !_muted)
+            {
+                // A refused unmute resets before the notices are delivered, so they wait for the reconnect.
+                if (!SendUnmute(session, out _, out _)) ResetUpstream();
+            }
+            else if (!exchange.UpstreamMuted && _muted)
+            {
+                session.Mute();
+            }
         }
 
         if (wasListening && outcome is AskOutcome.Stay or AskOutcome.Navigated && reason != "send_failed")
@@ -632,11 +763,11 @@ public sealed partial class Presenter
         switch (outcome)
         {
             case AskOutcome.Resume:
-                foreach (var notice in deferred) notice.Emit();
-                ResumeAfterExchange(exchange.ReplayDue, exchange.ReplayChanged, resumeMessage ?? "ask: resuming");
+                DeliverNotices(deferred);
+                ResumeAfterExchange(exchange, resumeMessage ?? "ask: resuming");
                 break;
             case AskOutcome.Stay:
-                foreach (var notice in deferred) notice.Emit();
+                DeliverNotices(deferred);
                 if (exchange.ReplayDue)
                 {
                     _replayOnResume = true;
@@ -651,11 +782,16 @@ public sealed partial class Presenter
         }
 
         EmitAskOff(exchange, reason);
-        if (unmuteFailed) ResetUpstream();
     }
 
-    private void ResumeAfterExchange(bool replayDue, bool replayChanged, string message)
+    /// <summary>
+    /// Resumes narration from the point the first ask interrupted: <see cref="AskExchange.NarrationHeard"/> is taken at
+    /// that ask and kept across follow-ups, so answer audio never counts as narration (owner decision r1 #4).
+    /// </summary>
+    private void ResumeAfterExchange(AskExchange exchange, string message)
     {
+        var replayDue = exchange.ReplayDue;
+        var replayChanged = exchange.ReplayChanged;
         if (NarrationHeld)
         {
             ClearQuestionHold();
@@ -673,9 +809,10 @@ public sealed partial class Presenter
             return;
         }
 
-        if (_heardOutput)
+        if (exchange.NarrationHeard)
         {
-            ResumeAfterQuestion(message);
+            ResumeAfterQuestion(message,
+                exchange.FollowUps > 0 ? PromptBuilder.ResumeAfterFollowUpInstruction() : null);
             return;
         }
 
@@ -774,7 +911,6 @@ public sealed partial class Presenter
             }
             else
             {
-                exchange.Transcription?.Dispose();
                 EndExchange(AskOutcome.Stay, "quiet_cancelled");
             }
 
@@ -792,7 +928,7 @@ public sealed partial class Presenter
                 OnAskTick(tick.Generation);
                 break;
             case UnmuteAcked acked:
-                OnUnmuteAcked(acked.Session);
+                OnUnmuteAcked(acked.Session, acked.ClientEventId);
                 break;
             case UnmuteAckTimedOut timedOut:
                 OnUnmuteAckTimedOut(timedOut.Generation);
@@ -854,12 +990,16 @@ public sealed partial class Presenter
         var stats = exchange.Recorder.Stats;
         AskState?.Invoke(new PresenterAskState("listening", ElapsedMs(exchange.StartedAt),
             Math.Max(0, AskQuietTimeoutMs - QuietMs(exchange)), Math.Max(0, AskRecorder.MaxRetainedMs - stats.KeptMs),
-            exchange.Recorder.HasSpeech, exchange.Transcription is not null, null));
+            exchange.Recorder.HasSpeech, exchange.Transcribing, null));
     }
+
+    private void EmitAnswering(AskExchange exchange) =>
+        AskState?.Invoke(new PresenterAskState("answering", exchange.SentElapsedMs, null, null, true,
+            exchange.Transcribing, exchange.SendReason));
 
     private void EmitAskOff(AskExchange? exchange, string reason) =>
         AskState?.Invoke(new PresenterAskState("off", exchange is null ? 0 : ElapsedMs(exchange.StartedAt), null, null,
-            exchange?.Recorder.HasSpeech ?? false, exchange?.Transcription is not null, reason));
+            exchange?.Recorder.HasSpeech ?? false, exchange?.Transcribing ?? false, reason));
 
     private static string Seconds(long milliseconds) => (milliseconds / 1000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
 
@@ -886,14 +1026,23 @@ public sealed partial class Presenter
         WrapUpEnd
     }
 
-    private sealed record ModelNotice(string Name, Action Emit);
+    /// <summary>A deferred model-facing instruction, kept as content so it survives an upstream reset (review r1 #2).</summary>
+    private sealed record ModelNotice(string Name, string Content, string EventId);
 
-    private sealed class AskExchange(string id, AskRecorder recorder, IAskTranscription? transcription, long startedAt)
+    private sealed class AskExchange(string id, AskRecorder recorder, IAskTranscription? transcription, long startedAt,
+        bool narrationHeard)
     {
-        public string Id { get; } = id;
-        public AskRecorder Recorder { get; } = recorder;
-        public IAskTranscription? Transcription { get; } = transcription;
-        public long StartedAt { get; } = startedAt;
+        public string Id { get; private set; } = id;
+        public AskRecorder Recorder { get; private set; } = recorder;
+        /// <summary>Owned by the exchange until <see cref="ReleaseTranscription"/> takes and disposes it once.</summary>
+        public IAskTranscription? Transcription { get; set; } = transcription;
+        public bool Transcribing { get; private set; } = transcription is not null;
+        public long StartedAt { get; private set; } = startedAt;
+        /// <summary>The resume point: narration audio of the slide was heard before the FIRST ask (kept over follow-ups).</summary>
+        public bool NarrationHeard { get; } = narrationHeard;
+        public int FollowUps { get; private set; }
+        public string? UnmuteEventId { get; set; }
+        public long UnmuteOrdinal { get; set; }
         public AskPhase Phase { get; set; } = AskPhase.Listening;
         /// <summary>Sub-phase of Sending: the unmute is enqueued and the burst waits for its ack (P-18).</summary>
         public bool AwaitingUnmuteAck { get; set; }
@@ -915,6 +1064,32 @@ public sealed partial class Presenter
         public string? LatestText { get; set; }
         /// <summary>The phrase-stripped question of an ask finished by phrase; logged by length only (P-7).</summary>
         public string? Question { get; set; }
+
+        /// <summary>A follow-up ask during the answer: listen again in the same exchange (owner decision r1 #4).</summary>
+        public void BeginFollowUp(string askId, AskRecorder askRecorder, IAskTranscription? askTranscription, long now)
+        {
+            Id = askId;
+            Recorder = askRecorder;
+            Transcription = askTranscription;
+            Transcribing = askTranscription is not null;
+            StartedAt = now;
+            FollowUps++;
+            Phase = AskPhase.Listening;
+            AwaitingUnmuteAck = false;
+            UpstreamMuted = true;
+            LastVoicedAt = null;
+            LastExtendAt = now;
+            Chunks = null;
+            SendReason = null;
+            SentElapsedMs = 0;
+            UnmuteEventId = null;
+            UnmuteOrdinal = 0;
+            UtteranceOpen = false;
+            FollowUpUsed = false;
+            LastRevision = 0;
+            LatestText = null;
+            Question = null;
+        }
     }
 
     private sealed record PendingReset(ILiveSession Session, long Generation, DateTimeOffset? ConnectedAt);
@@ -927,7 +1102,7 @@ public sealed partial class Presenter
 
     private abstract record AskEvent : PresenterEvent;
     private sealed record AskTickElapsed(long Generation) : AskEvent;
-    private sealed record UnmuteAcked(ILiveSession Session) : AskEvent;
+    private sealed record UnmuteAcked(ILiveSession Session, string? ClientEventId) : AskEvent;
     private sealed record UnmuteAckTimedOut(long Generation) : AskEvent;
     private sealed record AskBudgetElapsed(long Generation) : AskEvent;
     private sealed record UpstreamResetClosed(ILiveSession Session, long Generation, double? Seconds, bool Failed) : AskEvent;

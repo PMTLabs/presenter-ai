@@ -692,6 +692,7 @@ public sealed partial class Presenter : IPresenter
         ResetUtterance();
         SetInteraction(Interaction.None);
         _askTrailingDeltaAt = null;
+        _noticesForReconnect.Clear();
         _voicedIntervals.Clear();
         _lastVoicedAt = 0;
         _endResumable = false;
@@ -937,7 +938,7 @@ public sealed partial class Presenter : IPresenter
         session.ToolCallRequested += (delegationId, callId, name, arguments) => QueueFromProducer(new ToolCallReceived(session, delegationId, callId, name, arguments));
         session.HostedToolActivity += (delegationId, type, status) => QueueFromProducer(new HostedActivityReceived(session, delegationId, type, status));
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
-        session.InputAudioUnmuted += () => QueueFromProducer(new UnmuteAcked(session));
+        session.InputAudioUnmuted += clientEventId => QueueFromProducer(new UnmuteAcked(session, clientEventId));
     }
 
     private void PresentSlide(int index, bool interrupt)
@@ -1830,6 +1831,7 @@ public sealed partial class Presenter : IPresenter
         _pendingTool = null;
         SetInteraction(Interaction.None);
         ClosePermit();
+        RestoreExchangeAnswerTimers();
         var startedAt = _timeProvider.GetTimestamp();
         // A script edit is enqueued here, on the loop, from the intent captured with the question; the tool run below
         // only produces the acknowledgement.
@@ -2157,6 +2159,7 @@ public sealed partial class Presenter : IPresenter
         _suspended = false;
         if (_muted) _session.Mute();
         OnTrainingSessionReady(reconnected: true);
+        DeliverNoticesAfterReconnect();
         LogMessage("info", $"resume: reconnected via {connection.Label}");
         UpstreamStatus?.Invoke(new PresenterUpstreamStatus("live"));
         PublishSnapshot();
@@ -2250,9 +2253,9 @@ public sealed partial class Presenter : IPresenter
         }
 
         _muted = false;
-        if (_state is PresenterState.Presenting or PresenterState.Paused)
+        if (_state is PresenterState.Presenting or PresenterState.Paused && _session is { } session)
         {
-            _session?.Unmute();
+            SendUnmute(session, out _, out _);
         }
 
         PublishSnapshot();
@@ -2345,6 +2348,8 @@ public sealed partial class Presenter : IPresenter
     {
         EndExchange(AskOutcome.Ended, "ended");
         _askTrailingDeltaAt = null;
+        if (_noticesForReconnect.Count > 0) LogMessage("info", $"ask: dropped {_noticesForReconnect.Count} deferred notices");
+        _noticesForReconnect.Clear();
         // A reset segment whose close has not completed is estimated once here; its late completion only disposes.
         FoldPendingReset(publish: false);
         CancelRun();
@@ -2440,7 +2445,7 @@ public sealed partial class Presenter : IPresenter
         return true;
     }
 
-    private void ResumeAfterQuestion(string message)
+    private void ResumeAfterQuestion(string message, string? instruction = null)
     {
         LogMessage("info", message);
         ClearQuestionHold();
@@ -2448,7 +2453,7 @@ public sealed partial class Presenter : IPresenter
         if (_heardOutput)
         {
             _session?.AppendInstructions(
-                PromptBuilder.ResumeAfterQuestionInstruction(),
+                instruction ?? PromptBuilder.ResumeAfterQuestionInstruction(),
                 $"slide-{_slideIndex + 1}-resume-{++_resumeSequence}");
             ArmAfterVoice();
         }
@@ -2647,8 +2652,7 @@ public sealed partial class Presenter : IPresenter
         LimitWarning?.Invoke(new PresenterLimitWarning(kind, TalkGuard.WarningLead));
         // Site 13 (plan 011): the frame above is immediate; the instruction waits for the exchange end.
         if ((_state == PresenterState.Presenting || _exchange is not null) && _session is not null)
-            EmitOrDefer("limit warning",
-                () => _session?.AppendInstructions(PromptBuilder.LimitWarningInstruction(kind), $"limit-{kind}-warning"));
+            EmitOrDefer("limit warning", PromptBuilder.LimitWarningInstruction(kind), $"limit-{kind}-warning");
     }
 
     private int SlideCount => _presentation?.Slides.Count ?? 0;

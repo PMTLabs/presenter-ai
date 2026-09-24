@@ -361,8 +361,7 @@ public sealed partial class Presenter
     {
         // Site 18 (plan 011): deferred while an ask exchange runs.
         var eventId = $"edit-declined-{_slideIndex + 1}";
-        EmitOrDefer("edit declined",
-            () => _session?.AppendInstructions(PromptBuilder.ScriptEditDeclinedInstruction(), eventId));
+        EmitOrDefer("edit declined", PromptBuilder.ScriptEditDeclinedInstruction(), eventId);
     }
 
     // ---- Queue, hold, reconcile -------------------------------------------------------------------------------------
@@ -378,8 +377,7 @@ public sealed partial class Presenter
         // Site 8 (plan 011): during an ask exchange the notice waits for its end, and so does the hold's flush and
         // instruction (EndExchange re-enters the hold if the slide is still held).
         if (_state == PresenterState.Presenting && NarrationHeld && ExchangeAllows(ModelAction.EnterHold)) EnterHold();
-        EmitOrDefer("edit pending",
-            () => _session?.AppendInstructions(PromptBuilder.ScriptEditPendingInstruction(), $"edit-{id}-pending"));
+        EmitOrDefer("edit pending", PromptBuilder.ScriptEditPendingInstruction(), $"edit-{id}-pending");
         ScriptEdit?.Invoke(new PresenterScriptEdit(id, ScriptEditStatus.Queued, intent.Targets, null, null, null));
         RecordActivity();
         ArmEditKeepAlive();
@@ -487,8 +485,7 @@ public sealed partial class Presenter
         {
             // Site 9 (plan 011): deferred while an ask exchange runs.
             var eventId = $"edit-failed-{settled.First(item => item.Outcome.Status == ScriptEditStatus.Failed).Edit.Id}";
-            EmitOrDefer("edit failed",
-                () => _session?.AppendInstructions(PromptBuilder.ScriptEditFailedInstruction(), eventId));
+            EmitOrDefer("edit failed", PromptBuilder.ScriptEditFailedInstruction(), eventId);
         }
 
         // 3. Replay or release the current slide.

@@ -69,5 +69,13 @@ internal sealed class TestAskTranscription(string askId) : IAskTranscription
     public Task PublishAsync(long revision, string text, bool final = false) =>
         Task.Run(() => Updated?.Invoke(new AskTranscriptUpdate(revision, text, final)));
 
-    public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
+    /// <summary>
+    /// Review r1 #5: the port does not promise idempotent disposal, so a second call throws; the presenter must dispose
+    /// each transcription exactly once.
+    /// </summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            throw new ObjectDisposedException(nameof(TestAskTranscription), "disposed twice");
+    }
 }

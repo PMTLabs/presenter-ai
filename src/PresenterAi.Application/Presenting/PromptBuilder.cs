@@ -159,6 +159,13 @@ public static class PromptBuilder
     public static string ResumeAfterQuestionInstruction() =>
         "Return to the talk with a short, natural transition of your own, then restart the sentence you were in; if the slide was finished, say only the transition.";
 
+    /// <summary>
+    /// Plan 011 (owner decision r1 #4): after a follow-up question asked during an answer, return to the narration
+    /// sentence the first question interrupted, not to the cut-off answer.
+    /// </summary>
+    public static string ResumeAfterFollowUpInstruction() =>
+        "Return to the talk with a short, natural transition of your own, then restart the narration sentence you were in before the first question; do not continue an earlier answer; if the slide was finished, say only the transition.";
+
     public static string EndConfirmationInstruction() =>
         "Ask the audience briefly: Shall I end the presentation now? Then wait for their answer. Do not end the talk yourself.";
 

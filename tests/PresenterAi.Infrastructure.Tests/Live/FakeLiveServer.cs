@@ -357,13 +357,15 @@ public sealed class FakeLiveServer : IAsyncDisposable
                 return;
             case "session.input_audio.unmute":
                 _inputMuted = false;
+                // The upstream echoes the unmute's event id as client_event_id (T1 trace: "unmute-3").
+                var unmuteId = message["event_id"]?.GetValue<string>();
                 if (UnmuteAckGate is { } ackGate)
                 {
-                    _ = SendAfterAsync(ackGate.Task, socket, new JsonObject { ["type"] = "session.input_audio.unmuted" }, cancellationToken);
+                    _ = SendAfterAsync(ackGate.Task, socket, new JsonObject { ["type"] = "session.input_audio.unmuted", ["client_event_id"] = unmuteId }, cancellationToken);
                     return;
                 }
 
-                await SendAsync(socket, new JsonObject { ["type"] = "session.input_audio.unmuted" }, cancellationToken);
+                await SendAsync(socket, new JsonObject { ["type"] = "session.input_audio.unmuted", ["client_event_id"] = unmuteId }, cancellationToken);
                 return;
             case "session.close":
                 if (!IgnoreClose)

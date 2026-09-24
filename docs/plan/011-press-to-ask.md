@@ -268,8 +268,13 @@ user Pause in `AwaitingAnswer`/`Answering`/`CheckIn` ends it with `Stay`; in `Li
 | `Navigated` | dropped (logged `ask: dropped N deferred notices`) | dropped: the navigation presents its own slide | the navigation runs |
 | `Ended` | dropped | dropped | End/close as today |
 
-**Emitter sites — every one consults the exchange** (T4 has one gated test per row, with the triggering completion or
-event arriving **after** Ask start):
+**Emitter sites — every one consults the exchange** (T4 has one scenario test per row, with the triggering completion
+or event arriving **after** Ask start). The gates are **layered defences**, not isolating oracles: for several rows
+(sites 1, 3–7, 11, 12, 17) the precondition is already closed by the Ask start itself (Paused state, closed permit,
+cleared tracker, bumped run generation, cleared timers), so removing that one `ExchangeAllows` consult leaves the suites
+green. Nothing reachable re-opens those preconditions after Ask, so no cheap scenario can isolate them; the mutation
+table of `docs/research/010-plan-011-wiring-audit.md` records which gates are pinned alone (e.g. sites 2 and 14) and
+which are layered (review 027, finding 7):
 
 | # | Site (code) | Policy while an exchange runs |
 |---|---|---|
@@ -290,7 +295,7 @@ event arriving **after** Ask start):
 | 15 | `OnTranscript` → assembler / hold (`:1110-1128`), incl. the out-of-range GoTo reply (`:1199-1211`) and the "model speaking" command filter (`:1188`, `:1193-1197`) | **Turn-taking rule (P-13).** Before `CheckIn`, every user delta is UI-only: no assembler, no hold reset, no `_answerVoiced` reset. In `CheckIn`, a delta **opens a new utterance** only if it arrives (loop time) after `CheckIn` began **and** at least 1,500 ms after the previous user delta of any kind. Every non-qualifying delta, e.g. a late fragment of the question, stays UI-only and restarts the 1.5 s quiet window. A qualifying utterance may start while the check-in is still being spoken (barge-in), so the existing "ignored (model speaking)" filter does not apply to it. Its intent is filtered **right after matching**, before the GoTo range branch: only Yes/No/Resume/Pause act; anything else is unclear (see `CheckIn` above), never navigation or End. `start_ms` is not used |
 | 16 | Tool-originated commands (`InvocationCallId`: Next/Prev/Goto/Pause/Resume/ConfirmEnd) | `Listening`: refused. Later: navigation ends the exchange `Navigated` |
 | 17 | `OnWrapUpFallbackAsync` (`:1920`) | Already returns while the hold is open; the exchange keeps `_questionHoldOpen` set |
-| 18 | `OnScriptEditDeclined` (`Presenter.Training.cs:360-363`), reached from a `revise_script` confirmation that is declined or times out (`Presenter.cs:1363-1368`, `:1752-1759`) during `AwaitingAnswer`/`Answering` | Deferred notice |
+| 18 | `OnScriptEditDeclined` (`Presenter.Training.cs:360-363`), reached from a `revise_script` confirmation that is declined or times out (`Presenter.cs:1363-1368`, `:1752-1759`) during `AwaitingAnswer`/`Answering` | Deferred notice. **Voice confirmation in the answer phases (owner decision, review 027):** while a tool confirmation is pending in `AwaitingAnswer`/`Answering`/`CheckIn`, a user delta opens a reply by the site-15 turn-taking rule (a new utterance after 1.5 s of user-transcript quiet; late question fragments stay UI-only). Only Yes approves and No declines; anything else, navigation included, is left to the confirmation timeout. Once it settles, the answer's 700 ms quiet timer resumes, so the check-in still runs |
 | 19 | `OnUpstreamError` → `FinishBackendDelegation` (`:1522-1540`) | `Listening`: unreachable (tracker cleared, so no pending backend delegation). Later: `ArmAnswerWait()`. A `backend_error` carries no delegation id, so an error left over from before Ask can close a post-Ask delegation; the ceiling below bounds the effect |
 
 **Answer wait (P-11): one phase-aware helper, `ArmAnswerWait()`.** It replaces every `ArmQuestionHold()` call in
@@ -330,7 +335,16 @@ so check-in uses the turn-taking rule (site 15) instead.
    - Refused (`ask_state off`) unless the state is Presenting or Paused (`refused_not_live`) and the mic is unmuted
      (`refused_muted`).
    - A start while an exchange is in `Listening` re-emits `listening`.
-   - A start in a later phase first ends that exchange `Stay`, then starts a new one.
+   - **A start in an answer phase (`AwaitingAnswer`, `Answering`, `CheckIn`) is a follow-up question (owner decision,
+     review 027):** the same exchange listens again. There is no `off` frame: the sequence is `answering` → `listening`.
+     The current answer is stopped (flush, pause instruction, upstream mute), and work of the answer is abandoned as at
+     any Ask start. Deferred notices, the replay-due flag and the **resume point of the first ask** carry over: the
+     exchange records at the first Ask whether the slide's narration had been heard, and answer audio never changes
+     that. When the follow-up's answer ends (`Resume`), narration resumes from the sentence the first Ask interrupted
+     (`ResumeAfterFollowUpInstruction`: restart the narration sentence, do not continue an earlier answer), or with
+     `ResumeInstruction` + nudge when the first Ask came before any narration audio.
+   - A start during the unmute-ack wait (`Sending`) first ends that exchange `Stay` (`off{paused}`), then starts a new
+     one.
 2. **Reconnect.** If `_suspended`, `await ReconnectAsync()`. Afterwards **re-check** the state (Presenting/Paused),
    `_session` non-null and `!_suspended`; on failure → `refused_not_live` (a failed reconnect has already ended the
    talk). The reconcile that the reconnect ran happened before the exchange existed; its `_replayOnResume` is
@@ -389,11 +403,17 @@ each attempt.
    - `chunks = recorder.Complete()` is kept on the exchange. `_session.Unmute()` is called (false → failure boundary,
      step 3), and the sub-phase becomes `AwaitingUnmuteAck`.
    - A generation-guarded 2,000 ms timer is armed, and the handler returns: the loop is free.
-   - New `ILiveSession.InputAudioUnmuted` event (default empty accessors). `LiveSession` raises it on
-     `session.input_audio.unmuted`, as a new case in the receive switch. The presenter wires it in `WireSession` →
-     `QueueFromProducer(UnmuteAcked(session))`.
-   - On the loop, the first of `UnmuteAcked` (for the current session) or `UnmuteAckTimeout(generation)` proceeds,
-     guarded by sub-phase and generation, so it proceeds exactly once. A timeout logs `ask: unmute ack timed out
+   - New `ILiveSession.InputAudioUnmuted` event (default empty accessors), carrying the ack's echoed
+     `client_event_id`. `LiveSession` raises it on `session.input_audio.unmuted`, as a new case in the receive switch,
+     and `Unmute(out eventId)` reports the event id it sent. The presenter wires it in `WireSession` →
+     `QueueFromProducer(UnmuteAcked(session, clientEventId))`.
+   - **Ack attribution (review 027, finding 1).** Only the ack of this ask's own unmute proceeds. With an echoed id it
+     must equal the id this ask's unmute sent. An ack without an id is attributed FIFO: the presenter counts every
+     unmute it sent on the session and every ack received, and the ask proceeds only when the ack count reaches its own
+     unmute's ordinal, so a late ack of an earlier ask (timed out or cancelled) or of a user unmute is consumed as debt.
+     A lost ack only delays the burst to the 2 s timeout; it never releases it early.
+   - On the loop, the first of its own `UnmuteAcked` (for the current session) or `UnmuteAckTimeout(generation)`
+     proceeds, guarded by sub-phase and generation, so it proceeds exactly once. A timeout logs `ask: unmute ack timed out
      after 2000 ms; sending`. The later of the two is ignored.
    - Mic frames during the wait are neither recorded nor forwarded; the pump keeps the input clock (P-16).
    - **End, max length, disconnect or upstream loss** during the wait → `EndExchange(Ended)`: the stored chunks are
@@ -533,7 +553,8 @@ items with one reader.
   - Listening: `role="status"` "Listening… m:ss", plus **Ask done**, **Extend** and **Cancel**, and the remaining
     speech time, e.g. "0:07 of speech left", from `speechRemainingMs`. Under 20 s of quiet remaining it adds "Sending
     in 0:15 if quiet" or "Closing in 0:15 if quiet".
-  - Answering (`ask_state` `answering`, through the answer and check-in): "Answering…" and a **Continue** button
+  - Answering (`ask_state` `answering`, through the answer and check-in): "Answering…", **Ask** (a follow-up question;
+    the A key works too) and a **Continue** button
     next to Pause (P-17). It sends `resume`, which skips the check-in and resumes narration from the interrupted
     sentence (`EndExchange(Resume)`). It always works.
 - `presenterStore.ask` holds the last `ask_state` and is cleared on `closed` or idle.
@@ -569,7 +590,7 @@ items with one reader.
 
 | Dir | Frame | Rules |
 |---|---|---|
-| C→S | `{"type":"ask_start"}` | Answered by `ask_state` (`listening`, or `off` with `refused_*`/`unavailable`) |
+| C→S | `{"type":"ask_start"}` | Answered by `ask_state` (`listening`, or `off` with `refused_*`/`unavailable`). During `answering` it is a follow-up question: `listening` again, with no `off` (a refused follow-up sends `off{refused_*/unavailable}` and re-sends `answering`) |
 | C→S | `{"type":"ask_done"}` | While listening → `answering` `sent`, or `off` `empty`/`send_failed`; otherwise ignored (no frame) |
 | C→S | `{"type":"ask_extend"}` | While listening → `listening` with `quietRemainingMs` 90000; otherwise ignored |
 | C→S | `{"type":"ask_cancel"}` | While listening, or during the unmute-ack wait → `off` `cancelled`; otherwise ignored |
@@ -578,8 +599,10 @@ items with one reader.
 | S→C | `{"type":"ask_state","state":"off","elapsedMs":…,"quietRemainingMs":null,"speechRemainingMs":null,"heard":…,"transcribing":false,"reason":"continued"}` | Exactly one per ask, and one per refused start. While listening: `cancelled`, `empty`, `quiet_cancelled`, `muted`, `resumed`, `navigated`, `send_failed`, `ended`, `unavailable`, `refused_muted`, `refused_not_live`. After `answering`: `continued` (yes, Continue, follow-up timeout, budget expiry), `waiting` ("no"), `paused`, `navigated`, `ended` |
 
 **Frame sequence (changed in this revision, additive):** `listening` (every 1 s) → [unmute-ack wait, at most 2 s,
-no frame] → `answering` (once, burst queued) → `off` (once, the exchange outcome). A cancellation while listening
-goes straight from `listening` to `off`. The earlier sequence (`listening` → `off{sent}`) no longer exists;
+no frame] → `answering` (once per burst queued) → `off` (once, the exchange outcome). A follow-up Ask during
+`answering` goes back to `listening` in the same exchange, so the sequence may repeat
+`answering` → `listening` → `answering` before the one `off`. A cancellation while listening goes straight from
+`listening` to `off`. The earlier sequence (`listening` → `off{sent}`) no longer exists;
 `docs/reference/001` §8 documents the new one (T5).
 
 Extra fields on the four commands are ignored, as for `pause`. `unmute` while listening is ignored, and the server
@@ -695,7 +718,7 @@ sequenceDiagram
     U->>P: ask_extend at quiet 80 s
     P-->>U: listening {quietRemainingMs 90000}
     P->>P: tick: quiet ≥ 90 s and voiced ≥ 200 ms → Ask done (quiet_sent)
-    P-->>U: off{quiet_sent} (toast), then (a)
+    P-->>U: answering{quiet_sent} (toast) once the burst is queued, then (a); one off{continued|waiting|…} ends it
   else nothing voiced
     P->>P: tick: quiet ≥ 90 s → EndExchange(Stay, quiet_cancelled)
     P->>P: unmute, Paused, grace re-armed, deferred notices once, replay → _replayOnResume
@@ -1366,3 +1389,6 @@ None. These decisions were forced by code facts and need confirmation at G2:
 | 2026-09-24 | T1 finding P-18 | The upstream clipped the burst start (burst on the wire at +29 ms, before `unmuted` at +56 ms; vi and en question starts lost). Fix: wait for the `unmuted` ack (≤ 2 s, event-driven), a 200 ms zero lead-in, then the burst; T1 check (viii) "question start present" |
 | 2026-09-24 | T1 suite facts | `AnswerStartBudgetMs` 15,000 (max first answer about 9.7 s at 24 s); send ≤ 100 ms on the wire locally; ingest lag up to 7.7 s; harness = `gpt-audio-1.5` TTS + `scripts/run-ask-probe-suite.ps1`; T1 oracle updated ((iv) by arrival within the answer window, (vii) question finished before the answer ended). Status set after the rerun |
 | 2026-09-24 | T1 PASS — plan unblocked | Suite run 3 (`f2b42d8`): en ×3, vi ×3, cap-24 ×3, cap-28, raw pass (i)–(viii) + reply check; cap-40 fails as expected; unmute ack 38–45 ms; answer start ≤ 11.0 s. Status back to Approved; T2 next |
+| 2026-09-24 | Owner decision (review 027): follow-up Ask | Ask during the answer or check-in is a follow-up question in the same exchange: the answer is stopped (flush), listening starts again with no `off{paused}`, and after the follow-up's answer and check-in narration resumes from the sentence the **first** Ask interrupted. Web: Ask button and A key during `answering` |
+| 2026-09-24 | Owner decision (review 027): voice confirmation during the answer | A pending tool confirmation in the answer phases takes a spoken yes/no by the P-13 turn-taking rule (new utterance after 1.5 s of transcript quiet); late question fragments still ignored; navigation stays closed during the exchange |
+| 2026-09-24 | Implementation review round 1 fixes (review 027) | Unmute acks attributed by echoed `client_event_id`, FIFO ack debt when none; deferred notices kept as content over the send-failure reset and appended once after reconnect; transcription disposed once; emitter-gate claim qualified as layered defences; §4.4(c) frame sequence corrected |

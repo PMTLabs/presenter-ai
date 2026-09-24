@@ -41,6 +41,28 @@ export function AskControls({
   const isMuted = propsMuted !== undefined ? propsMuted : storeMuted;
   const isDisabled = (disabled ?? false) || isMuted;
 
+  // Idle, and during the answer: a follow-up question (owner decision, review r1) listens again in the same exchange.
+  const askButton = (
+    <>
+      <button
+        type="button"
+        className={actionButtonClassName}
+        onClick={() => {
+          if (!isDisabled && onAsk) onAsk();
+        }}
+        disabled={isDisabled}
+        aria-keyshortcuts="A"
+      >
+        Ask
+      </button>
+      {isMuted && (
+        <span className="text-xs text-gray-500 dark:text-gray-400">
+          Unmute to ask
+        </span>
+      )}
+    </>
+  );
+
   if (effectiveAsk?.state === "listening") {
     const showQuietCountdown =
       effectiveAsk.quietRemainingMs !== null &&
@@ -101,28 +123,10 @@ export function AskControls({
         <span role="status" className="text-sm font-medium text-blue-700 dark:text-blue-300">
           Answering…
         </span>
+        {askButton}
       </div>
     );
   }
 
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        className={actionButtonClassName}
-        onClick={() => {
-          if (!isDisabled && onAsk) onAsk();
-        }}
-        disabled={isDisabled}
-        aria-keyshortcuts="A"
-      >
-        Ask
-      </button>
-      {isMuted && (
-        <span className="text-xs text-gray-500 dark:text-gray-400">
-          Unmute to ask
-        </span>
-      )}
-    </div>
-  );
+  return <div className="flex items-center gap-2">{askButton}</div>;
 }

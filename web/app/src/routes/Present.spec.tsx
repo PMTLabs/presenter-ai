@@ -1097,6 +1097,46 @@ describe("Present", () => {
     );
   });
 
+  it("A during the answer asks a follow-up, and the Ask button does too", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "answering",
+      elapsedMs: 35000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "sent",
+    });
+
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(bridgeAskStart).toHaveBeenCalledOnce();
+    expect(bridgeAskDone).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(bridgeAskStart).toHaveBeenCalledTimes(2);
+
+    // The follow-up listens: A and Enter now finish it.
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 0,
+      quietRemainingMs: 90000,
+      speechRemainingMs: 25000,
+      heard: false,
+      transcribing: false,
+      reason: null,
+    });
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(bridgeAskDone).toHaveBeenCalledOnce();
+  });
+
   it("Continue during check-in sends resume and the off continued frame clears the control", async () => {
     signIn();
     get.mockResolvedValue({
