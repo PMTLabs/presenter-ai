@@ -33,6 +33,7 @@ internal static class AskProbeCommand
         "a new response starts only after >= 3 s without assistant output AND an output-clock jump (next assistant delta start_ms > previous end_ms + 1000 ms, or no timestamps); voiced-audio gaps alone never split";
     private const int ReplyObserveMs = 10_000;
     private const int ProvenanceSlackMs = 250;
+    private const int TruncationSlackMs = 1_000;
     private const int VoicedIntervalGapMs = 500;
     private const int EndSignalSettleMs = 500;
     private const string WavHint = "Convert it with: ffmpeg -i <in> -ar 24000 -ac 1 -c:a pcm_s16le <out.wav>";
@@ -156,9 +157,21 @@ internal static class AskProbeCommand
 
             var startMark = session.MarkInputPosition();
             var refused = 0;
+            var pacing = Stopwatch.StartNew();
+            double queuedAudioMs = 0;
             foreach (var chunk in chunks)
             {
                 refused += session.SendAudio(chunk) ? 0 : 1;
+                queuedAudioMs += chunk.Length / (double)BytesPerMs;
+                if (arguments.Pace > 0)
+                {
+                    // --pace F: F x real time, so the audio queued so far is due at queuedAudioMs / F.
+                    var wait = queuedAudioMs / arguments.Pace - pacing.Elapsed.TotalMilliseconds;
+                    if (wait > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(wait), cancellationToken).ConfigureAwait(false);
+                    }
+                }
             }
 
             var lastQueuedAt = observer.Now;
@@ -173,7 +186,8 @@ internal static class AskProbeCommand
             var burstEndMs = marks[endMark].SentMs;
             var sendDurationMs = marks[endMark].At - askDoneAt;
             await output.WriteLineAsync(
-                $"burst: {chunks.Count} chunks queued in {lastQueuedAt - askDoneAt} ms, on the wire after {sendDurationMs} ms; " +
+                $"burst: {chunks.Count} chunks ({Seconds(queuedAudioMs)} of audio) at {(arguments.Pace > 0 ? $"pace {arguments.Pace.ToString("0.##", CultureInfo.InvariantCulture)}x real time" : "pace 0 (unpaced burst)")}; " +
+                $"send duration {lastQueuedAt - askDoneAt} ms to queue, on the wire after {sendDurationMs} ms; " +
                 $"input clock [{burstStartMs}, {burstEndMs}] ms").ConfigureAwait(false);
 
             long? continueAt = null;
@@ -266,13 +280,14 @@ internal static class AskProbeCommand
         var muteUserDeltas = events.Count(e => e.Kind == EventKind.User && e.At >= run.MuteAt && e.At < run.MuteControlEnd && e.Text.Trim().Length > 0);
         var earlyVoicedMs = VoicedMs(events, run.MuteAt, run.LastQueuedAt);
 
-        // (iv) User turns after the burst. Rule: a user delta whose start_ms lies in the burst range on the input clock
-        // ([start mark, end mark + 250 ms), provenance P-13) is burst text and belongs to the one burst turn whatever
-        // arrived in between. Any other user delta before the reply is grouped by arrival order, and assistant output
-        // (voiced audio, assistant transcript, delegation, tool call) arriving between two such deltas starts a new turn.
+        // (iv), owner decision 2026-09-24 (timestamp-based): every user delta after Ask done and before the reply has a
+        // start_ms inside the burst range [start mark, end mark + 250 ms) on the input clock, there is at least one, and
+        // the burst text (in start_ms order) has the part-1 keyword before the part-2 keyword. Arrival order is only a
+        // diagnostic: other turns and assistant events that arrived between the two halves are printed, not scored.
         var observeEnd = run.ReplyAt ?? long.MaxValue;
         var userAfter = events.Where(e => e.Kind == EventKind.User && e.At >= run.AskDoneAt && e.At < observeEnd && e.Text.Trim().Length > 0).ToList();
         var burstDeltas = userAfter.Where(e => InBurst(run, e)).OrderBy(e => e.StartMs).ThenBy(e => e.At).ToList();
+        var outsideDeltas = userAfter.Where(e => !InBurst(run, e)).ToList();
         var otherTurns = new List<List<ProbeEvent>>();
         List<ProbeEvent>? current = null;
         foreach (var e in events.Where(e => e.At >= run.AskDoneAt && e.At < observeEnd))
@@ -293,15 +308,12 @@ internal static class AskProbeCommand
             }
         }
 
-        var turnCount = (burstDeltas.Count > 0 ? 1 : 0) + otherTurns.Count;
         var burstText = string.Concat(burstDeltas.Select(e => e.Text));
         var part1At = Find(burstText, deck.Part1Keywords);
         var part2At = Find(burstText, deck.Part2Keywords);
         var between = 0;
         if (part1At >= 0 && part2At > part1At)
         {
-            // Assistant output that arrived between the delta completing the part-1 keyword and the delta starting the
-            // part-2 keyword means the upstream responded between the two halves.
             var part1Delta = DeltaAt(burstDeltas, part1At + Canonical(deck.Part1Keywords.First(k => Find(burstText, [k]) == part1At)).Length - 1);
             var part2Delta = DeltaAt(burstDeltas, part2At);
             var from = Math.Min(part1Delta.At, part2Delta.At);
@@ -406,9 +418,14 @@ internal static class AskProbeCommand
         }
 
         var turnReasons = new List<string>();
-        if (turnCount != 1)
+        if (burstDeltas.Count == 0)
         {
-            turnReasons.Add($"{turnCount} user turns (burst turn {(burstDeltas.Count > 0 ? "present" : "absent")}, {otherTurns.Count} other)");
+            turnReasons.Add("no user delta inside the burst range");
+        }
+
+        if (outsideDeltas.Count > 0)
+        {
+            turnReasons.Add($"{outsideDeltas.Count} user deltas outside the burst range before the reply (start_ms {string.Join(", ", outsideDeltas.Select(e => Ms(e.StartMs)))})");
         }
 
         if (part1At < 0)
@@ -426,18 +443,28 @@ internal static class AskProbeCommand
             turnReasons.Add("part-2 keyword before part-1 keyword");
         }
 
-        if (between > 0)
-        {
-            turnReasons.Add($"{between} assistant/delegation events arrived between the part-1 and part-2 keywords");
-        }
+        await output.WriteLineAsync(
+            $"(iv) diagnostic (not scored): {otherTurns.Count} other user turns by arrival; {between} assistant/delegation events arrived between the part-1 and part-2 keywords").ConfigureAwait(false);
+
+        // Truncation: how far into the burst the upstream's input clock got. The reply was appended after the end mark,
+        // so its start_ms should be at or after it; one well before it means the upstream discarded part of the burst.
+        var maxUserEndMs = burstDeltas.Concat(outsideDeltas).Max(e => e.EndMs);
+        var replyStartMs = replyDeltas.Where(e => e.StartMs is not null).Select(e => e.StartMs).FirstOrDefault();
+        var truncated = replyStartMs is { } rs && rs < run.BurstEndMs - TruncationSlackMs;
+        await output.WriteLineAsync(
+            $"ingested: max user end_ms before the reply {Ms(maxUserEndMs)} (end mark {run.BurstEndMs}{(maxUserEndMs is { } mu ? $", {mu - run.BurstEndMs:+#;-#;0} ms" : string.Empty)}); " +
+            $"reply start_ms - end mark {(replyStartMs is { } r ? $"{r - run.BurstEndMs:+#;-#;0} ms" : "n/a (no reply delta)")}").ConfigureAwait(false);
+        await output.WriteLineAsync(truncated
+            ? $"truncation: TRUNCATED (the reply starts at {replyStartMs} on the input clock, under end mark - {TruncationSlackMs} = {run.BurstEndMs - TruncationSlackMs}; about {Seconds(run.BurstEndMs - replyStartMs!.Value)} of the burst was not ingested)"
+            : $"truncation: {(replyStartMs is null ? "not checked (no reply delta)" : "none detected")}").ConfigureAwait(false);
 
         var criteria = new (string Name, bool Pass, string Detail)[]
         {
             ("(i) no upstream error", errors.Count == 0, $"{errors.Count} errors"),
             ("(ii) mute control silent", muteVoicedMs == 0 && muteUserDeltas == 0, $"{muteVoicedMs} ms voiced assistant audio, {muteUserDeltas} user deltas while muted"),
             ("(iii) nothing voiced before the last chunk was queued", earlyVoicedMs == 0, $"{earlyVoicedMs} ms voiced"),
-            ("(iv) exactly one user turn, part 1 before part 2", turnReasons.Count == 0,
-                turnReasons.Count == 0 ? "one turn; part-1 keyword before part-2 keyword; nothing between them" : string.Join("; ", turnReasons)),
+            ("(iv) every user delta before the reply is in the burst range, part 1 before part 2", turnReasons.Count == 0,
+                turnReasons.Count == 0 ? $"{burstDeltas.Count} deltas, all in the burst range; part-1 keyword before part-2 keyword" : string.Join("; ", turnReasons)),
             ("(v) one answer with fact A and fact B", answer is not null && factA is not null && factB is not null,
                 $"fact A {(factA is null ? "missing" : $"\"{factA}\"")}; fact B {(factB is null ? "missing" : $"\"{factB}\"")}"),
             ("(vi) no second unsolicited response within 15 s", answerEnd is not null && secondResponseAt is null,
@@ -452,7 +479,7 @@ internal static class AskProbeCommand
         var provenance = burstOk && replyOk;
         await output.WriteLineAsync($"provenance check: {(provenance ? "CONFIRMED" : "NOT CONFIRMED")} (burst deltas {(burstOk ? "in range" : "not all in range")}; reply {(run.ReplyAt is null ? "not run" : replyOk ? "after burst end" : "not after burst end")})").ConfigureAwait(false);
         var passed = criteria.All(criterion => criterion.Pass);
-        await output.WriteLineAsync($"result: {(passed ? "PASS" : "FAIL")} (variant run; send duration {run.SendDurationMs} ms, kept {Seconds(run.Stats.KeptMs)})").ConfigureAwait(false);
+        await output.WriteLineAsync($"result: {(passed ? "PASS" : "FAIL")}{(truncated ? " TRUNCATED" : string.Empty)} (variant run; send duration {run.SendDurationMs} ms, kept {Seconds(run.Stats.KeptMs)})").ConfigureAwait(false);
         return passed;
     }
 

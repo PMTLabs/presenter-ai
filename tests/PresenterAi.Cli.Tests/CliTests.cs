@@ -387,7 +387,8 @@ public sealed class CliTests
             (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--gap-keep-ms", "500"], "--gap-keep-ms must be an integer from 200 to 400"),
             (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--variant", "stream"], "--variant must be vad, continue or raw"),
             (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--lang", "fr"], "--lang must be en or vi"),
-            (["ask-probe", "--provider", "azure", "--part1", "--part2", "p2.wav"], "--part1 requires a value")
+            (["ask-probe", "--provider", "azure", "--part1", "--part2", "p2.wav"], "--part1 requires a value"),
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--pace", "fast"], "--pace must be a number from 0 (unpaced burst) to 20")
         };
 
         foreach (var (args, message) in cases)
@@ -401,6 +402,8 @@ public sealed class CliTests
 
         var parsed = CliParser.Parse(["ask-probe", "--provider", "openai", "--part1", "a.wav", "--part2", "b.wav", "--reply", "yes.wav", "--observe-interrupt"], new StringWriter());
         parsed.Should().Be(new AskProbeArguments("openai", "a.wav", "b.wav", 10, "vad", 1000, 320, true, "yes.wav", "en", null));
+        CliParser.Parse(["ask-probe", "--provider", "azure", "--part1", "a.wav", "--part2", "b.wav", "--pace", "1.5"], new StringWriter())
+            .Should().BeOfType<AskProbeArguments>().Which.Pace.Should().Be(1.5);
     }
 
     [Fact]

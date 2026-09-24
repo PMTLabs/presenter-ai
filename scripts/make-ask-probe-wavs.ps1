@@ -10,7 +10,9 @@
       en\reply-yes.wav    "Yes." (the live check-in reply, --reply)
       en\absent.wav       a question the probe deck does not cover (--absent; starts a delegation for --observe-interrupt)
       en\part1-slow.wav   near-cap run: a slow, keyword-free spoken preamble followed by part 1, read slowly
-      en\part2-slow.wav   near-cap run: part 2, read slowly
+      en\part2-slow.wav   near-cap run: part 2, read slowly (also part 2 of every sweep variant)
+      en\sweep-<N>-part1.wav   cap sweep: the slow preamble then part 1, sized so that with part2-slow.wav and the
+                          probe's 10 s gap the recorder keeps about N s (N = 20, 40, 60, 100; see -SweepSeconds)
       vi\part1.wav, vi\part2.wav, vi\reply-yes.wav, vi\absent.wav   only when a vi-VN voice is installed
 
     SAPI renders straight to 24 kHz mono 16-bit PCM, so ffmpeg is not needed. To use recordings of a real voice
@@ -31,6 +33,9 @@
 .PARAMETER Voice
     Optional English voice name (see the list this script prints). Defaults to the first installed en-* voice.
 
+.PARAMETER SweepSeconds
+    Kept lengths of the sweep variants (default 20, 40, 60, 100). Use with --part1 sweep-<N>-part1.wav --part2 part2-slow.wav.
+
 .PARAMETER NearCapSeconds
     Target length of part1-slow + part2-slow in seconds before compression (default 128, which keeps about 105-110 s).
 
@@ -41,7 +46,8 @@
 param(
     [Parameter(Mandatory = $true)] [string] $OutDir,
     [string] $Voice,
-    [ValidateRange(30, 150)] [int] $NearCapSeconds = 128
+    [ValidateRange(30, 150)] [int] $NearCapSeconds = 128,
+    [int[]] $SweepSeconds = @(20, 40, 60, 100)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,23 +129,36 @@ foreach ($name in 'part1', 'part2', 'reply', 'absent') {
     [void](Save-Speech $texts.en[$name] (Join-Path $enDir $file) $english.Name)
 }
 
-# Near-cap: measure the slow question parts and each preamble sentence, then add sentences (cycling) until the
-# target is reached.
+# Near-cap and sweep: measure the slow question parts and each preamble sentence, then put preamble sentences
+# (cycling) before part 1 until part 1 + part 2 reach the target length of speech. The question stays at the end, so a
+# truncated burst shows as a missing question.
 $slow1Question = Save-Speech $texts.en.part1 (Join-Path $enDir 'part1-slow.wav') $english.Name $slowRate
 $slow2 = Save-Speech $texts.en.part2 (Join-Path $enDir 'part2-slow.wav') $english.Name $slowRate
 $scratch = Join-Path $enDir 'preamble-measure.wav'
 $sentenceSeconds = @($preamble | ForEach-Object { Save-Speech $_ $scratch $english.Name $slowRate })
 Remove-Item $scratch
-$sentences = New-Object System.Collections.Generic.List[string]
-$estimate = $slow1Question + $slow2
-while ($estimate + $sentenceSeconds[$sentences.Count % $preamble.Count] / 2 -lt $NearCapSeconds) {
-    $estimate += $sentenceSeconds[$sentences.Count % $preamble.Count]
-    $sentences.Add($preamble[$sentences.Count % $preamble.Count])
+
+function New-PreambledPart1([double] $TargetSeconds, [string] $FileName) {
+    $sentences = New-Object System.Collections.Generic.List[string]
+    $estimate = $slow1Question + $slow2
+    while ($estimate + $sentenceSeconds[$sentences.Count % $preamble.Count] / 2 -lt $TargetSeconds) {
+        $estimate += $sentenceSeconds[$sentences.Count % $preamble.Count]
+        $sentences.Add($preamble[$sentences.Count % $preamble.Count])
+    }
+    $seconds = Save-Speech ((($sentences -join ' ') + ' ' + $texts.en.part1).Trim()) (Join-Path $enDir $FileName) $english.Name $slowRate
+    return [pscustomobject]@{ Total = $seconds + $slow2; Sentences = $sentences.Count }
 }
-$slow1 = Save-Speech ((($sentences -join ' ') + ' ' + $texts.en.part1).Trim()) (Join-Path $enDir 'part1-slow.wav') $english.Name $slowRate
-$total = $slow1 + $slow2
-$repeats = $sentences.Count
-Write-Host ("Near-cap: part1-slow + part2-slow = {0:0.0} s ({1} preamble sentences); the probe prints the kept length after compression." -f $total, $repeats)
+
+$nearCap = New-PreambledPart1 $NearCapSeconds 'part1-slow.wav'
+Write-Host ("Near-cap: part1-slow + part2-slow = {0:0.0} s ({1} preamble sentences); the probe prints the kept length after compression." -f $nearCap.Total, $nearCap.Sentences)
+
+# The recorder keeps about 85.5% of slow SAPI speech (it squeezes the pauses over 0.5 s; measured: 124.5 s -> 106.5 s),
+# so a kept target of N s needs about N / 0.855 s of speech.
+$keptRatio = 0.855
+foreach ($kept in $SweepSeconds) {
+    $sweep = New-PreambledPart1 ($kept / $keptRatio) "sweep-$kept-part1.wav"
+    Write-Host ("Sweep {0} s: sweep-{0}-part1 + part2-slow = {1:0.0} s of speech ({2} preamble sentences), about {3:0} s kept." -f $kept, $sweep.Total, $sweep.Sentences, ($sweep.Total * $keptRatio))
+}
 
 $vietnamese = $voices | Where-Object { $_.Culture.Name -like 'vi*' } | Select-Object -First 1
 if ($vietnamese) {

@@ -34,7 +34,7 @@ public sealed class AskProbeScoringTests
         passed.Should().BeFalse("the live answer was split");
         text.Should().Contain("burst turn: \"Did the programme change at the Da Nang office in its first year, and how much did the Hanoi expansion cost\"")
             .And.NotContain("other turn");
-        text.Should().Contain("PASS (iv) exactly one user turn, part 1 before part 2: one turn; part-1 keyword before part-2 keyword; nothing between them");
+        text.Should().Contain("PASS (iv) every user delta before the reply is in the burst range, part 1 before part 2: 18 deltas, all in the burst range; part-1 keyword before part-2 keyword");
         text.Should().Contain("[answer]: \"It did. It\"")
             .And.Contain("+7739..+8339 ms after Ask done, 0.7 s voiced: \"moved to paperless contracts.\"");
         text.Should().Contain("FAIL (vi) no second unsolicited response within 15 s: a new response started 4739 ms after the answer ended");
@@ -42,7 +42,7 @@ public sealed class AskProbeScoringTests
     }
 
     [Fact]
-    public async Task A_user_delta_outside_the_burst_after_assistant_output_is_a_second_turn()
+    public async Task A_user_delta_outside_the_burst_range_before_the_reply_fails_iv()
     {
         var events = Run1Events();
         events.Add(new ProbeEvent(AskDone + 2_500, EventKind.User, " cost", 27_000, 27_200));
@@ -50,11 +50,11 @@ public sealed class AskProbeScoringTests
         var output = new StringWriter();
         await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), Sorted(events), output);
 
-        output.ToString().Should().Contain("FAIL (iv) exactly one user turn, part 1 before part 2: 2 user turns (burst turn present, 1 other)");
+        output.ToString().Should().Contain("FAIL (iv) every user delta before the reply is in the burst range, part 1 before part 2: 1 user deltas outside the burst range before the reply (start_ms 27000)");
     }
 
     [Fact]
-    public async Task Assistant_audio_between_the_two_halves_fails_iv()
+    public async Task Assistant_audio_between_the_two_halves_is_a_diagnostic_not_a_failure()
     {
         var events = Run1Events();
         events.Add(new ProbeEvent(AskDone + 1_000, EventKind.Voiced, string.Empty, VoicedMs: 100));
@@ -62,7 +62,8 @@ public sealed class AskProbeScoringTests
         var output = new StringWriter();
         await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), Sorted(events), output);
 
-        output.ToString().Should().Contain("FAIL (iv)").And.Contain("1 assistant/delegation events arrived between the part-1 and part-2 keywords");
+        output.ToString().Should().Contain("PASS (iv)")
+            .And.Contain("(iv) diagnostic (not scored): 0 other user turns by arrival; 1 assistant/delegation events arrived between the part-1 and part-2 keywords");
     }
 
     [Fact]
@@ -73,7 +74,77 @@ public sealed class AskProbeScoringTests
         var output = new StringWriter();
         await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), events, output);
 
-        output.ToString().Should().Contain("FAIL (iv) exactly one user turn, part 1 before part 2: part-2 keyword missing");
+        output.ToString().Should().Contain("FAIL (iv) every user delta before the reply is in the burst range, part 1 before part 2: part-2 keyword missing");
+    }
+
+    // Live runs en-3, en-4 and raw: the model began answering while the burst transcript was still arriving (and, raw,
+    // answered part 1 before part 2 was transcribed). Every user delta is in the burst range, so (iv) passes.
+    // Live runs en-3, en-4 and raw: the model began answering while the burst transcript was still arriving (and, raw,
+    // answered part 1 before part 2 was transcribed). Every user delta is in the burst range, so (iv) passes.
+    [Fact]
+    public Task Live_replay_en3_passes_iv_by_timestamps() => AssertReplayPassesIvAsync(
+        "en-3",
+        [(421, 18000, " What did"), (548, 18200, " the"), (652, 18800, " programme"), (835, 19200, " change at"), (922, 19400, " the"),
+             (997, 19600, " Da"), (1056, 19800, " Nang"), (1231, 20200, " office in"), (1276, 20400, " its"), (1528, 20800, " first"),
+             (1744, 21200, " year"), (1906, 21600, " And"), (1988, 21800, " how"), (2064, 22000, " much"), (2145, 22200, " did"),
+             (2197, 22400, " the"), (2324, 22800, " Hanoi"), (2596, 23400, " expansion"), (2831, 23800, " cost")],
+        [(1529, 20800, " It moved"), (1992, null, ""), (2092, null, ""), (2719, 23600, " the Da"), (2833, 23800, " Nang"), (2935, 24000, " office")],
+        17180, 24580, 26201, 46000);
+
+    [Fact]
+    public Task Live_replay_en4_passes_iv_by_timestamps() => AssertReplayPassesIvAsync(
+        "en-4",
+        [(368, 17800, "What"), (453, 18000, " did"), (501, 18200, " the"), (640, 18600, " programme"), (848, 19000, " change"),
+             (940, 19200, " at the"), (1034, 19400, " Da"), (1072, 19600, " Nang"), (1254, 20000, " office"), (1348, 20200, " in"),
+             (1388, 20400, " its"), (1650, 20800, " first"), (1762, 21000, " year"), (2008, 21600, " and how"), (2179, 22000, " much"),
+             (2208, 22200, " did the"), (2374, 22600, " Hanoi"), (2522, 23200, " expansion"), (2896, 23800, " cost")],
+        [(1650, 20800, " It moved"), (1762, 21000, " the"), (2449, null, ""), (2786, 23600, " It moved"), (2896, 23800, " the")],
+        17040, 24440, 27587, 47400);
+
+    [Fact]
+    public Task Live_replay_raw_passes_iv_by_timestamps() => AssertReplayPassesIvAsync(
+        "raw",
+        [(504, 18200, " Um"), (686, 18600, ", change"), (760, 18800, " at the"), (835, 19000, " Da"), (878, 19200, " Nang"),
+             (1029, 19600, " office"), (1098, 19800, " in"), (1175, 20000, " its"), (1217, 20200, " first"), (1338, 20600, " year"),
+             (4182, 31600, " And"), (4260, 31800, " how"), (4333, 32000, " much"), (4412, 32200, " did"), (4450, 32400, " the"),
+             (4572, 32800, " Hanoi"), (4732, 33400, " expansion"), (5071, 34000, " cost")],
+        [(1568, 21000, " Paperless"), (1766, 21400, " contracts."), (2555, null, ""), (3760, null, ""), (4982, 33800, " 4"), (5071, 34000, ".2")],
+        16640, 35220, 22547, 43000);
+
+    private static async Task AssertReplayPassesIvAsync(string name, (long At, long Start, string Text)[] user, (long At, long? Start, string Text)[] assistant,
+        long burstStart, long burstEnd, long replyAt, long replyStart)
+    {
+        var events = user.Select(d => new ProbeEvent(AskDone + d.At, EventKind.User, d.Text, d.Start, d.Start + 200))
+            .Concat(assistant.Select(d => d.Start is null
+                ? new ProbeEvent(AskDone + d.At, EventKind.Voiced, string.Empty, VoicedMs: 100)
+                : new ProbeEvent(AskDone + d.At, EventKind.Assistant, d.Text, d.Start, d.Start + 200)))
+            .Append(new ProbeEvent(AskDone + replyAt + 1_300, EventKind.User, " Yes", replyStart, replyStart + 200))
+            .ToList();
+        var run = Run(answerStart: 2_000, answerEnd: 12_000) with { BurstStartMs = burstStart, BurstEndMs = burstEnd, ReplyAt = AskDone + replyAt };
+
+        var output = new StringWriter();
+        await ReportAsync(run, Sorted(events), output);
+
+        output.ToString().Should().Contain("PASS (iv) every user delta before the reply is in the burst range, part 1 before part 2", name)
+            .And.Contain("truncation: none detected");
+    }
+
+    [Fact]
+    public async Task Near_cap_reply_well_before_the_end_mark_is_truncated()
+    {
+        (long At, long Start, string Text)[] user = [(9499, 47600, " me"), (9658, 48000, " give"), (10153, 49600, " on"), (32298, 50000, " why"), (32452, 50200, " this")];
+        var events = user.Select(d => new ProbeEvent(AskDone + d.At, EventKind.User, d.Text, d.Start, d.Start + 200))
+            .Append(new ProbeEvent(AskDone + 50_263, EventKind.User, " Yes", 55_600, 55_800))
+            .ToList();
+        var run = Run(answerStart: 40_000, answerEnd: 41_000) with { BurstStartMs = 17_720, BurstEndMs = 125_200, ReplyAt = AskDone + 49_003, ReplyMarkMs = 125_200 };
+
+        var output = new StringWriter();
+        await ReportAsync(run, Sorted(events), output);
+
+        output.ToString().Should().Contain("ingested: max user end_ms before the reply 50400 (end mark 125200, -74800 ms); reply start_ms - end mark -69600 ms")
+            .And.Contain("truncation: TRUNCATED (the reply starts at 55600 on the input clock, under end mark - 1000 = 124200; about 69.6 s of the burst was not ingested)")
+            .And.Contain("result: FAIL TRUNCATED")
+            .And.Contain("FAIL (iv) every user delta before the reply is in the burst range, part 1 before part 2: part-1 keyword missing; part-2 keyword missing");
     }
 
     [Fact]
