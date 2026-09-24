@@ -173,7 +173,7 @@ public static class DependencyInjection
     public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
         services.TryAddSingleton<ToolRegistry>();
-        AddScriptReviser(services);
+        AddScriptTraining(services);
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
@@ -238,10 +238,10 @@ public static class DependencyInjection
         return services;
     }
 
-    // Plan 010 T5: the out-of-band Responses reviser on the upstream routes. The named client has no timeout of its
+    // Plan 010 T5/T6: the out-of-band Responses reviser on the upstream routes and the revision service. The named client has no timeout of its
     // own (Training:ReviserTimeoutSeconds and the caller's token bound each call) and no logging handlers, so request
     // URLs and headers never reach the logs.
-    private static void AddScriptReviser(IServiceCollection services)
+    private static void AddScriptTraining(IServiceCollection services)
     {
         services.AddHttpClient(ResponsesScriptReviser.HttpClientName)
             .ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan)
@@ -253,5 +253,13 @@ public static class DependencyInjection
             serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrainingOptions>>().Value.ReviserTimeout,
             serviceProvider.GetRequiredService<TimeProvider>(),
             serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ResponsesScriptReviser>>()));
+
+        // Plan 010 T6: singleton; it resolves IPresentationRevisionStore from a fresh async scope per store operation.
+        services.TryAddSingleton<IScriptRevisionService>(serviceProvider => new ScriptRevisionService(
+            serviceProvider.GetRequiredService<IServiceScopeFactory>(),
+            serviceProvider.GetRequiredService<IScriptReviser>(),
+            serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrainingOptions>>().Value,
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ScriptRevisionService>>()));
     }
 }
