@@ -39,23 +39,36 @@ public sealed class BridgeAdmissionTests
         await BridgeTestSupport.WaitForAsync(() => fake.StartCount == 2);
 
         var question = Enumerable.Range(0, 200).Select(AskSupport.VoicedFrame).ToArray();
+        var afterDone = Enumerable.Range(10_000, 55).Select(AskSupport.VoicedFrame).ToArray();
         foreach (var frame in question) await AskSupport.SendBinaryAsync(socket, frame);
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ask_done\"}");
-        foreach (var frame in Enumerable.Range(10_000, 55).Select(AskSupport.VoicedFrame))
-            await AskSupport.SendBinaryAsync(socket, frame);
+        foreach (var frame in afterDone) await AskSupport.SendBinaryAsync(socket, frame);
         // 200 + 1 + 55 = 256 queued items: exactly the capacity, so nothing overflowed and the socket stays open.
         await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
         await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["type"]?.GetValue<string>() == "pong");
         socket.State.Should().Be(WebSocketState.Open);
 
+        // Hold the unmute ack (the fake clock is not advanced, so its 2 s timeout cannot fire either): every frame after
+        // ask_done is admitted while the ask waits for it.
+        fake.UnmuteAckGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconnectedAt = fake.ReceivedSnapshot().Count;
         fake.StartGate.TrySetResult();
-        (await AskSupport.ReceiveAskStateAsync(socket, "answering"))["reason"]!.GetValue<string>().Should().Be("sent");
-        var expected = AskSupport.ExpectedBurst(question);
-        await BridgeTestSupport.WaitForAsync(() =>
-            AskSupport.BurstAppends(fake.ReceivedSnapshot()).Sum(append => append.Length) >= expected.Length);
+        await BridgeTestSupport.WaitForAsync(() => AskSupport.IndexOf(fake.ReceivedSnapshot(), "session.input_audio.unmute") >= 0);
+        await AskSupport.AdmissionBarrierWhileListeningAsync(socket);
+        AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), reconnectedAt).Should().BeEmpty(
+            "neither the recording nor the 55 frames after ask_done reach the upstream before the unmute ack");
 
-        AskSupport.BurstAppends(fake.ReceivedSnapshot()).SelectMany(bytes => bytes).ToArray().Should().Equal(expected,
-            "the recording holds exactly the 200 frames sent before ask_done, in order, and none sent after it");
+        fake.UnmuteAckGate.TrySetResult();
+        (await AskSupport.ReceiveAskStateAsync(socket, "answering"))["reason"]!.GetValue<string>().Should().Be("sent");
+        var expected = AskSupport.ExpectedBurstAppends(question);
+        await BridgeTestSupport.WaitForAsync(() =>
+            AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), reconnectedAt).Count >= expected.Count);
+        await ((Presenter)factory.Services.GetRequiredService<IPresenter>()).WaitUntilIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        AskSupport.NonPumpAppends(fake.ReceivedSnapshot(), reconnectedAt).Should().BeEquivalentTo(expected,
+            options => options.WithStrictOrdering(),
+            "the upstream gets the lead-in and exactly the 200 frames sent before ask_done, in order; the 55 sent after " +
+            "it are neither recorded nor forwarded");
     }
 
     [Fact]
