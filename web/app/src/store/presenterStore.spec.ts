@@ -25,6 +25,7 @@ describe("presenterStore", () => {
       edits: {},
       editOrder: [],
       currentEditId: null,
+      ask: null,
     });
   });
 
@@ -228,4 +229,79 @@ describe("presenterStore", () => {
     store.message({ type: "transcript", role: "user", delta: "Question", end_ms: 1500 });
     expect(usePresenterStore.getState().transcript[1].slide).toBe(5);
   });
+
+  it("keeps the last ask_state and clears it on closed and idle", () => {
+    const store = usePresenterStore.getState();
+    const listening = {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 12000,
+      quietRemainingMs: 78000,
+      speechRemainingMs: 13000,
+      heard: true,
+      transcribing: false,
+      reason: null,
+    };
+    store.message(listening);
+    expect(usePresenterStore.getState().ask).toEqual({
+      state: "listening",
+      elapsedMs: 12000,
+      quietRemainingMs: 78000,
+      speechRemainingMs: 13000,
+      heard: true,
+      transcribing: false,
+      reason: null,
+    });
+
+    const answering = {
+      type: "ask_state",
+      state: "answering",
+      elapsedMs: 25000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "sent",
+    };
+    store.message(answering);
+    expect(usePresenterStore.getState().ask).toEqual({
+      state: "answering",
+      elapsedMs: 25000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "sent",
+    });
+
+    const off = {
+      type: "ask_state",
+      state: "off",
+      elapsedMs: 30000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "continued",
+    };
+    store.message(off);
+    expect(usePresenterStore.getState().ask).toEqual({
+      state: "off",
+      elapsedMs: 30000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "continued",
+    });
+
+    store.message({ type: "closed", endReason: "user" });
+    expect(usePresenterStore.getState().ask).toBeNull();
+
+    store.message(listening);
+    expect(usePresenterStore.getState().ask).not.toBeNull();
+    store.applySnapshot({ state: "idle", slideIndex: 0, slideCount: 0, muted: false });
+    expect(usePresenterStore.getState().ask).toBeNull();
+  });
 });
+
