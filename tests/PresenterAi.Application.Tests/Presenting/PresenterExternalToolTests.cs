@@ -22,9 +22,18 @@ public sealed class PresenterExternalToolTests
         var set = new CountingSet();
         await using var h = new Harness((_, _, _) => presentation.Task, (_, _) => tools.Task, TimeSpan.FromMilliseconds(30));
         var start = h.Presenter.StartAsync("p", null, "owner");
-        await Task.Delay(10);
-        Assert.Equal("owner", h.Owner);
-        presentation.SetResult(Harness.Presentation());
+        try
+        {
+            // The tool source is asked while the presentation load is still pending: the loads run in parallel.
+            await Eventually(() => h.Owner == "owner");
+            Assert.False(start.IsCompleted);
+        }
+        finally
+        {
+            // Released even when the wait fails: the loader ignores cancellation, so a pending load would wedge the
+            // loop and hang disposal.
+            presentation.TrySetResult(Harness.Presentation());
+        }
         Assert.True((await start).Started);
         Assert.DoesNotContain(h.Session!.Request!.Tools!, t => t["name"]?.ToString() == "external_action");
         tools.SetResult(new SessionToolSet([new ExternalTool()], disposable: set));
@@ -161,6 +170,8 @@ public sealed class PresenterExternalToolTests
         var s = h.Session!;
         s.RaiseToolCall("d", "c", "external_action", "{}");
         await Eventually(() => s.Sent.Any(x => x.EventId == "c"));
+        // The question is armed after its output is sent: settle before moving the clock past it.
+        await h.Presenter.WaitUntilIdleAsync();
         h.Clock.Advance(TimeSpan.FromSeconds(8)); await h.Presenter.WaitUntilIdleAsync();
         s.Speak(startMs: 2000, endMs: 2100);
         s.Hear("yes", 2000, 2100);
@@ -250,6 +261,7 @@ public sealed class PresenterExternalToolTests
         var s = h.Session!;
         s.RaiseToolCall("d1", "c1", "external_action", "{}");
         await Eventually(() => s.Sent.Any(x => x.EventId == "c1"));
+        await h.Presenter.WaitUntilIdleAsync();
         h.Clock.Advance(TimeSpan.FromSeconds(8)); await h.Presenter.WaitUntilIdleAsync();
         s.Hear("yes", 2000, 2100);
         await h.Presenter.WaitUntilIdleAsync();
@@ -282,6 +294,7 @@ public sealed class PresenterExternalToolTests
         var s = h.Session!;
         s.RaiseToolCall("d", "c", "external_action", "{}");
         await Eventually(() => s.Sent.Any(x => x.EventId == "c"));
+        await h.Presenter.WaitUntilIdleAsync();
         h.Clock.Advance(TimeSpan.FromSeconds(8)); await h.Presenter.WaitUntilIdleAsync();
         s.Hear("yes", 2000, 2100);
         await h.Presenter.WaitUntilIdleAsync();
@@ -309,6 +322,7 @@ public sealed class PresenterExternalToolTests
         var s = h.Session!;
         s.RaiseToolCall("d", "c", "external_action", "{}");
         await Eventually(() => s.Sent.Any(x => x.EventId == "c"));
+        await h.Presenter.WaitUntilIdleAsync();
         h.Clock.Advance(TimeSpan.FromSeconds(8)); await h.Presenter.WaitUntilIdleAsync();
         s.ModelTranscript("yes", 2000, 2100);
         await h.Presenter.WaitUntilIdleAsync();
@@ -390,6 +404,7 @@ public sealed class PresenterExternalToolTests
         var s = h.Session!;
         s.RaiseToolCall("d", "c", "external_action", "{}");
         await Eventually(() => s.Sent.Any(x => x.EventId == "c"));
+        await h.Presenter.WaitUntilIdleAsync();
         if (answerPhase) { h.Clock.Advance(TimeSpan.FromSeconds(8)); await h.Presenter.WaitUntilIdleAsync(); }
         await h.Presenter.EndAsync();
         await Eventually(() => disposable.Count == 1);
@@ -440,6 +455,7 @@ public sealed class PresenterExternalToolTests
         var s = h.Session!;
         s.RaiseToolCall("d", "c", "external_action", "{}");
         await Eventually(() => s.Sent.Any(x => x.EventId == "c"));
+        await h.Presenter.WaitUntilIdleAsync();
         h.Clock.Advance(TimeSpan.FromSeconds(8)); await h.Presenter.WaitUntilIdleAsync();
         if (action == "deadline") h.Clock.Advance(TimeSpan.FromSeconds(10));
         else if (action == "button") await h.Presenter.NextAsync();

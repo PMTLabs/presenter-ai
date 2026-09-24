@@ -571,10 +571,17 @@ public sealed class PresenterToolTests
         var session = harness.Session();
         session.CloseGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ending = harness.Presenter.EndAsync();
-        await Task.Delay(30);
-        Assert.Contains(session.Sent, s => s.Type == "close");
-        session.RaiseToolCall("late", "late", "next_slide", "{}");
-        session.CloseGate.SetResult();
+        try
+        {
+            // The loop is held in the close from here, so the wait must not flush (a barrier would queue behind it).
+            await harness.WaitForSentAsync(s => s.Type == "close", flush: false);
+            session.RaiseToolCall("late", "late", "next_slide", "{}");
+        }
+        finally
+        {
+            // Released even when the wait fails: a close left gated would wedge the loop and hang disposal.
+            session.CloseGate.TrySetResult();
+        }
         await ending;
         await harness.Flush();
         Assert.DoesNotContain(session.Sent, s => s.Type == "tool_output" && s.EventId == "late");
@@ -893,10 +900,10 @@ public sealed class PresenterToolTests
             await Flush();
         }
 
-        public async Task WaitForSentAsync(Func<(string Type, string? Content, string? EventId, string? DelegationId), bool> predicate, int timeoutMs = 3000)
+        public async Task WaitForSentAsync(Func<(string Type, string? Content, string? EventId, string? DelegationId), bool> predicate, int timeoutMs = 3000, bool flush = true)
         {
             var start = Environment.TickCount64;
-            while (!Session().Sent.Any(predicate))
+            while (!SentAny(predicate))
             {
                 if (Environment.TickCount64 - start > timeoutMs)
                 {
@@ -904,7 +911,14 @@ public sealed class PresenterToolTests
                 }
                 await Task.Delay(10);
             }
-            await Flush();
+            if (flush) await Flush();
+        }
+
+        // The loop may still be appending to Sent while this polls; a torn read retries on the next poll.
+        private bool SentAny(Func<(string Type, string? Content, string? EventId, string? DelegationId), bool> predicate)
+        {
+            try { return Session().Sent.Any(predicate); }
+            catch (InvalidOperationException) { return false; }
         }
 
         public ValueTask DisposeAsync() => Presenter.DisposeAsync();
