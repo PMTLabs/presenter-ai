@@ -223,6 +223,7 @@ public static class Program
         output.WriteLine("  presenter-cli smoke --provider azure|openai");
         output.WriteLine("  presenter-cli ask-probe --provider azure|openai --part1 <wav> --part2 <wav> [--gap-seconds 10] [--variant vad|continue|raw]");
         output.WriteLine("            [--tail-ms 1000] [--gap-keep-ms 320] [--reply <wav>] [--lang en|vi] [--observe-interrupt] [--absent <wav>] [--trace] [--pace F]");
+        output.WriteLine("            [--unmute-wait ack|none] [--lead-ms 200]   (wait for the unmute acknowledgement, then a silence lead-in)");
         output.WriteLine("            WAVs are 24 kHz mono PCM16; prints transcripts, timings and usage, never audio or secrets.");
         output.WriteLine("  presenter-cli tts --out <wav> (--text <t> | --text-file <f>) [--provider azure|openai] [--model gpt-audio-1.5] [--voice marin]");
         output.WriteLine("  presenter-cli compose-ask-wav --question <wav> --out <wav> --kept-seconds N [--preamble <wav>]... [--part2 <wav>] [--gap-seconds 10]");
@@ -298,7 +299,7 @@ internal static class CliParser
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var observeInterrupt = false;
         var trace = false;
-        string[] valued = ["--provider", "--part1", "--part2", "--gap-seconds", "--variant", "--tail-ms", "--gap-keep-ms", "--reply", "--lang", "--absent", "--pace"];
+        string[] valued = ["--provider", "--part1", "--part2", "--gap-seconds", "--variant", "--tail-ms", "--gap-keep-ms", "--reply", "--lang", "--absent", "--pace", "--unmute-wait", "--lead-ms"];
         for (var index = 0; index < args.Length; index++)
         {
             var argument = args[index];
@@ -390,8 +391,21 @@ internal static class CliParser
             return null;
         }
 
+        var unmuteWait = values.GetValueOrDefault("--unmute-wait", "ack");
+        if (unmuteWait is not ("ack" or "none"))
+        {
+            error.WriteLine("--unmute-wait must be ack or none");
+            return null;
+        }
+
+        if (!int.TryParse(values.GetValueOrDefault("--lead-ms", "200"), out var leadMs) || leadMs is < 0 or > 2000)
+        {
+            error.WriteLine("--lead-ms must be an integer from 0 to 2000");
+            return null;
+        }
+
         return new AskProbeArguments(provider, part1, part2, gapSeconds, variant, tailMs, gapKeepMs, observeInterrupt,
-            values.GetValueOrDefault("--reply"), lang, values.GetValueOrDefault("--absent"), trace, pace);
+            values.GetValueOrDefault("--reply"), lang, values.GetValueOrDefault("--absent"), trace, pace, unmuteWait, leadMs);
     }
 
     private static Dictionary<string, List<string>>? ParseOptions(string[] args, string command, string[] valued, TextWriter error, List<string>? positional = null)
@@ -659,6 +673,8 @@ internal sealed record AskProbeArguments(
     string Lang,
     string? Absent,
     bool Trace = false,
-    double Pace = 0) : CliArguments;
+    double Pace = 0,
+    string UnmuteWait = "ack",
+    int LeadMs = 200) : CliArguments;
 public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot, string? Owner = null) : CliArguments;
 public sealed record ImportArguments(IReadOnlyList<string> Paths, string Owner, string? ContentRoot) : CliArguments;

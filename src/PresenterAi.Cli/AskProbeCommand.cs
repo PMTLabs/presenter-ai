@@ -35,6 +35,8 @@ internal static class AskProbeCommand
     private const int ProvenanceSlackMs = 250;
     private const int TruncationSlackMs = 1_000;
     private const int NewUtteranceQuietMs = 1_500;
+    private const int UnmuteAckTimeoutMs = 2_000;
+    private const int QuestionStartWindowChars = 40;
     private const int VoicedIntervalGapMs = 500;
     private const int EndSignalSettleMs = 500;
     private const string WavHint = "Convert it with: ffmpeg -i <in> -ar 24000 -ac 1 -c:a pcm_s16le <out.wav>";
@@ -156,7 +158,26 @@ internal static class AskProbeCommand
                 throw new InvalidOperationException("unmute refused");
             }
 
+            // T1 finding: audio appended before the unmute takes effect is discarded (the burst start was clipped). By
+            // default wait for session.input_audio.unmuted, then lead in with silence; --unmute-wait none / --lead-ms A/B it.
+            if (arguments.UnmuteWait == "ack")
+            {
+                var ack = await observer.WaitForAsync(e => e.Kind == EventKind.Raw && e.Type == "session.input_audio.unmuted" && e.At >= askDoneAt, UnmuteAckTimeoutMs, cancellationToken).ConfigureAwait(false);
+                await output.WriteLineAsync(ack is null
+                    ? $"unmute: no session.input_audio.unmuted within {UnmuteAckTimeoutMs} ms; continuing"
+                    : $"unmute: acknowledged after {ack.At - askDoneAt} ms").ConfigureAwait(false);
+            }
+            else
+            {
+                await output.WriteLineAsync("unmute: not waiting for the acknowledgement (--unmute-wait none)").ConfigureAwait(false);
+            }
+
             var startMark = session.MarkInputPosition();
+            if (arguments.LeadMs > 0 && !session.SendAudio(new byte[arguments.LeadMs * BytesPerMs]))
+            {
+                throw new InvalidOperationException("the silence lead-in was refused");
+            }
+
             var refused = 0;
             var pacing = Stopwatch.StartNew();
             double queuedAudioMs = 0;
@@ -187,7 +208,7 @@ internal static class AskProbeCommand
             var burstEndMs = marks[endMark].SentMs;
             var sendDurationMs = marks[endMark].At - askDoneAt;
             await output.WriteLineAsync(
-                $"burst: {chunks.Count} chunks ({Seconds(queuedAudioMs)} of audio) at {(arguments.Pace > 0 ? $"pace {arguments.Pace.ToString("0.##", CultureInfo.InvariantCulture)}x real time" : "pace 0 (unpaced burst)")}; " +
+                $"burst: {arguments.LeadMs} ms silence lead-in + {chunks.Count} chunks ({Seconds(queuedAudioMs)} of audio) at {(arguments.Pace > 0 ? $"pace {arguments.Pace.ToString("0.##", CultureInfo.InvariantCulture)}x real time" : "pace 0 (unpaced burst)")}; " +
                 $"send duration {lastQueuedAt - askDoneAt} ms to queue, on the wire after {sendDurationMs} ms; " +
                 $"input clock [{burstStartMs}, {burstEndMs}] ms").ConfigureAwait(false);
 
@@ -527,6 +548,7 @@ internal static class AskProbeCommand
             ivReasons.Add("part-2 keyword before part-1 keyword");
         }
 
+        var questionStart = QuestionStartFound(questionText, deck);
         var lastQuestionAt = turn.Question.Count == 0 ? (long?)null : turn.Question.Max(e => e.At);
         var viiMargin = answerEnd is { } ae && lastQuestionAt is { } lq ? ae - lq : (long?)null;
         await output.WriteLineAsync($"question turn: \"{questionText.Trim()}\" ({turn.Question.Count} deltas, the last at +{(lastQuestionAt is { } l ? l - run.AskDoneAt : 0)} ms after Ask done)").ConfigureAwait(false);
@@ -547,6 +569,10 @@ internal static class AskProbeCommand
             ("(vii) question transcript finished before the answer ended", viiMargin is > 0,
                 viiMargin is null ? (answerEnd is null ? "the answer did not end" : "no question delta") : $"margin {viiMargin:+#;-#;0} ms (last question delta +{lastQuestionAt - run.AskDoneAt} ms, answer end +{answerEnd - run.AskDoneAt} ms after Ask done)")
         };
+        criteria.Add(("(viii) the question turn keeps the start of part 1", questionStart,
+            questionStart
+                ? $"\"{string.Join("\" / \"", deck.QuestionStartKeywords)}\" found just before the part-1 keyword"
+                : $"none of \"{string.Join("\" / \"", deck.QuestionStartKeywords)}\" within {QuestionStartWindowChars} letters before the part-1 keyword (clipped start?)"));
         if (run.ReplyAt is not null)
         {
             criteria.Add(("(reply) the reply is a new utterance", turn.ReplyIsNewUtterance,
@@ -609,6 +635,23 @@ internal static class AskProbeCommand
 
         var replyIsNew = replyFirst is not null && answerEnd is { } end && replyFirst.At > end && (replyGap is null || replyGap >= NewUtteranceQuietMs);
         return new TurnTakingResult(question, fresh, replyFirst, replyGap, replyIsNew);
+    }
+
+    /// <summary>
+    /// (viii): the first content word of part 1 ("What"/"program", "Chương trình") appears in the canonical question text
+    /// within 40 letters before the part-1 keyword, so a preamble word elsewhere cannot stand in for a clipped start.
+    /// </summary>
+    internal static bool QuestionStartFound(string questionText, ProbeDeck deck)
+    {
+        var canonical = Canonical(questionText);
+        var part1 = Find(questionText, deck.Part1Keywords);
+        if (part1 < 0)
+        {
+            return false;
+        }
+
+        var window = canonical[Math.Max(0, part1 - QuestionStartWindowChars)..part1];
+        return deck.QuestionStartKeywords.Any(keyword => window.Contains(Canonical(keyword), StringComparison.Ordinal));
     }
 
     private static bool InBurst(ProbeRun run, ProbeEvent e) =>
@@ -1433,7 +1476,8 @@ internal sealed record ProbeDeck(
     IReadOnlyList<string> Part1Keywords,
     IReadOnlyList<string> Part2Keywords,
     IReadOnlyList<string> FactA,
-    IReadOnlyList<string> FactB)
+    IReadOnlyList<string> FactB,
+    IReadOnlyList<string> QuestionStartKeywords)
 {
     public static ProbeDeck For(string lang) => lang == "vi" ? Vietnamese : English;
 
@@ -1446,7 +1490,8 @@ internal sealed record ProbeDeck(
         ["Da Nang", "Danang"],
         ["Hanoi", "Ha Noi"],
         ["paperless", "paper-less", "paper free"],
-        ["4.2", "4,2", "4 point 2", "four point two", "four point 2", "4 point two"]);
+        ["4.2", "4,2", "4 point 2", "four point two", "four point 2", "4 point two"],
+        ["What", "program"]);
 
     public static readonly ProbeDeck Vietnamese = new(
         "Đánh giá chương trình",
@@ -1457,7 +1502,8 @@ internal sealed record ProbeDeck(
         ["Đà Nẵng", "Da Nang", "Danang"],
         ["Hà Nội", "Hanoi"],
         ["không giấy", "không dùng giấy", "điện tử", "paperless"],
-        ["4,2", "4.2", "4 phẩy 2", "bốn phẩy hai", "bốn phẩy 2", "4 phẩy hai", "bốn tỷ hai", "4 tỷ 2", "bốn điểm hai", "4 điểm 2", "4200 triệu", "4.200 triệu"]);
+        ["4,2", "4.2", "4 phẩy 2", "bốn phẩy hai", "bốn phẩy 2", "4 phẩy hai", "bốn tỷ hai", "4 tỷ 2", "bốn điểm hai", "4 điểm 2", "4200 triệu", "4.200 triệu"],
+        ["Chương trình"]);
 }
 
 /// <summary>Reads the PCM payload of a RIFF/WAVE file that is 24 kHz, mono, 16-bit PCM.</summary>

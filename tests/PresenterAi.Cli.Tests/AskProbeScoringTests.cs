@@ -281,6 +281,46 @@ public sealed class AskProbeScoringTests
     public void Fact_b_rejects_other_amounts(string lang, string answer) =>
         AskProbeCommand.Quote(answer, ProbeDeck.For(lang).FactB).Should().BeNull();
 
+    [Theory]
+    [InlineData("en", "What did the programme change at the Da Nang office in its first year, and how much did the Hanoi expansion cost?", true)]
+    [InlineData("en", " did the programme change at the Da Nang office", true)]
+    [InlineData("en", "What did the change at the Da Nang office", true)]
+    [InlineData("en", " change at the Da Nang office in its first year, and how much did the Hanoi expansion cost?", false)]
+    [InlineData("en", "Here is what I would like to understand about the programme and its first year. So, keeping all of that in mind, change at the Da Nang office", false)]
+    [InlineData("vi", "Chương trình đã thay đổi gì ở văn phòng Đà Nẵng trong năm đầu tiên, và việc mở rộng ở Hà Nội tốn bao nhiêu?", true)]
+    [InlineData("vi", "chuong trinh da thay doi gi o van phong Da Nang", true)]
+    [InlineData("vi", "gì ở văn phòng Đà Nẵng trong năm đầu tiên, và việc mở rộng ở Hà Nội tốn bao nhiêu?", false)]
+    public void Viii_requires_the_first_content_word_of_part_1_just_before_the_part_1_keyword(string lang, string question, bool found) =>
+        AskProbeCommand.QuestionStartFound(question, ProbeDeck.For(lang)).Should().Be(found);
+
+    [Fact]
+    public async Task A_clipped_question_start_fails_viii()
+    {
+        var events = Run1Events().Where(e => e.Text is not (" Did the" or " programme" or " change at" or " the")).ToList();
+
+        var output = new StringWriter();
+        await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), events, output);
+
+        output.ToString().Should().Contain("FAIL (viii) the question turn keeps the start of part 1: none of \"What\" / \"program\"");
+        output.ToString().Should().Contain("PASS (iv)");
+    }
+
+    [Fact]
+    public void Unmute_wait_and_lead_in_are_options_with_ack_and_200_ms_defaults()
+    {
+        var parsed = CliParser.Parse(["ask-probe", "--provider", "azure", "--part1", "a.wav", "--part2", "b.wav"], new StringWriter());
+        parsed.Should().BeOfType<AskProbeArguments>().Which.Should().Match<AskProbeArguments>(a => a.UnmuteWait == "ack" && a.LeadMs == 200);
+
+        var ab = CliParser.Parse(["ask-probe", "--provider", "azure", "--part1", "a.wav", "--part2", "b.wav", "--unmute-wait", "none", "--lead-ms", "0"], new StringWriter());
+        ab.Should().BeOfType<AskProbeArguments>().Which.Should().Match<AskProbeArguments>(a => a.UnmuteWait == "none" && a.LeadMs == 0);
+
+        var error = new StringWriter();
+        CliParser.Parse(["ask-probe", "--provider", "azure", "--part1", "a.wav", "--part2", "b.wav", "--unmute-wait", "later"], error).Should().BeNull();
+        error.ToString().Should().Contain("--unmute-wait must be ack or none");
+        CliParser.Parse(["ask-probe", "--provider", "azure", "--part1", "a.wav", "--part2", "b.wav", "--lead-ms", "5000"], error).Should().BeNull();
+        error.ToString().Should().Contain("--lead-ms must be an integer from 0 to 2000");
+    }
+
     [Fact]
     public void Mark_timeout_scales_with_the_audio_queued_before_the_mark()
     {

@@ -20,8 +20,8 @@ public sealed class AskProbeSuiteTests
 
         verdict.Passed.Should().BeTrue(string.Join("; ", verdict.Reasons));
         verdict.AnswerStartBudgetMs.Should().Be(15_000, "1.5 x 3.3 s is under the 15 s floor");
-        verdict.TotalUsageSeconds.Should().Be(11 * 50);
-        AskProbeSummary.Table(runs, verdict).Should().Contain("T1 verdict: PASS").And.Contain("09-cap40-1").And.Contain("YES");
+        verdict.TotalUsageSeconds.Should().Be(13 * 50);
+        AskProbeSummary.Table(runs, verdict).Should().Contain("T1 verdict: PASS").And.Contain("11-cap40-1").And.Contain("YES");
     }
 
     [Fact]
@@ -29,17 +29,17 @@ public sealed class AskProbeSuiteTests
     {
         var runs = CompleteMatrix();
         runs[1] = AskProbeSummary.Parse("02-en-2", Log(pass: false, failing: "v"));
-        runs[4] = AskProbeSummary.Parse("05-cap24-1", Log(pass: true, truncated: true));
-        runs[8] = AskProbeSummary.Parse("09-cap40-1", Log(pass: true));
+        runs[6] = AskProbeSummary.Parse("07-cap24-1", Log(pass: true, truncated: true));
+        runs[10] = AskProbeSummary.Parse("11-cap40-1", Log(pass: true));
         runs.RemoveAt(3);
 
         var verdict = AskProbeSummary.Judge(runs);
 
         verdict.Passed.Should().BeFalse();
         verdict.Reasons.Should().Contain("02-en-2: failed (v)")
-            .And.Contain("05-cap24-1: TRUNCATED")
-            .And.Contain("09-cap40-1: passed untruncated, so the 25 s cap is not confirmed")
-            .And.Contain("vi: 0 of 1 runs present");
+            .And.Contain("07-cap24-1: TRUNCATED")
+            .And.Contain("11-cap40-1: passed untruncated, so the 25 s cap is not confirmed")
+            .And.Contain("vi: 2 of 3 runs present");
     }
 
     [Fact]
@@ -48,7 +48,7 @@ public sealed class AskProbeSuiteTests
         var run = AskProbeSummary.Parse("09-cap40-1", Log(pass: false, failing: "iv", truncated: true, latencyMs: 32_893, usage: 59.1, provenance: false));
 
         run.Kind.Should().Be("cap40");
-        run.Criteria.Should().HaveCount(8);
+        run.Criteria.Should().HaveCount(9);
         run.Criteria["iv"].Should().BeFalse();
         run.Criteria["v"].Should().BeTrue();
         run.Truncated.Should().BeTrue();
@@ -205,14 +205,14 @@ public sealed class AskProbeSuiteTests
 
     private static IEnumerable<(string Name, string Log)> CompleteMatrixLogs()
     {
-        foreach (var name in new[] { "01-en-1", "02-en-2", "03-en-3", "04-vi-1", "05-cap24-1", "06-cap24-2", "07-cap24-3", "08-cap28-1" })
+        foreach (var name in new[] { "01-en-1", "02-en-2", "03-en-3", "04-vi-1", "05-vi-2", "06-vi-3", "07-cap24-1", "08-cap24-2", "09-cap24-3", "10-cap28-1" })
         {
             yield return (name, Log(pass: true));
         }
 
-        yield return ("09-cap40-1", Log(pass: false, failing: "iv", truncated: true));
-        yield return ("10-raw-1", Log(pass: true));
-        yield return ("11-interrupt-1", "interrupt (narration): muted 1500 ms after the first narration audio\nusage.seconds=50\n");
+        yield return ("11-cap40-1", Log(pass: false, failing: "iv", truncated: true));
+        yield return ("12-raw-1", Log(pass: true));
+        yield return ("13-interrupt-1", "interrupt (narration): muted 1500 ms after the first narration audio\nusage.seconds=50\n");
     }
 
     private static string Log(bool pass, string? failing = null, bool truncated = false, long latencyMs = 3_300, double usage = 50, bool provenance = true)
@@ -223,7 +223,7 @@ public sealed class AskProbeSuiteTests
             $"latency: Ask done -> first answer audio {latencyMs} ms; last chunk queued -> {latencyMs} ms",
             truncated ? "truncation: TRUNCATED (the reply starts at 55600 on the input clock)" : "truncation: none detected"
         };
-        foreach (var id in new[] { "i", "ii", "iii", "iv", "v", "vi", "vii", "reply" })
+        foreach (var id in new[] { "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "reply" })
         {
             lines.Add($"{(id == failing ? "FAIL" : "PASS")} ({id}) criterion text");
         }

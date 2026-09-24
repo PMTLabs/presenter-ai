@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Matrix (every run unpaced, with --trace and the "yes" reply):
-      en x3, vi x1, cap 24 s x3, cap 28 s x1, cap 40 s x1 (over the 25 s cap: expected TRUNCATED or FAIL),
+      en x3, vi x3, cap 24 s x3, cap 28 s x1, cap 40 s x1 (over the 25 s cap: expected TRUNCATED or FAIL),
       raw control x1, observe-interrupt x1.
     Each run writes <LogDir>\NN-<kind>-<n>.log. Then `presenter-cli ask-probe-summary <LogDir>` prints the table
     (per-run (i)-(vi), TRUNCATED, provenance, latency, usage), the total usage, AnswerStartBudgetMs and the T1 verdict.
@@ -74,13 +74,15 @@ $matrix = [ordered]@{
     '02-en-2'        = Probe $en 'part1.wav'
     '03-en-3'        = Probe $en 'part1.wav'
     '04-vi-1'        = Probe $vi 'part1.wav' @('--lang', 'vi')
-    '05-cap24-1'     = Probe $en 'cap-24-part1.wav'
-    '06-cap24-2'     = Probe $en 'cap-24-part1.wav'
-    '07-cap24-3'     = Probe $en 'cap-24-part1.wav'
-    '08-cap28-1'     = Probe $en 'cap-28-part1.wav'
-    '09-cap40-1'     = Probe $en 'cap-40-part1.wav'
-    '10-raw-1'       = Probe $en 'part1.wav' @('--variant', 'raw')
-    '11-interrupt-1' = Probe $en 'part1.wav' @('--observe-interrupt', '--absent', (Join-Path $en 'absent.wav'))
+    '05-vi-2'        = Probe $vi 'part1.wav' @('--lang', 'vi')
+    '06-vi-3'        = Probe $vi 'part1.wav' @('--lang', 'vi')
+    '07-cap24-1'     = Probe $en 'cap-24-part1.wav'
+    '08-cap24-2'     = Probe $en 'cap-24-part1.wav'
+    '09-cap24-3'     = Probe $en 'cap-24-part1.wav'
+    '10-cap28-1'     = Probe $en 'cap-28-part1.wav'
+    '11-cap40-1'     = Probe $en 'cap-40-part1.wav'
+    '12-raw-1'       = Probe $en 'part1.wav' @('--variant', 'raw')
+    '13-interrupt-1' = Probe $en 'part1.wav' @('--observe-interrupt', '--absent', (Join-Path $en 'absent.wav'))
 }
 
 Push-Location $repoRoot
