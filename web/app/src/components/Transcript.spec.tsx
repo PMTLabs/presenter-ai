@@ -96,6 +96,32 @@ describe("Transcript train on this", () => {
     );
   });
 
+  it("sends the question's slide and the full answer after navigating mid-answer", () => {
+    // Real frames through the store reducer: the question is asked on slide 2 and the talk moves to 5 while the
+    // answer is still streaming, then narration continues on 5.
+    usePresenterStore.setState({ transcript: [], slide: 0 });
+    const onTrainOnThis = vi.fn();
+    render(<Transcript onTrainOnThis={onTrainOnThis} />);
+    const { message } = usePresenterStore.getState();
+    act(() => {
+      message({ type: "slide", index: 2 });
+      message({ type: "transcript", role: "user", delta: "What about", end_ms: 1000 });
+      message({ type: "transcript", role: "user", delta: " the coating?", end_ms: 1400 });
+      message({ type: "transcript", role: "assistant", delta: "The coating", end_ms: 3000 });
+      message({ type: "slide", index: 5 });
+      message({ type: "transcript", role: "assistant", delta: " uses a new alloy.", end_ms: 3500 });
+      message({ type: "transcript", role: "assistant", delta: "Slide five covers pricing.", end_ms: 9000 });
+    });
+
+    const buttons = screen.getAllByRole("button", { name: "Train on this" });
+    expect(buttons).toHaveLength(2);
+    expect(buttons[1]).toHaveProperty("disabled", true);
+    fireEvent.click(buttons[0]);
+
+    expect(onTrainOnThis).toHaveBeenCalledTimes(1);
+    expect(onTrainOnThis).toHaveBeenCalledWith("What about the coating?", "The coating uses a new alloy.", 2);
+  });
+
   it("disables train on this without a preceding question", () => {
     usePresenterStore.setState({
       transcript: [{ role: "assistant", text: "Welcome to the talk.", endMs: null, slide: 0 }],

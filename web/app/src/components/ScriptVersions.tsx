@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import apiClient, { type components } from "@presenter/shared/api";
 import { errorMessages, isProblem } from "@presenter/shared";
 import { usePresenterStore } from "../store/presenterStore";
@@ -10,6 +10,9 @@ type PendingEdit = components["schemas"]["PendingEditDto"];
 export type ScriptVersionsProps = {
   presentationId: string;
 };
+
+/** The endpoint's maximum page size (`RevisionEndpoints.ListAsync` accepts 1…100). */
+export const REVISIONS_PAGE_SIZE = 100;
 
 function describeError(problem: unknown, fallback: string): string {
   return isProblem(problem)
@@ -46,24 +49,54 @@ export function ScriptVersions({ presentationId }: ScriptVersionsProps) {
     pendingEdits: PendingEdit[];
   } | null>(null);
 
+  // Every load takes a new generation; a load that is superseded (presentation change, a newer refresh, unmount)
+  // drops its results so an older, slower response never overwrites a newer list.
+  const loadGeneration = useRef(0);
+  useEffect(
+    () => () => {
+      loadGeneration.current++;
+    },
+    [],
+  );
+
+  /** Fetches every page (newest first) until the listed count reaches `total`, so every version stays reachable. */
   const loadVersions = useCallback(async () => {
+    const generation = ++loadGeneration.current;
+    const isStale = () => generation !== loadGeneration.current;
     if (!presentationId) return;
+    const collected: RevisionSummary[] = [];
+    const seen = new Set<number>();
     try {
-      const { data, error } = await apiClient.GET("/v1/presentations/{id}/revisions", {
-        params: { path: { id: presentationId } },
-      });
-      if (error) {
-        setListError(describeError(error, "Unable to load script versions."));
-        return;
+      for (let page = 1; ; page++) {
+        const { data, error } = await apiClient.GET("/v1/presentations/{id}/revisions", {
+          params: { path: { id: presentationId }, query: { page, pageSize: REVISIONS_PAGE_SIZE } },
+        });
+        if (isStale()) return;
+        if (error) {
+          setListError(describeError(error, "Unable to load script versions."));
+          return;
+        }
+        const items = data && Array.isArray(data.items) ? data.items : [];
+        // A commit landing between two page requests shifts older rows down one place; skip the repeat.
+        for (const item of items) {
+          const number = Number(item.number);
+          if (seen.has(number)) continue;
+          seen.add(number);
+          collected.push(item);
+        }
+        const total = Number(data?.total ?? 0);
+        if (items.length === 0 || collected.length >= total) break;
       }
       setListError(null);
-      if (data) setVersions(Array.isArray(data.items) ? data.items : []);
+      setVersions(collected);
     } catch {
-      setListError("Unable to load script versions.");
+      if (!isStale()) setListError("Unable to load script versions.");
     }
   }, [presentationId]);
 
   useEffect(() => {
+    setVersions([]);
+    setListError(null);
     setSelected(null);
     setDetail(null);
     setDetailError(null);
@@ -104,6 +137,13 @@ export function ScriptVersions({ presentationId }: ScriptVersionsProps) {
       active = false;
     };
   }, [presentationId, selected]);
+
+  // A revision's changes never change, but whether it is current does (a live edit or a revert moves the head).
+  // The list is refreshed on every script_version, so it is the authority; the detail's flag is only a fallback.
+  const detailIsCurrent = detail
+    ? (versions.find((version) => Number(version.number) === Number(detail.number))?.isCurrent ??
+      detail.isCurrent)
+    : false;
 
   async function revert(number: number) {
     if (!presentationId || reverting) return;
@@ -197,7 +237,7 @@ export function ScriptVersions({ presentationId }: ScriptVersionsProps) {
         <div className="mt-2 border-t border-gray-200 pt-2 dark:border-gray-800">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-semibold">v{Number(detail.number)} changes</span>
-            {!detail.isCurrent && (
+            {!detailIsCurrent && (
               <button
                 type="button"
                 onClick={() => void revert(Number(detail.number))}

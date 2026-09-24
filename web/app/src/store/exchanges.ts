@@ -8,8 +8,53 @@ export type Exchange = {
   slideIndex: number;
 };
 
-/** `train_turn` caps `answer` at 2,000 chars (plan 010 §4.3); trim here so every caller sends a valid frame. */
-const MAX_ANSWER_CHARS = 2000;
+/**
+ * `train_turn` accepts `question` and `answer` of 1…2,000 characters (UTF-16 code units, as both `String.length` and
+ * .NET `string.Length` count them) that are not whitespace-only, inside a 16 KiB text frame (plan 010 §4.3,
+ * `PresenterBridge.TryReadTrainTurn`). The exchange is built to satisfy every one of those limits so a click can
+ * never send a frame the bridge rejects.
+ */
+export const MAX_TRAINING_TEXT_CHARS = 2000;
+const ELLIPSIS = "…";
+
+/**
+ * Transcript text is speech, so control characters carry no meaning; JSON would also escape each to six bytes, and
+ * U+0085 is whitespace to .NET but not to `String.trim()`. Replace them (and any unpaired surrogate, which JSON escapes
+ * the same way) with a space, then collapse runs of whitespace. After this every code unit costs at most three bytes
+ * on the wire, so two 2,000-character fields always fit the 16 KiB frame.
+ */
+function normalise(text: string): string {
+  return text
+    // eslint-disable-next-line no-control-regex -- matching control characters is the point
+    .replace(/[\u0000-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+
+/** The answer keeps its beginning (what the presenter said first): cut at a word boundary and mark the cut. */
+function keepStart(text: string): string {
+  if (text.length <= MAX_TRAINING_TEXT_CHARS) return text;
+  let end = MAX_TRAINING_TEXT_CHARS - ELLIPSIS.length;
+  if (isHighSurrogate(text.charCodeAt(end - 1))) end--;
+  const space = text.lastIndexOf(" ", end);
+  if (space > end / 2) end = space;
+  return text.slice(0, end).trimEnd() + ELLIPSIS;
+}
+
+/**
+ * The question keeps its end: its user turns are joined oldest first, and the last of them — what the presenter went
+ * on to answer — holds the actual question, while the oldest words are lead-in. Cut at a word boundary, mark the cut.
+ */
+function keepEnd(text: string): string {
+  if (text.length <= MAX_TRAINING_TEXT_CHARS) return text;
+  let start = text.length - (MAX_TRAINING_TEXT_CHARS - ELLIPSIS.length);
+  if (isHighSurrogate(text.charCodeAt(start - 1))) start++;
+  const space = text.indexOf(" ", start - 1);
+  if (space !== -1 && space - start < (text.length - start) / 2) start = space + 1;
+  return ELLIPSIS + text.slice(start).trimStart();
+}
 
 /**
  * Groups transcript turns into trainer exchanges: a run of user turns followed by every presenter turn up to the
@@ -35,17 +80,24 @@ export function groupExchanges(turns: readonly Turn[]): (Exchange | null)[] {
     while (i < turns.length && turns[i].role !== "user" && turns[i].slide === slideIndex) i++;
     const answerEnd = i;
     if (answerEnd > answerStart) {
-      const question = turns
-        .slice(questionStart, questionEnd)
-        .map((turn) => turn.text)
-        .join(" ")
-        .trim();
-      const answer = turns
-        .slice(answerStart, answerEnd)
-        .map((turn) => turn.text)
-        .join(" ")
-        .trim()
-        .slice(0, MAX_ANSWER_CHARS);
+      const question = keepEnd(
+        normalise(
+          turns
+            .slice(questionStart, questionEnd)
+            .map((turn) => turn.text)
+            .join(" "),
+        ),
+      );
+      const answer = keepStart(
+        normalise(
+          turns
+            .slice(answerStart, answerEnd)
+            .map((turn) => turn.text)
+            .join(" "),
+        ),
+      );
+      // Whitespace-only speech has nothing to train on and the bridge would reject it: no exchange, button disabled.
+      if (question.length === 0 || answer.length === 0) continue;
       const exchange: Exchange = { question, answer, slideIndex };
       for (let k = answerStart; k < answerEnd; k++) result[k] = exchange;
     }
