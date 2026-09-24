@@ -2341,6 +2341,87 @@ public sealed class PresenterAskTests
         Assert.Equal(sent.Count, h.S.Sent.Skip(before).Count());
     }
 
+    // ---- T8 live-run defect: the resume waits for resumed narration ---------------------------------------------
+
+    /// <summary>Brings the talk to a resume-after-question instruction on slide 1 by the given path.</summary>
+    private static async Task ResumeBy(Harness h, string path)
+    {
+        if (path == "barge-in")
+        {
+            await h.StartNarrating();
+            h.S.Hear("a question", 0, 100);
+            await h.Settle();
+            await h.Answer();
+            await h.Advance(TimeSpan.FromMilliseconds(701));
+            await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs));
+        }
+        else
+        {
+            await h.ToCheckIn();
+            switch (path)
+            {
+                case "yes": await h.Reply("yes"); break;
+                case "continue": Assert.True(await h.Presenter.ResumeAsync()); await h.Settle(); break;
+                default: await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs)); break;
+            }
+
+            Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        }
+
+        Assert.Single(h.S.Sent, IsResumeAfterQuestion);
+    }
+
+    [Theory]
+    [InlineData("yes")]
+    [InlineData("timeout")]
+    [InlineData("continue")]
+    [InlineData("barge-in")]
+    public async Task Resume_waits_for_the_resumed_narration_before_the_advance(string path)
+    {
+        await using var h = new Harness();
+        await ResumeBy(h, path);
+
+        // The live model takes seconds to speak after the instruction; the old code advanced 3 s after it.
+        await h.Advance(TimeSpan.FromMilliseconds(3500));
+        Assert.Equal(0, h.Presenter.Snapshot().SlideIndex);
+        Assert.DoesNotContain(h.S.Sent, s => s.EventId == "slide-2-part-1");
+
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(2999));
+        Assert.Equal(0, h.Presenter.Snapshot().SlideIndex);
+        await h.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.Equal(1, h.Presenter.Snapshot().SlideIndex);
+        Assert.Single(h.S.Sent, s => s.EventId == "slide-2-part-1");
+    }
+
+    [Fact]
+    public async Task Resume_with_a_silent_model_arms_the_advance_after_the_fallback()
+    {
+        await using var h = new Harness();
+        await ResumeBy(h, "timeout");
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.NudgeMs - 1));
+        Assert.Equal(0, h.Presenter.Snapshot().SlideIndex);
+        await h.Advance(TimeSpan.FromMilliseconds(1));
+        Assert.Contains($"resume: no audio {Presenter.NudgeMs} ms after the resume instruction; arming the advance", h.Logs);
+        await h.Advance(TimeSpan.FromMilliseconds(3001));
+        Assert.Equal(1, h.Presenter.Snapshot().SlideIndex);
+    }
+
+    [Fact]
+    public async Task Resumed_narration_with_parts_pending_keeps_the_part_gap()
+    {
+        await using var h = new Harness(slides: [new(0, 1, "Long", string.Join(" ", Enumerable.Repeat("Sentence of narration.", 40)), null), BaseSlides[1]], chunkChars: 300);
+        await ResumeBy(h, "continue");
+
+        await h.Advance(TimeSpan.FromMilliseconds(3500));
+        Assert.DoesNotContain(h.S.Sent, s => s.EventId == "slide-1-part-2");
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.PartGapFor(3000) + 1));
+        Assert.Contains(h.S.Sent, s => s.EventId == "slide-1-part-2");
+        Assert.Equal(0, h.Presenter.Snapshot().SlideIndex);
+    }
+
     // ---- Harness --------------------------------------------------------------------------------------------------
 
     private static bool IsResumeAfterQuestion((string Type, string? Content, string? EventId, string? DelegationId) item) =>

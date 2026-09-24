@@ -85,6 +85,11 @@ public sealed partial class Presenter : IPresenter
     private long _nudgeGeneration;
     private long _wrapUpGeneration;
     private long _questionGeneration;
+    // Live-run defect (T8): after a resume-after-question instruction the advance timer waits for the model's resumed
+    // audio; a bounded fallback (NudgeMs) arms it anyway so a silent model cannot stall the talk.
+    private bool _resumeAwaitingVoice;
+    private ITimer? _resumeWaitTimer;
+    private long _resumeWaitGeneration;
     private bool _questionHoldOpen;
     private bool _answerVoiced;
     private long _questionOpenedAt;
@@ -470,6 +475,10 @@ public sealed partial class Presenter : IPresenter
                     case NudgeElapsed nudge when nudge.Generation == _nudgeGeneration:
                         _nudgeTimer = null;
                         OnNudge();
+                        break;
+                    case ResumeWaitElapsed resumeWait when resumeWait.Generation == _resumeWaitGeneration:
+                        _resumeWaitTimer = null;
+                        OnResumeWaitElapsed();
                         break;
                     case WrapUpFallbackElapsed fallback when fallback.Generation == _wrapUpGeneration:
                         _wrapUpTimer = null;
@@ -1086,6 +1095,10 @@ public sealed partial class Presenter : IPresenter
 
         if (_state == PresenterState.Presenting)
         {
+            // The first voiced audio after a resume instruction is the resumed narration: from here the ordinary
+            // after-voice timers (part gap or advance silence) run again.
+            if (_resumeAwaitingVoice && !_questionHoldOpen) ClearResumeWait();
+
             // While a backend answer is pending, speech is filler ("One moment."), not the answer.
             if (_pendingTool is null && _questionHoldOpen && _interaction != Interaction.WaitingOnSlide && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
             {
@@ -2456,7 +2469,10 @@ public sealed partial class Presenter : IPresenter
             _session?.AppendInstructions(
                 instruction ?? PromptBuilder.ResumeAfterQuestionInstruction(),
                 $"slide-{_slideIndex + 1}-resume-{++_resumeSequence}");
-            ArmAfterVoice();
+            // The live model takes seconds to start speaking after an appended instruction, and _heardOutput is
+            // still true from the answer: arming the advance now skipped the rest of the slide (T8 live run). The
+            // advance is armed by the resumed audio instead, or by the fallback below.
+            ArmResumeWait();
         }
         else if (_wrappingUp)
         {
@@ -2479,6 +2495,37 @@ public sealed partial class Presenter : IPresenter
     }
 
     private void ArmSilence() => SetSilenceTimer(AdvanceSilenceMs, partGap: false);
+
+    /// <summary>After a resume instruction: no advance timer until resumed audio; after NudgeMs without it, arm it.</summary>
+    private void ArmResumeWait()
+    {
+        ClearResumeWait();
+        ClearSilenceTimer();
+        _resumeAwaitingVoice = true;
+        var generation = _resumeWaitGeneration;
+        _resumeWaitTimer = _timeProvider.CreateTimer(
+            _ => QueueFromProducer(new ResumeWaitElapsed(generation)),
+            null,
+            TimeSpan.FromMilliseconds(NudgeMs),
+            Timeout.InfiniteTimeSpan);
+    }
+
+    private void ClearResumeWait()
+    {
+        _resumeWaitGeneration++;
+        _resumeWaitTimer?.Dispose();
+        _resumeWaitTimer = null;
+        _resumeAwaitingVoice = false;
+    }
+
+    private void OnResumeWaitElapsed()
+    {
+        if (!_resumeAwaitingVoice) return;
+        _resumeAwaitingVoice = false;
+        if (_state != PresenterState.Presenting || _questionHoldOpen) return;
+        LogMessage("warn", $"resume: no audio {NudgeMs} ms after the resume instruction; arming the advance");
+        ArmAfterVoice();
+    }
 
     private void ArmNudge()
     {
@@ -2527,6 +2574,7 @@ public sealed partial class Presenter : IPresenter
 
     private void ClearTimers()
     {
+        ClearResumeWait();
         ClearSilenceTimer();
         ClearNudgeTimer();
         ClearWrapUpTimer();
@@ -2556,6 +2604,8 @@ public sealed partial class Presenter : IPresenter
 
     private void OpenOrExtendQuestionHold(long? endMs)
     {
+        // A new question owns progress now; the resume it interrupted is decided again when it ends.
+        ClearResumeWait();
         if (!_questionHoldOpen)
         {
             _questionHoldOpen = true;
@@ -2778,6 +2828,7 @@ public sealed partial class Presenter : IPresenter
     private sealed record SessionClosed(ILiveSession Session, string Reason, double? Seconds) : PresenterEvent;
     private sealed record SilenceElapsed(long Generation, bool PartGap) : PresenterEvent;
     private sealed record NudgeElapsed(long Generation) : PresenterEvent;
+    private sealed record ResumeWaitElapsed(long Generation) : PresenterEvent;
     private sealed record WrapUpFallbackElapsed(long Generation) : PresenterEvent;
     private sealed record QuestionHoldElapsed(long Generation) : PresenterEvent;
     private sealed record UtteranceElapsed(long Generation) : PresenterEvent;

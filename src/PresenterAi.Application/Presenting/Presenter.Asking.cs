@@ -876,6 +876,11 @@ public sealed partial class Presenter
         LogMessage("info", message);
         ClearQuestionHold();
         SetInteraction(Interaction.None);
+        // As ResumeCore does: answer audio is not narration, so the advance (and the wrap-up end) waits for the
+        // resumed audio, and the nudge or wrap-up fallback covers a silent model (T8 live-run defect class).
+        _heardOutput = false;
+        _nudgeCount = 0;
+        ClearSilenceTimer();
         if (_wrappingUp)
         {
             _session?.AppendInstructions(PromptBuilder.WrapUpInstruction(), "wrap-up-resume");
