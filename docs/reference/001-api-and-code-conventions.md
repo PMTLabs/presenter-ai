@@ -121,6 +121,7 @@ the generator and `OpenApiTests.Every_error_code_has_title_and_status` keep both
 | `presentation` | `presentation.not_found` | 404 | |
 | `presentation` | `presentation.invalid_script` | 400 | parser rejected the Markdown (`errors` lists the reasons) |
 | `presentation` | `presentation.slide_count_mismatch` | 409 | script vs deck count differ (when enforced) |
+| `revision` | `revision.not_found` | 404 | the presentation has no revision with that number (plan 010) |
 | `deck` | `deck.not_found` | 404 | |
 | `deck` | `deck.unsupported_format` | 415 | not HTML/PDF/PPTX |
 | `deck` | `deck.no_driver` | 422 | no adapter matched and none configured |
@@ -163,9 +164,11 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   Node parity page never sends it; the React client sends it from day one with a dummy ticket); plan 003 makes
   it mandatory when real tickets exist.
 - Text frames are JSON `{type, …}` both ways; binary frames are PCM16 mono 24 kHz, 20 ms = 960 bytes.
-  Auth and text-command frames are limited to 4 KiB and binary audio frames to 4 KiB while fragments accumulate;
-  an authenticated oversized frame closes 1009 (Message Too Big). The frozen command/message set is in plan 002
-  §4.3; new message types are added, never renamed.
+  The auth frame is limited to 4 KiB, authenticated text commands to 16 KiB (UTF-8 bytes; plan 010 raised it from
+  4 KiB for `train_turn`) and binary audio frames to 4 KiB while fragments accumulate; an oversized auth frame closes
+  `4401`, an authenticated oversized frame closes 1009 (Message Too Big). The frozen command/message set is in plan
+  002 §4.3; changes are additive only (plan 010 added the training frames below): new message types are added, never
+  renamed, and existing frames keep their shape.
 - Error frames: `{"type":"error","code":"<catalogue code>","message":"…"}` — the same `code` values as HTTP.
   Close codes: `1000` normal, `1013` busy (second client), `1011` server cannot keep up, `4401` auth,
   `4409` `session.already_running`, `4429` `session.slots_busy`.
@@ -189,6 +192,25 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
     is the reason vocabulary, the second says whether provider usage is confirmed, and the last is local elapsed
     estimate in seconds.
   - `state` adds `suspended` (boolean) to indicate that the talk is paused with its upstream closed.
+- Live training (plan 010; additive, only the talk owner's connection can reach them):
+  - C→S `{"type":"trainer_mode","on":true}` — `on` must be a boolean. Accepted during the sender's own talk (answered
+    by `script_version`) or while idle (stored for that user's next Start, acknowledged by the Start's
+    `script_version`). A reasoning route is required; otherwise Trainer mode stays off (`trainerAvailable:false`).
+  - C→S `{"type":"train_turn","question":"…","answer":"…","slideIndex":3}` — "Train on this": `question` and `answer`
+    strings of 1…2,000 characters, `slideIndex` an integer in `0…slideCount-1` of the running talk. A wrong type, a
+    missing field, an empty or too long text, or a negative or out-of-range index is `error{code:"protocol"}`. With
+    Trainer mode off or no talk running the edit is refused with a `script_edit` `failed` frame (`trainer_mode_off` /
+    `not_presenting`).
+  - S→C `{"type":"script_edit","id":"edit_4","status":"queued"|"processing"|"applied"|"failed","slideIndexes":[3],
+    "version":7|null,"summary":"…"|null,"error":null|"timeout"|"upstream"|"invalid_output"|"conflict"|"cancelled"|
+    "queue_full"|"trainer_mode_off"|"not_presenting"}` — at most one `processing` and exactly one terminal frame per
+    id, never a non-terminal frame after a terminal one; `slideIndexes` are the edit's original targets;
+    `version`/`summary` only when `applied`, `error` only when `failed`.
+  - S→C `{"type":"script_version","presentationId":"prs_…","version":7,"trainerMode":true,"trainerAvailable":true,
+    "voiceTraining":true}` — after the `state` frame on connect while a talk runs, after Start, on a toggle, after an
+    upstream reconnect (which may change `voiceTraining`: false on a connection without a delegation model, where
+    only "Train on this" works) and on every head change, always before the matching `script_edit` `applied`.
+  - Transcript frames are unchanged: the client assembles the chosen exchange and its slide itself.
 - Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on
   pause). This is a server-to-client event, not a command; clients that do not recognize it may ignore it.
 

@@ -28,8 +28,10 @@ public sealed class PresenterBridge : IAsyncDisposable
     private static readonly TimeSpan ServerCloseBound = TimeSpan.FromSeconds(1);
     private TimeSpan _takeOverBound = TimeSpan.FromSeconds(15);
     private const int MaxAuthenticationFrameBytes = 4 * 1024;
-    // Browser commands contain only a type, opaque presentation id and small numeric fields; 4 KiB is generous.
-    private const int MaxTextCommandBytes = 4 * 1024;
+    // Authenticated text commands (plan 010): train_turn carries a question and an answer of up to 2,000 characters each,
+    // which in Vietnamese UTF-8 exceeds 4 KiB. Auth frames keep their own 4 KiB cap above.
+    private const int MaxTextCommandBytes = 16 * 1024;
+    private const int MaxTrainingTextChars = 2_000;
     // The capture worklet sends 480 PCM16 samples (960 bytes) every 20 ms; permit four frames for transport margin.
     private const int MaxAudioFrameBytes = 4 * 1024;
     private readonly IPresenter _presenter;
@@ -76,7 +78,30 @@ public sealed class PresenterBridge : IAsyncDisposable
         presenter.UpstreamStatus += status => Current?.EnqueueText(new { type = "upstream", status = status.Status });
         presenter.Log += log => Current?.EnqueueText(new { type = "log", level = log.Level, message = log.Message });
         presenter.UpstreamError += error => Current?.EnqueueText(new { type = "error", message = error.Message, code = error.Code });
+        presenter.ScriptEdit += edit => Current?.EnqueueText(ScriptEditFrame(edit));
+        presenter.ScriptVersion += version => Current?.EnqueueText(ScriptVersionFrame(version));
     }
+
+    private static object ScriptEditFrame(PresenterScriptEdit edit) => new
+    {
+        type = "script_edit",
+        id = edit.Id,
+        status = edit.Status,
+        slideIndexes = edit.SlideIndexes,
+        version = edit.Version,
+        summary = edit.Summary,
+        error = edit.Error
+    };
+
+    private static object ScriptVersionFrame(PresenterScriptVersion version) => new
+    {
+        type = "script_version",
+        presentationId = version.PresentationId,
+        version = version.Version,
+        trainerMode = version.TrainerMode,
+        trainerAvailable = version.TrainerAvailable,
+        voiceTraining = version.VoiceTraining
+    };
 
     private ClientConnection? Current => Volatile.Read(ref _client);
 
@@ -140,6 +165,8 @@ public sealed class PresenterBridge : IAsyncDisposable
         try
         {
             connection.EnqueueText(StateFrame(_presenter.Snapshot()));
+            if (_presenter.CurrentScriptVersion() is { } scriptVersion)
+                connection.EnqueueText(ScriptVersionFrame(scriptVersion));
             connection.StartHeartbeat();
             using var receive = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, connection.Aborted);
             await ReceiveLoopAsync(socket, connection, receive.Token).ConfigureAwait(false);
@@ -416,11 +443,62 @@ public sealed class PresenterBridge : IAsyncDisposable
                 case "mute": ObserveCommand(_presenter.MuteAsync(cancellationToken), connection, type, false); return;
                 case "unmute": ObserveCommand(_presenter.UnmuteAsync(cancellationToken), connection, type, false); return;
                 case "end": ObserveCommand(_presenter.EndAsync(cancellationToken: cancellationToken), connection, type, false); return;
+                case "trainer_mode":
+                    if (!document.RootElement.TryGetProperty("on", out var on) || on.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    {
+                        connection.EnqueueText(new { type = "error", message = "trainer_mode.on must be a boolean", code = "protocol" });
+                        return;
+                    }
+
+                    ObserveCommand(_presenter.SetTrainerModeAsync(connection.UserId, on.GetBoolean(), cancellationToken), connection, type, false);
+                    return;
+                case "train_turn":
+                    if (!TryReadTrainTurn(document.RootElement, out var question, out var answer, out var slideIndex, out var problem))
+                    {
+                        connection.EnqueueText(new { type = "error", message = problem, code = "protocol" });
+                        return;
+                    }
+
+                    ObserveCommand(_presenter.TrainOnTurnAsync(connection.UserId, question, answer, slideIndex, cancellationToken),
+                        connection, type, false);
+                    return;
                 case "ping": connection.EnqueueText(new { type = "pong" }); return;
                 case "pong": return;
                 default: connection.EnqueueText(new { type = "error", message = $"unknown command: {type}", code = "protocol" }); return;
             }
         }
+    }
+
+    /// <summary>
+    /// <c>train_turn</c> (plan 010 §4.3): <c>question</c> and <c>answer</c> strings of 1…2,000 characters and an integer
+    /// <c>slideIndex</c> within the running talk's slides. Owner, talk and Trainer mode are checked on the presenter loop.
+    /// </summary>
+    private bool TryReadTrainTurn(JsonElement root, out string question, out string answer, out int slideIndex, out string problem)
+    {
+        question = answer = problem = string.Empty;
+        slideIndex = -1;
+        foreach (var (name, target) in new[] { ("question", 0), ("answer", 1) })
+        {
+            if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String ||
+                value.GetString() is not { Length: > 0 and <= MaxTrainingTextChars } text || string.IsNullOrWhiteSpace(text))
+            {
+                problem = $"train_turn.{name} must be a string of 1 to {MaxTrainingTextChars} characters";
+                return false;
+            }
+
+            if (target == 0) question = text;
+            else answer = text;
+        }
+
+        var slideCount = _presenter.Snapshot().SlideCount;
+        if (!root.TryGetProperty("slideIndex", out var index) || index.ValueKind != JsonValueKind.Number ||
+            !index.TryGetInt32(out slideIndex) || slideIndex < 0 || (slideCount > 0 && slideIndex >= slideCount))
+        {
+            problem = "train_turn.slideIndex must be an integer slide index of the running talk";
+            return false;
+        }
+
+        return true;
     }
 
     private void ObserveCommand(Task task, ClientConnection connection, string command, bool start)
