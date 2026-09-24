@@ -20,6 +20,7 @@ public static class ErrorCodes
     [Description("Presentation not found")] public const string PresentationNotFound = "presentation.not_found";
     [Description("Invalid presentation script")] public const string PresentationInvalidScript = "presentation.invalid_script";
     [Description("Presentation slide count mismatch")] public const string PresentationSlideCountMismatch = "presentation.slide_count_mismatch";
+    [Description("Revision not found")] public const string RevisionNotFound = "revision.not_found";
     [Description("Deck not found")] public const string DeckNotFound = "deck.not_found";
     [Description("Unsupported deck format")] public const string DeckUnsupportedFormat = "deck.unsupported_format";
     [Description("Deck driver not found")] public const string DeckNoDriver = "deck.no_driver";
@@ -82,6 +83,7 @@ public static class ErrorCodes
             [PresentationNotFound] = new(PresentationNotFound, "Presentation not found", 404),
             [PresentationInvalidScript] = new(PresentationInvalidScript, "Invalid presentation script", 400),
             [PresentationSlideCountMismatch] = new(PresentationSlideCountMismatch, "Presentation slide count mismatch", 409),
+            [RevisionNotFound] = new(RevisionNotFound, "Revision not found", 404),
             [DeckNotFound] = new(DeckNotFound, "Deck not found", 404),
             [DeckUnsupportedFormat] = new(DeckUnsupportedFormat, "Unsupported deck format", 415),
             [DeckNoDriver] = new(DeckNoDriver, "Deck driver not found", 422),

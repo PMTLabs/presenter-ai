@@ -31,6 +31,7 @@ export const errorMessages: Record<ErrorCode, string> = {
   'provider.not_found': 'The provider was not found.',
   'provider.test_failed': 'The provider test failed.',
   'rate_limit.exceeded': 'Too many requests. Try again later.',
+  'revision.not_found': 'That script version was not found.',
   'session.already_running': 'A session is already running.',
   'session.quota_exceeded': 'The session quota was exceeded.',
   'session.slots_busy': 'No presenter slot is available right now.',

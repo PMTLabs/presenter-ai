@@ -30,6 +30,9 @@ public static class DependencyInjection
         services.AddDbContext<PresenterAiDbContext>(options =>
             options.UseNpgsql(connectionString ?? string.Empty, npgsql => npgsql.EnableRetryOnFailure()));
         services.AddScoped<IPresentationRepository, PostgresPresentationRepository>();
+        // Plan 010: scoped like the DbContext; singletons (the revision service) open a scope per store operation.
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<IPresentationRevisionStore, PostgresPresentationRevisionStore>();
         services.AddScoped<IToolConnectionRepository, PostgresToolConnectionRepository>();
         services.TryAddSingleton<ISessionRecorderFactory, SessionRecorderFactory>();
         return services;
@@ -174,6 +177,29 @@ public static class DependencyInjection
     {
         services.TryAddSingleton<ToolRegistry>();
         AddScriptTraining(services);
+
+        if (fileBacked)
+        {
+            // Plan 010: file mode has no database, so versions live in memory for the process, seeded from the file.
+            services.AddSingleton<IPresentationRevisionStore>(serviceProvider =>
+            {
+                var source = serviceProvider.GetRequiredService<IPresentationImportSource>();
+                return new InMemoryPresentationRevisionStore(
+                    async (_, id, cancellationToken) =>
+                    {
+                        try
+                        {
+                            return (await source.ReadSourceAsync(id, cancellationToken).ConfigureAwait(false)).Markdown;
+                        }
+                        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException or ArgumentException)
+                        {
+                            return null;
+                        }
+                    },
+                    serviceProvider.GetService<TimeProvider>());
+            });
+        }
+
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();

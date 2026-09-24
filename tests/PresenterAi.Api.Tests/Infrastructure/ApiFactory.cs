@@ -13,6 +13,8 @@ using Microsoft.Extensions.Options;
 using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Scripts.Revisions;
+using PresenterAi.TestSupport;
 using PresenterAi.Application.Tools.External;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Content;
@@ -138,6 +140,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
                 services.AddSingleton<IPresenter>(serviceProvider => serviceProvider.GetRequiredService<TestQueuedPresenter>());
             }
 
+            // Plan 010 T4: revisions come from the in-memory store (seeded from the pinned content for test-user) and
+            // reverts go to the scriptable fake service.
+            services.RemoveAll<IPresentationRevisionStore>();
+            services.AddSingleton<IPresentationRevisionStore>(serviceProvider => RevisionStore ??= CreateRevisionStore(serviceProvider));
+            services.RemoveAll<IScriptRevisionService>();
+            services.AddSingleton<IScriptRevisionService>(RevisionService);
             services.RemoveAll<ITicketStore>();
             services.RemoveAll<IPresentationRepository>();
             services.AddScoped<IPresentationRepository, TestPresentationRepository>();
@@ -159,6 +167,37 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<StackExchange.Redis.IConnectionMultiplexer>();
             services.AddSingleton(mockRedis.Object);
         });
+    }
+
+    /// <summary>The fake behind <c>POST …/revisions/{number}/revert</c> (plan 010 T4).</summary>
+    public FakeScriptRevisionService RevisionService { get; } = new();
+
+    /// <summary>The in-memory revision store; created on first resolve.</summary>
+    public InMemoryPresentationRevisionStore? RevisionStore { get; private set; }
+
+    private static InMemoryPresentationRevisionStore CreateRevisionStore(IServiceProvider serviceProvider)
+    {
+        var options = serviceProvider.GetRequiredService<IOptions<ContentOptions>>().Value;
+        var environment = serviceProvider.GetRequiredService<IWebHostEnvironment>();
+        var source = new FilePresentationRepository(Path.GetFullPath(options.RootDir, environment.ContentRootPath));
+        return new InMemoryPresentationRevisionStore(
+            async (ownerId, id, cancellationToken) =>
+            {
+                if (!string.Equals(ownerId, "test-user", StringComparison.Ordinal))
+                {
+                    return null;
+                }
+
+                try
+                {
+                    return (await source.ReadSourceAsync(id, cancellationToken).ConfigureAwait(false)).Markdown;
+                }
+                catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException or ArgumentException)
+                {
+                    return null;
+                }
+            },
+            serviceProvider.GetService<TimeProvider>());
     }
 
     public TestToolConnectionRepository ToolRepository => Services.GetRequiredService<TestToolConnectionRepository>();

@@ -9,6 +9,7 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
     public DbSet<ExternalLogin> ExternalLogins => Set<ExternalLogin>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<Presentation> Presentations => Set<Presentation>();
+    public DbSet<PresentationRevision> PresentationRevisions => Set<PresentationRevision>();
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<SessionTurn> SessionTurns => Set<SessionTurn>();
     public DbSet<ToolServer> ToolServers => Set<ToolServer>();
@@ -156,6 +157,27 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
             entity.HasOne(presentation => presentation.Owner)
                 .WithMany(user => user.Presentations)
                 .HasForeignKey(presentation => presentation.OwnerId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PresentationRevision>(entity =>
+        {
+            entity.ToTable("presentation_revisions", table =>
+                table.HasCheckConstraint("ck_presentation_revisions_source", "source IN ('import', 'live_edit', 'revert')"));
+            entity.HasKey(revision => new { revision.PresentationId, revision.Number });
+            entity.Property(revision => revision.PresentationId).HasColumnName("presentation_id");
+            entity.Property(revision => revision.Number).HasColumnName("number").ValueGeneratedNever();
+            entity.Property(revision => revision.Script).HasColumnName("script").IsRequired();
+            entity.Property(revision => revision.Source).HasColumnName("source").IsRequired();
+            entity.Property(revision => revision.Summary).HasColumnName("summary").HasMaxLength(300).IsRequired();
+            entity.Property(revision => revision.BaseVersion).HasColumnName("base_version");
+            entity.Property(revision => revision.RevertedFrom).HasColumnName("reverted_from");
+            entity.Property(revision => revision.ChangedSlides).HasColumnName("changed_slides").HasColumnType("integer[]").IsRequired();
+            entity.Property(revision => revision.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone");
+            entity.Property(revision => revision.CreatedBy).HasColumnName("created_by");
+            entity.HasOne(revision => revision.Presentation)
+                .WithMany()
+                .HasForeignKey(revision => revision.PresentationId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

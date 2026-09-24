@@ -121,6 +121,7 @@ the generator and `OpenApiTests.Every_error_code_has_title_and_status` keep both
 | `presentation` | `presentation.not_found` | 404 | |
 | `presentation` | `presentation.invalid_script` | 400 | parser rejected the Markdown (`errors` lists the reasons) |
 | `presentation` | `presentation.slide_count_mismatch` | 409 | script vs deck count differ (when enforced) |
+| `revision` | `revision.not_found` | 404 | the presentation exists for the caller but has no such script version (plan 010) |
 | `deck` | `deck.not_found` | 404 | |
 | `deck` | `deck.unsupported_format` | 415 | not HTML/PDF/PPTX |
 | `deck` | `deck.no_driver` | 422 | no adapter matched and none configured |

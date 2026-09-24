@@ -77,6 +77,6 @@ public sealed class PostgresPresentationRepository(PresenterAiDbContext db) : IP
         }
 
         var script = ScriptParser.Parse(presentation.Script, presentation.Id);
-        return new LoadedPresentation(script.Meta.Id, script.Meta, script.Slides, presentation.Context);
+        return new LoadedPresentation(script.Meta.Id, script.Meta, script.Slides, presentation.Context, presentation.Version);
     }
 }

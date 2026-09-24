@@ -31,6 +31,7 @@ export type ErrorCode =
   | "provider.not_found"
   | "provider.test_failed"
   | "rate_limit.exceeded"
+  | "revision.not_found"
   | "session.already_running"
   | "session.quota_exceeded"
   | "session.slots_busy"
@@ -91,6 +92,7 @@ export const ERROR_CODES = {
   "provider.not_found": { status: 404, title: "Provider not found" },
   "provider.test_failed": { status: 502, title: "Provider test failed" },
   "rate_limit.exceeded": { status: 429, title: "Rate limit exceeded" },
+  "revision.not_found": { status: 404, title: "Revision not found" },
   "session.already_running": { status: 409, title: "Session already running" },
   "session.quota_exceeded": { status: 429, title: "Session quota exceeded" },
   "session.slots_busy": { status: 429, title: "Session slots busy" },
