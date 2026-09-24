@@ -37,7 +37,7 @@ public sealed class AskProbeScoringTests
         text.Should().Contain("PASS (iv) exactly one user turn, part 1 before part 2: one turn; part-1 keyword before part-2 keyword; nothing between them");
         text.Should().Contain("[answer]: \"It did. It\"")
             .And.Contain("+7739..+8339 ms after Ask done, 0.7 s voiced: \"moved to paperless contracts.\"");
-        text.Should().Contain("FAIL (vi) no second unsolicited response within 15 s: voiced audio 4739 ms after the answer ended");
+        text.Should().Contain("FAIL (vi) no second unsolicited response within 15 s: a new response started 4739 ms after the answer ended");
         text.Should().Contain("FAIL (v) one answer with fact A and fact B: fact A missing; fact B missing");
     }
 
@@ -94,6 +94,42 @@ public sealed class AskProbeScoringTests
             .And.Contain("voiced audio start")
             .And.Contain("voiced audio stop")
             .And.Contain("user transcript start_ms=25800 end_ms=26000 \" cost\" [burst range]");
+    }
+
+    [Fact]
+    public async Task Run_2_delivery_stall_on_a_continuous_output_clock_is_one_answer()
+    {
+        var output = new StringWriter();
+
+        var passed = await ReportAsync(Run2(), Run2Events(), output);
+
+        var text = output.ToString();
+        passed.Should().BeTrue(text);
+        text.Should().Contain("PASS (iv)").And.Contain("PASS (v)").And.Contain("PASS (vi) no second unsolicited response within 15 s: none");
+        text.Split('\n').Count(line => line.StartsWith("  +", StringComparison.Ordinal) && line.Contains("ms after Ask done,", StringComparison.Ordinal))
+            .Should().Be(1, "the 3.4 s arrival gap continues on the output clock");
+        text.Should().Contain("[answer]: \"It moved the Da Nang office to paperless contracts, and the Hanoi expansion cost 4.2 billion dong.\"")
+            .And.Contain("rule: a new response starts only after >= 3 s without assistant output AND an output-clock jump");
+    }
+
+    [Theory]
+    [InlineData(32_000, false)]
+    [InlineData(28_600, true)]
+    public async Task Output_after_3_s_quiet_is_a_second_response_only_when_the_output_clock_jumps(long startMs, bool passes)
+    {
+        var events = Run2Events();
+        events.Add(new ProbeEvent(AskDone + 15_500, EventKind.Assistant, " Anything else?", startMs, startMs + 600));
+        for (var at = 15_600L; at <= 16_000; at += 100)
+        {
+            events.Add(new ProbeEvent(AskDone + at, EventKind.Voiced, string.Empty, VoicedMs: 100));
+        }
+
+        var output = new StringWriter();
+        await ReportAsync(Run2(), Sorted(events), output);
+
+        output.ToString().Should().Contain(passes
+            ? "PASS (vi) no second unsolicited response within 15 s: none"
+            : "FAIL (vi) no second unsolicited response within 15 s: a new response started 3583 ms after the answer ended");
     }
 
     [Theory]
@@ -158,6 +194,49 @@ public sealed class AskProbeScoringTests
         events.Add(new ProbeEvent(AskDone + 40_000 + 1_392, EventKind.User, " Yes", 39_600, 39_800));
         return Sorted(events);
     }
+
+    // Live run 2 (English, vad, --trace): one answer with a 3.4 s delivery stall between " Nang" and " office".
+    private static List<ProbeEvent> Run2Events()
+    {
+        (long At, long Start, string Text)[] user =
+        [
+            (465, 18000, "What did the"), (651, 18600, " program"), (839, 19000, " change at"), (893, 19200, " the"),
+            (1047, 19600, " Da Nang"), (1238, 20000, " office"), (1291, 20200, " in its"), (1434, 20600, " first"),
+            (1562, 21000, " year"), (1755, 21400, ", and"), (1839, 21600, " how"), (1929, 21800, " much"),
+            (2014, 22000, " did"), (2062, 22200, " the"), (2198, 22600, " Hanoi"), (2485, 23200, " expansion"),
+            (2835, 23800, " cost")
+        ];
+        (long At, long Start, string Text)[] assistant =
+        [
+            (2596, 23400, " It moved"), (2716, 23600, " the"), (2835, 23800, " Da"), (2959, 24000, " Nang"),
+            (7123, 24200, " office"), (7540, 24600, " to"), (7673, 24800, " paperless"), (7892, 25200, " contracts,"),
+            (8355, 26000, " and"), (8470, 26200, " the"), (8567, 26400, " Hanoi"), (8783, 26800, " expansion"),
+            (8996, 27200, " cost"), (9234, 27600, " 4"), (9352, 27800, ".2"), (9781, 28200, " billion"), (9970, 28400, " dong.")
+        ];
+        var events = user.Select(d => new ProbeEvent(AskDone + d.At, EventKind.User, d.Text, d.Start, d.Start + 200))
+            .Concat(assistant.Select(d => new ProbeEvent(AskDone + d.At, EventKind.Assistant, d.Text, d.Start, d.Start + 200)))
+            .ToList();
+        for (var at = 3_144L; at <= 3_743; at += 100)
+        {
+            events.Add(new ProbeEvent(AskDone + at, EventKind.Voiced, string.Empty, VoicedMs: 100));
+        }
+
+        events.Add(new ProbeEvent(AskDone + 3_743, EventKind.Voiced, string.Empty, VoicedMs: 100));
+        for (var at = 7_216L; at <= 11_917; at += 100)
+        {
+            events.Add(new ProbeEvent(AskDone + at, EventKind.Voiced, string.Empty, VoicedMs: 100));
+        }
+
+        events.Add(new ProbeEvent(AskDone + 11_917, EventKind.Voiced, string.Empty, VoicedMs: 100));
+        events.Add(new ProbeEvent(AskDone + 20_116, EventKind.User, "Yes", 38_800, 39_000));
+        return Sorted(events);
+    }
+
+    private static ProbeRun Run2() =>
+        new(ProbeDeck.English, 5_000, 9_000, AskDone, AskDone, AskDone + 34, 17_040, 24_440, null,
+            AskDone + 3_144, AskDone + 11_917, AskDone + 18_811, 35_860, 34,
+            new AskRecorderStats(17_600, 6_400, 5_600, 16_800, new AskRmsBands(0, 0, 0, 0, 0), 1_000, false),
+            false, false, new HashSet<string>());
 
     private static List<ProbeEvent> Sorted(List<ProbeEvent> events) => events.OrderBy(e => e.At).ToList();
 

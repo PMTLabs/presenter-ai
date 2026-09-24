@@ -28,6 +28,9 @@ internal static class AskProbeCommand
     private const int AnswerEndQuietMs = 3_000;
     private const int AnswerMaxMs = 90_000;
     private const int SecondResponseWindowMs = 15_000;
+    private const int OutputClockJumpMs = 1_000;
+    private const string SegmentRule =
+        "a new response starts only after >= 3 s without assistant output AND an output-clock jump (next assistant delta start_ms > previous end_ms + 1000 ms, or no timestamps); voiced-audio gaps alone never split";
     private const int ReplyObserveMs = 10_000;
     private const int ProvenanceSlackMs = 250;
     private const int VoicedIntervalGapMs = 500;
@@ -195,9 +198,18 @@ internal static class AskProbeCommand
             if (answerStart is not null)
             {
                 answerEnd = await observer.WaitForAnswerEndAsync(answerStart.Value, AnswerEndQuietMs, answerStart.Value + AnswerMaxMs, endSignalTypes, cancellationToken).ConfigureAwait(false);
-                var windowEnd = (answerEnd ?? observer.Now) + SecondResponseWindowMs;
-                while (observer.Now < windowEnd)
+                // A delivery stall can continue the answer after the quiet: keep the 15 s window behind the answer's end
+                // as the output-clock rule computes it from what has arrived so far.
+                var capAt = answerStart.Value + AnswerMaxMs + SecondResponseWindowMs;
+                while (answerEnd is not null && observer.Now < capAt)
                 {
+                    var segments = Segments(askDoneAt, endSignalTypes.Count > 0, endSignalTypes, observer.Snapshot());
+                    var answerEndSoFar = segments.FirstOrDefault(segment => segment.End >= answerStart.Value)?.End ?? answerEnd.Value;
+                    if (observer.Now >= Math.Max(answerEnd.Value, answerEndSoFar) + SecondResponseWindowMs)
+                    {
+                        break;
+                    }
+
                     await Task.Delay(100, cancellationToken).ConfigureAwait(false);
                 }
             }
@@ -299,12 +311,14 @@ internal static class AskProbeCommand
 
         // Assistant speech segments after the burst (arrival order of voiced audio and assistant transcript): a new
         // segment starts after 3 s without either, or after an upstream end-of-response signal when one is in use.
-        var segments = Segments(run, events);
+        var segments = Segments(run.AskDoneAt, run.SignalEnd, run.EndSignalTypes, events);
         var answer = run.AnswerStart is { } answerStart ? segments.FirstOrDefault(s => s.End >= answerStart) : null;
-        var answerEnd = run.AnswerEnd;
-        var secondResponseAt = answerEnd is { } end
-            ? events.FirstOrDefault(e => e.Kind == EventKind.Voiced && e.At > end && e.At <= end + SecondResponseWindowMs)?.At
-            : null;
+        // The answer ends at its segment's last output (the output-clock rule); null when nothing ended within the cap.
+        var answerEnd = run.AnswerEnd is null ? null : answer?.End ?? run.AnswerEnd;
+        var nextSegment = answer is null ? null : segments.SkipWhile(segment => !ReferenceEquals(segment, answer)).Skip(1).FirstOrDefault();
+        var secondResponseAt = answerEnd is { } end && nextSegment is not null && nextSegment.Start <= end + SecondResponseWindowMs
+            ? nextSegment.Start
+            : (long?)null;
         var answerText = answer is null
             ? string.Empty
             : string.Concat(events.Where(e => e.Kind == EventKind.Assistant && e.At >= answer.Start && e.At <= (answerEnd ?? answer.End)).Select(e => e.Text));
@@ -322,7 +336,7 @@ internal static class AskProbeCommand
             await output.WriteLineAsync($"  other turn {index + 1}: \"{string.Concat(otherTurns[index].Select(e => e.Text)).Trim()}\"").ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync($"assistant speech segments after the burst ({(run.SignalEnd ? $"split on {string.Join('/', run.EndSignalTypes)} or 3 s without output" : "no end-of-response event seen during narration; split on 3 s without output")}):").ConfigureAwait(false);
+        await output.WriteLineAsync($"assistant speech segments after the burst (rule: {SegmentRule}{(run.SignalEnd ? $"; also split on {string.Join('/', run.EndSignalTypes)}" : "; no end-of-response event seen during narration")}):").ConfigureAwait(false);
         foreach (var segment in segments)
         {
             await output.WriteLineAsync(
@@ -330,7 +344,7 @@ internal static class AskProbeCommand
                 $"{(ReferenceEquals(segment, answer) ? " [answer]" : string.Empty)}: \"{string.Concat(events.Where(e => e.Kind == EventKind.Assistant && e.At >= segment.Start && e.At <= segment.End).Select(e => e.Text)).Trim()}\"").ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync($"answer: \"{answerText.Trim()}\" (ended by {(answerEnd is null ? "nothing within the cap" : run.SignalEnd ? "an end-of-response event" : "the 3 s quiet heuristic")})").ConfigureAwait(false);
+        await output.WriteLineAsync($"answer: \"{answerText.Trim()}\" (ended by {(answerEnd is null ? "nothing within the cap" : run.SignalEnd ? "an end-of-response event" : "its last output that continues on the output clock, plus 3 s quiet")})").ConfigureAwait(false);
         foreach (var e in events.Where(e => e.Kind is EventKind.Delegation or EventKind.DelegationDone or EventKind.Tool && e.At >= run.MuteAt))
         {
             await output.WriteLineAsync($"  {e.Kind.ToString().ToLowerInvariant()} +{e.At - run.AskDoneAt} ms after Ask done: {e.Text}").ConfigureAwait(false);
@@ -427,7 +441,7 @@ internal static class AskProbeCommand
             ("(v) one answer with fact A and fact B", answer is not null && factA is not null && factB is not null,
                 $"fact A {(factA is null ? "missing" : $"\"{factA}\"")}; fact B {(factB is null ? "missing" : $"\"{factB}\"")}"),
             ("(vi) no second unsolicited response within 15 s", answerEnd is not null && secondResponseAt is null,
-                answerEnd is null ? "the answer did not end" : secondResponseAt is null ? "none" : $"voiced audio {secondResponseAt - answerEnd} ms after the answer ended")
+                answerEnd is null ? "the answer did not end" : secondResponseAt is null ? "none" : $"a new response started {secondResponseAt - answerEnd} ms after the answer ended")
         };
 
         foreach (var (name, pass, detail) in criteria)
@@ -467,39 +481,80 @@ internal static class AskProbeCommand
 
     internal sealed record Segment(long Start, long End);
 
-    private static List<Segment> Segments(ProbeRun run, IReadOnlyList<ProbeEvent> events)
+    /// <summary>
+    /// Assistant speech segments after Ask done, by arrival order of voiced audio and assistant transcript. A new segment
+    /// starts only when BOTH hold: at least 3 s passed without assistant output, and the next assistant transcript delta
+    /// jumps on the output clock (its start_ms is more than 1 s after the previous delta's end_ms, or either has no
+    /// timestamps). Voiced audio never splits: audio arriving after a quiet waits for the next transcript delta to decide,
+    /// and joins the current segment when none follows. An end-of-response event, when in use, also ends a segment.
+    /// </summary>
+    internal static List<Segment> Segments(long askDoneAt, bool signalEnd, IReadOnlySet<string> endTypes, IReadOnlyList<ProbeEvent> events)
     {
         var segments = new List<Segment>();
-        long? start = null, last = null;
+        long? start = null, last = null, previousEndMs = null;
+        var pending = new List<long>();
         var signalled = false;
-        foreach (var e in events.Where(e => e.At >= run.AskDoneAt))
+        foreach (var e in events.Where(e => e.At >= askDoneAt))
         {
-            if (run.SignalEnd && e.Kind == EventKind.Raw && run.EndSignalTypes.Contains(e.Type ?? string.Empty) && start is not null)
+            if (signalEnd && e.Kind == EventKind.Raw && endTypes.Contains(e.Type ?? string.Empty) && start is not null)
             {
                 signalled = true;
+                pending.Clear();
                 last = e.At;
                 continue;
             }
 
-            if (e.Kind is not (EventKind.Voiced or EventKind.Assistant) || (e.Kind == EventKind.Assistant && e.Text.Length == 0))
+            var isTranscript = e.Kind == EventKind.Assistant && e.Text.Length > 0;
+            if (e.Kind != EventKind.Voiced && !isTranscript)
             {
                 continue;
             }
 
-            if (start is not null && (signalled || e.At - last >= AnswerEndQuietMs))
+            if (start is null || signalled)
             {
-                segments.Add(new Segment(start.Value, last!.Value));
-                start = null;
+                if (start is not null)
+                {
+                    segments.Add(new Segment(start.Value, last!.Value));
+                }
+
+                start = e.At;
+                last = e.At;
+                previousEndMs = isTranscript ? e.EndMs : null;
+                signalled = false;
+                continue;
             }
 
-            signalled = false;
-            start ??= e.At;
+            if (!isTranscript)
+            {
+                if (pending.Count > 0 || e.At - last >= AnswerEndQuietMs)
+                {
+                    pending.Add(e.At);
+                }
+                else
+                {
+                    last = e.At;
+                }
+
+                continue;
+            }
+
+            var quietFrom = last!.Value;
+            var quiet = (pending.Count > 0 ? pending[0] : e.At) - quietFrom >= AnswerEndQuietMs;
+            var jump = e.StartMs is null || previousEndMs is null || e.StartMs > previousEndMs + OutputClockJumpMs;
+            if (quiet && jump)
+            {
+                segments.Add(new Segment(start.Value, quietFrom));
+                start = pending.Count > 0 ? pending[0] : e.At;
+            }
+
             last = e.At;
+            previousEndMs = e.EndMs ?? previousEndMs;
+            pending.Clear();
         }
 
         if (start is not null)
         {
-            segments.Add(new Segment(start.Value, last!.Value));
+            segments.Add(new Segment(start.Value, pending.Count > 0 ? pending[^1] : last!.Value));
         }
 
         return segments;
