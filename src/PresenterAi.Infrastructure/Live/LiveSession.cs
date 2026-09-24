@@ -73,6 +73,13 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<string, double?>? Closed;
     public event Action<string, long>? InputPositionMarked;
 
+    /// <summary>
+    /// Every parsed upstream text event except <c>session.output_audio.delta</c> (audio is raised through
+    /// <see cref="Audio"/>), with its type, before it is handled. Diagnostics only (the ask probe's trace); not part of
+    /// <see cref="ILiveSession"/>.
+    /// </summary>
+    public event Action<string, JsonElement>? EventReceived;
+
     public LiveSessionState State => (LiveSessionState)Volatile.Read(ref _state);
 
     public string? Id => _session?.Id;
@@ -522,6 +529,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
             return;
         }
 
+        EventReceived?.Invoke(type, message);
         if (_options.LogEvents)
         {
             _logger.LogInformation("<< {Event}", message.GetRawText());

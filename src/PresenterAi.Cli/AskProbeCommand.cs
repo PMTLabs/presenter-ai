@@ -30,6 +30,8 @@ internal static class AskProbeCommand
     private const int SecondResponseWindowMs = 15_000;
     private const int ReplyObserveMs = 10_000;
     private const int ProvenanceSlackMs = 250;
+    private const int VoicedIntervalGapMs = 500;
+    private const int EndSignalSettleMs = 500;
     private const string WavHint = "Convert it with: ffmpeg -i <in> -ar 24000 -ac 1 -c:a pcm_s16le <out.wav>";
 
     public static async Task<int> RunAsync(
@@ -106,6 +108,10 @@ internal static class AskProbeCommand
         {
             // 1. Connect like the presenter and narrate the probe slide.
             await ConnectAndNarrateAsync(session, observer, deck, output, cancellationToken).ConfigureAwait(false);
+            var endSignalTypes = observer.EndSignalTypes();
+            await output.WriteLineAsync(endSignalTypes.Count > 0
+                ? $"end-of-response events seen during narration: {string.Join(", ", endSignalTypes)}; the answer ends on one"
+                : "end-of-response events seen during narration: none; the answer ends after 3 s without assistant audio or transcript").ConfigureAwait(false);
 
             // 2. Mute control: a muted upstream must neither answer nor transcribe.
             var muteAt = observer.Now;
@@ -188,7 +194,7 @@ internal static class AskProbeCommand
             long? answerEnd = null;
             if (answerStart is not null)
             {
-                answerEnd = await observer.WaitForAnswerEndAsync(answerStart.Value, AnswerEndQuietMs, answerStart.Value + AnswerMaxMs, cancellationToken).ConfigureAwait(false);
+                answerEnd = await observer.WaitForAnswerEndAsync(answerStart.Value, AnswerEndQuietMs, answerStart.Value + AnswerMaxMs, endSignalTypes, cancellationToken).ConfigureAwait(false);
                 var windowEnd = (answerEnd ?? observer.Now) + SecondResponseWindowMs;
                 while (observer.Now < windowEnd)
                 {
@@ -217,7 +223,7 @@ internal static class AskProbeCommand
             usage = close.Seconds ?? observer.LastUsage;
 
             var run = new ProbeRun(deck, muteAt, muteControlEnd, askDoneAt, lastQueuedAt, marks[endMark].At, burstStartMs, burstEndMs,
-                continueAt, answerStart, answerEnd, replyAt, replyMarkMs, sendDurationMs, stats);
+                continueAt, answerStart, answerEnd, replyAt, replyMarkMs, sendDurationMs, stats, arguments.Trace, endSignalTypes.Count > 0, endSignalTypes);
             var passed = await ReportAsync(run, observer.Snapshot(), output).ConfigureAwait(false);
             await output.WriteLineAsync($"closed: reason={close.Reason}").ConfigureAwait(false);
             await output.WriteLineAsync($"usage.seconds={FormatUsage(usage)}").ConfigureAwait(false);
@@ -229,9 +235,14 @@ internal static class AskProbeCommand
         }
     }
 
-    private static async Task<bool> ReportAsync(ProbeRun run, IReadOnlyList<ProbeEvent> events, TextWriter output)
+    internal static async Task<bool> ReportAsync(ProbeRun run, IReadOnlyList<ProbeEvent> events, TextWriter output)
     {
         var deck = run.Deck;
+        if (run.Trace)
+        {
+            await WriteTraceAsync(run, events, output).ConfigureAwait(false);
+        }
+
         var errors = events.Where(e => e.Kind == EventKind.Error).ToList();
         foreach (var e in errors)
         {
@@ -243,53 +254,83 @@ internal static class AskProbeCommand
         var muteUserDeltas = events.Count(e => e.Kind == EventKind.User && e.At >= run.MuteAt && e.At < run.MuteControlEnd && e.Text.Trim().Length > 0);
         var earlyVoicedMs = VoicedMs(events, run.MuteAt, run.LastQueuedAt);
 
-        // (iv) user turns after the burst, separated by any assistant output.
+        // (iv) User turns after the burst. Rule: a user delta whose start_ms lies in the burst range on the input clock
+        // ([start mark, end mark + 250 ms), provenance P-13) is burst text and belongs to the one burst turn whatever
+        // arrived in between. Any other user delta before the reply is grouped by arrival order, and assistant output
+        // (voiced audio, assistant transcript, delegation, tool call) arriving between two such deltas starts a new turn.
         var observeEnd = run.ReplyAt ?? long.MaxValue;
-        var turns = new List<List<ProbeEvent>>();
+        var userAfter = events.Where(e => e.Kind == EventKind.User && e.At >= run.AskDoneAt && e.At < observeEnd && e.Text.Trim().Length > 0).ToList();
+        var burstDeltas = userAfter.Where(e => InBurst(run, e)).OrderBy(e => e.StartMs).ThenBy(e => e.At).ToList();
+        var otherTurns = new List<List<ProbeEvent>>();
         List<ProbeEvent>? current = null;
         foreach (var e in events.Where(e => e.At >= run.AskDoneAt && e.At < observeEnd))
         {
-            if (e.Kind == EventKind.User && e.Text.Trim().Length > 0)
+            if (e.Kind == EventKind.User && e.Text.Trim().Length > 0 && !InBurst(run, e))
             {
-                current ??= [];
-                if (current.Count == 0)
+                if (current is null)
                 {
-                    turns.Add(current);
+                    current = [];
+                    otherTurns.Add(current);
                 }
 
                 current.Add(e);
             }
-            else if (e.Kind is EventKind.Voiced or EventKind.Assistant or EventKind.Delegation or EventKind.Tool)
+            else if (IsAssistantOutput(e))
             {
                 current = null;
             }
         }
 
-        var burstDeltas = turns.SelectMany(turn => turn).ToList();
-        var singleTurnText = turns.Count == 1 ? string.Concat(turns[0].Select(e => e.Text)) : string.Empty;
-        var part1At = Find(singleTurnText, deck.Part1Keywords);
-        var part2At = Find(singleTurnText, deck.Part2Keywords);
+        var turnCount = (burstDeltas.Count > 0 ? 1 : 0) + otherTurns.Count;
+        var burstText = string.Concat(burstDeltas.Select(e => e.Text));
+        var part1At = Find(burstText, deck.Part1Keywords);
+        var part2At = Find(burstText, deck.Part2Keywords);
+        var between = 0;
+        if (part1At >= 0 && part2At > part1At)
+        {
+            // Assistant output that arrived between the delta completing the part-1 keyword and the delta starting the
+            // part-2 keyword means the upstream responded between the two halves.
+            var part1Delta = DeltaAt(burstDeltas, part1At + Canonical(deck.Part1Keywords.First(k => Find(burstText, [k]) == part1At)).Length - 1);
+            var part2Delta = DeltaAt(burstDeltas, part2At);
+            var from = Math.Min(part1Delta.At, part2Delta.At);
+            var to = Math.Max(part1Delta.At, part2Delta.At);
+            between = events.Count(e => IsAssistantOutput(e) && e.At > from && e.At < to);
+        }
 
-        // (v) the answer's transcript; (vi) no second response within 15 s after it.
-        var secondResponseAt = run.AnswerEnd is { } end
+        // Assistant speech segments after the burst (arrival order of voiced audio and assistant transcript): a new
+        // segment starts after 3 s without either, or after an upstream end-of-response signal when one is in use.
+        var segments = Segments(run, events);
+        var answer = run.AnswerStart is { } answerStart ? segments.FirstOrDefault(s => s.End >= answerStart) : null;
+        var answerEnd = run.AnswerEnd;
+        var secondResponseAt = answerEnd is { } end
             ? events.FirstOrDefault(e => e.Kind == EventKind.Voiced && e.At > end && e.At <= end + SecondResponseWindowMs)?.At
             : null;
-        var answerText = run.AnswerStart is null
+        var answerText = answer is null
             ? string.Empty
-            : string.Concat(events
-                .Where(e => e.Kind == EventKind.Assistant && e.At >= run.AskDoneAt
-                    && e.At < Math.Min(secondResponseAt ?? long.MaxValue, (run.AnswerEnd ?? long.MaxValue - 2_000) + 1_500))
-                .Select(e => e.Text));
+            : string.Concat(events.Where(e => e.Kind == EventKind.Assistant && e.At >= answer.Start && e.At <= (answerEnd ?? answer.End)).Select(e => e.Text));
         var factA = Quote(answerText, deck.FactA);
         var factB = Quote(answerText, deck.FactB);
 
         await output.WriteLineAsync("user turns after the burst:").ConfigureAwait(false);
-        for (var index = 0; index < turns.Count; index++)
+        if (burstDeltas.Count > 0)
         {
-            await output.WriteLineAsync($"  turn {index + 1}: \"{string.Concat(turns[index].Select(e => e.Text)).Trim()}\"").ConfigureAwait(false);
+            await output.WriteLineAsync($"  burst turn: \"{burstText.Trim()}\"").ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync($"answer: \"{answerText.Trim()}\"").ConfigureAwait(false);
+        for (var index = 0; index < otherTurns.Count; index++)
+        {
+            await output.WriteLineAsync($"  other turn {index + 1}: \"{string.Concat(otherTurns[index].Select(e => e.Text)).Trim()}\"").ConfigureAwait(false);
+        }
+
+        await output.WriteLineAsync($"assistant speech segments after the burst ({(run.SignalEnd ? $"split on {string.Join('/', run.EndSignalTypes)} or 3 s without output" : "no end-of-response event seen during narration; split on 3 s without output")}):").ConfigureAwait(false);
+        foreach (var segment in segments)
+        {
+            await output.WriteLineAsync(
+                $"  +{segment.Start - run.AskDoneAt}..+{segment.End - run.AskDoneAt} ms after Ask done, {Seconds(VoicedMs(events, segment.Start, segment.End + 1))} voiced" +
+                $"{(ReferenceEquals(segment, answer) ? " [answer]" : string.Empty)}: \"{string.Concat(events.Where(e => e.Kind == EventKind.Assistant && e.At >= segment.Start && e.At <= segment.End).Select(e => e.Text)).Trim()}\"").ConfigureAwait(false);
+        }
+
+        await output.WriteLineAsync($"answer: \"{answerText.Trim()}\" (ended by {(answerEnd is null ? "nothing within the cap" : run.SignalEnd ? "an end-of-response event" : "the 3 s quiet heuristic")})").ConfigureAwait(false);
         foreach (var e in events.Where(e => e.Kind is EventKind.Delegation or EventKind.DelegationDone or EventKind.Tool && e.At >= run.MuteAt))
         {
             await output.WriteLineAsync($"  {e.Kind.ToString().ToLowerInvariant()} +{e.At - run.AskDoneAt} ms after Ask done: {e.Text}").ConfigureAwait(false);
@@ -300,13 +341,13 @@ internal static class AskProbeCommand
         {
             await output.WriteLineAsync(
                 $"latency: Ask done -> first answer audio {start - run.AskDoneAt} ms; last chunk queued -> {start - run.LastQueuedAt} ms; " +
-                $"end mark on the wire -> {start - run.EndMarkAt} ms; answer {(run.AnswerEnd is { } e2 ? $"ended +{e2 - run.AskDoneAt} ms, {Seconds(VoicedMs(events, start, e2 + 1))} voiced" : "did not end within the cap")}").ConfigureAwait(false);
-            var lastBurstDelta = burstDeltas.LastOrDefault();
+                $"end mark on the wire -> {start - run.EndMarkAt} ms; answer {(answerEnd is { } e2 ? $"ended +{e2 - run.AskDoneAt} ms, {Seconds(VoicedMs(events, start, e2 + 1))} voiced" : "did not end within the cap")}").ConfigureAwait(false);
+            var lastBurstDelta = burstDeltas.MaxBy(e => e.At);
             if (lastBurstDelta is not null)
             {
                 await output.WriteLineAsync(
                     $"late transcript (R5): last burst delta arrived {lastBurstDelta.At - start} ms after answer start" +
-                    (run.AnswerEnd is { } e3 ? $", {lastBurstDelta.At - e3} ms after answer end" : string.Empty)).ConfigureAwait(false);
+                    (answerEnd is { } e3 ? $", {lastBurstDelta.At - e3} ms after answer end" : string.Empty)).ConfigureAwait(false);
             }
         }
         else
@@ -314,10 +355,11 @@ internal static class AskProbeCommand
             await output.WriteLineAsync($"latency: no answer audio within {AnswerStartWaitMs / 1000} s after the last chunk").ConfigureAwait(false);
         }
 
-        // Provenance (P-13): burst deltas start before the burst end on the input clock; the reply starts after it.
+        // Provenance (P-13): every user delta before the reply starts before the burst end on the input clock; the reply
+        // starts after it.
         await output.WriteLineAsync($"provenance: burst range [{run.BurstStartMs}, {run.BurstEndMs}] ms on the input clock (kept audio starts about {AskRecorder.LeadMs} ms after the start mark)").ConfigureAwait(false);
-        var burstOk = burstDeltas.Count > 0;
-        foreach (var e in burstDeltas)
+        var burstOk = userAfter.Count > 0;
+        foreach (var e in userAfter)
         {
             var ok = e.StartMs is { } s && s < run.BurstEndMs + ProvenanceSlackMs;
             burstOk &= ok;
@@ -349,17 +391,43 @@ internal static class AskProbeCommand
             }
         }
 
+        var turnReasons = new List<string>();
+        if (turnCount != 1)
+        {
+            turnReasons.Add($"{turnCount} user turns (burst turn {(burstDeltas.Count > 0 ? "present" : "absent")}, {otherTurns.Count} other)");
+        }
+
+        if (part1At < 0)
+        {
+            turnReasons.Add("part-1 keyword missing");
+        }
+
+        if (part2At < 0)
+        {
+            turnReasons.Add("part-2 keyword missing");
+        }
+
+        if (part1At >= 0 && part2At >= 0 && part2At < part1At)
+        {
+            turnReasons.Add("part-2 keyword before part-1 keyword");
+        }
+
+        if (between > 0)
+        {
+            turnReasons.Add($"{between} assistant/delegation events arrived between the part-1 and part-2 keywords");
+        }
+
         var criteria = new (string Name, bool Pass, string Detail)[]
         {
             ("(i) no upstream error", errors.Count == 0, $"{errors.Count} errors"),
             ("(ii) mute control silent", muteVoicedMs == 0 && muteUserDeltas == 0, $"{muteVoicedMs} ms voiced assistant audio, {muteUserDeltas} user deltas while muted"),
             ("(iii) nothing voiced before the last chunk was queued", earlyVoicedMs == 0, $"{earlyVoicedMs} ms voiced"),
-            ("(iv) exactly one user turn, part 1 before part 2", turns.Count == 1 && part1At >= 0 && part2At > part1At,
-                $"{turns.Count} turns; part-1 keyword {(part1At >= 0 ? "found" : "missing")}, part-2 keyword {(part2At >= 0 ? "found" : "missing")}{(part1At >= 0 && part2At >= 0 && part2At < part1At ? " (out of order)" : string.Empty)}"),
-            ("(v) one answer with fact A and fact B", run.AnswerStart is not null && factA is not null && factB is not null,
+            ("(iv) exactly one user turn, part 1 before part 2", turnReasons.Count == 0,
+                turnReasons.Count == 0 ? "one turn; part-1 keyword before part-2 keyword; nothing between them" : string.Join("; ", turnReasons)),
+            ("(v) one answer with fact A and fact B", answer is not null && factA is not null && factB is not null,
                 $"fact A {(factA is null ? "missing" : $"\"{factA}\"")}; fact B {(factB is null ? "missing" : $"\"{factB}\"")}"),
-            ("(vi) no second unsolicited response within 15 s", run.AnswerEnd is not null && secondResponseAt is null,
-                run.AnswerEnd is null ? "the answer did not end" : secondResponseAt is null ? "none" : $"voiced audio {secondResponseAt - run.AnswerEnd} ms after the answer ended")
+            ("(vi) no second unsolicited response within 15 s", answerEnd is not null && secondResponseAt is null,
+                answerEnd is null ? "the answer did not end" : secondResponseAt is null ? "none" : $"voiced audio {secondResponseAt - answerEnd} ms after the answer ended")
         };
 
         foreach (var (name, pass, detail) in criteria)
@@ -372,6 +440,202 @@ internal static class AskProbeCommand
         var passed = criteria.All(criterion => criterion.Pass);
         await output.WriteLineAsync($"result: {(passed ? "PASS" : "FAIL")} (variant run; send duration {run.SendDurationMs} ms, kept {Seconds(run.Stats.KeptMs)})").ConfigureAwait(false);
         return passed;
+    }
+
+    private static bool InBurst(ProbeRun run, ProbeEvent e) =>
+        e.StartMs is { } start && start >= run.BurstStartMs && start < run.BurstEndMs + ProvenanceSlackMs;
+
+    private static bool IsAssistantOutput(ProbeEvent e) =>
+        e.Kind is EventKind.Voiced or EventKind.Delegation or EventKind.Tool
+        || (e.Kind == EventKind.Assistant && e.Text.Trim().Length > 0);
+
+    /// <summary>The burst delta that holds canonical position <paramref name="position"/> of the concatenated burst text.</summary>
+    private static ProbeEvent DeltaAt(IReadOnlyList<ProbeEvent> deltas, int position)
+    {
+        var text = string.Empty;
+        foreach (var delta in deltas)
+        {
+            text += delta.Text;
+            if (Canonical(text).Length > position)
+            {
+                return delta;
+            }
+        }
+
+        return deltas[^1];
+    }
+
+    internal sealed record Segment(long Start, long End);
+
+    private static List<Segment> Segments(ProbeRun run, IReadOnlyList<ProbeEvent> events)
+    {
+        var segments = new List<Segment>();
+        long? start = null, last = null;
+        var signalled = false;
+        foreach (var e in events.Where(e => e.At >= run.AskDoneAt))
+        {
+            if (run.SignalEnd && e.Kind == EventKind.Raw && run.EndSignalTypes.Contains(e.Type ?? string.Empty) && start is not null)
+            {
+                signalled = true;
+                last = e.At;
+                continue;
+            }
+
+            if (e.Kind is not (EventKind.Voiced or EventKind.Assistant) || (e.Kind == EventKind.Assistant && e.Text.Length == 0))
+            {
+                continue;
+            }
+
+            if (start is not null && (signalled || e.At - last >= AnswerEndQuietMs))
+            {
+                segments.Add(new Segment(start.Value, last!.Value));
+                start = null;
+            }
+
+            signalled = false;
+            start ??= e.At;
+            last = e.At;
+        }
+
+        if (start is not null)
+        {
+            segments.Add(new Segment(start.Value, last!.Value));
+        }
+
+        return segments;
+    }
+
+    /// <summary>--trace: every upstream event from Ask done on, by arrival; voiced audio as start/stop intervals.</summary>
+    private static async Task WriteTraceAsync(ProbeRun run, IReadOnlyList<ProbeEvent> events, TextWriter output)
+    {
+        var lines = new List<(long At, int Order, string Text)>();
+        long? voicedStart = null, voicedLast = null;
+        double voicedMs = 0;
+        foreach (var e in events.Where(e => e.At >= run.AskDoneAt))
+        {
+            switch (e.Kind)
+            {
+                case EventKind.Voiced:
+                    if (voicedStart is not null && e.At - voicedLast > VoicedIntervalGapMs)
+                    {
+                        lines.Add((voicedLast!.Value, 1, $"voiced audio stop ({Math.Round(voicedMs)} ms voiced since start)"));
+                        voicedStart = null;
+                    }
+
+                    if (voicedStart is null)
+                    {
+                        voicedStart = e.At;
+                        voicedMs = 0;
+                        lines.Add((e.At, 0, "voiced audio start"));
+                    }
+
+                    voicedLast = e.At;
+                    voicedMs += e.VoicedMs;
+                    break;
+                case EventKind.User:
+                    lines.Add((e.At, 0, $"user transcript start_ms={Ms(e.StartMs)} end_ms={Ms(e.EndMs)} \"{e.Text}\"{(InBurst(run, e) ? " [burst range]" : string.Empty)}"));
+                    break;
+                case EventKind.Assistant:
+                    lines.Add((e.At, 0, $"assistant transcript start_ms={Ms(e.StartMs)} end_ms={Ms(e.EndMs)} \"{e.Text}\""));
+                    break;
+                case EventKind.Raw:
+                    lines.Add((e.At, 0, $"{e.Type}{(run.EndSignalTypes.Contains(e.Type ?? string.Empty) ? " [end-of-response]" : string.Empty)} {e.Text}".TrimEnd()));
+                    break;
+                case EventKind.Mark:
+                    lines.Add((e.At, 0, $"input mark {e.Text}"));
+                    break;
+                default:
+                    lines.Add((e.At, 0, $"{e.Kind.ToString().ToLowerInvariant()} {e.Text}"));
+                    break;
+            }
+        }
+
+        if (voicedStart is not null)
+        {
+            lines.Add((voicedLast!.Value, 1, $"voiced audio stop ({Math.Round(voicedMs)} ms voiced since start)"));
+        }
+
+        await output.WriteLineAsync($"trace (ms after Ask done; voiced intervals merge deltas under {VoicedIntervalGapMs} ms apart):").ConfigureAwait(false);
+        foreach (var (at, _, text) in lines.OrderBy(line => line.At).ThenBy(line => line.Order))
+        {
+            await output.WriteLineAsync($"  +{at - run.AskDoneAt,6} {text}").ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// An upstream event that says the model's output ended: not an input event, not the delegation envelope, and its
+    /// last name segment is done/completed/ended/… while the name mentions output, response, turn or audio.
+    /// </summary>
+    internal static bool IsEndOfResponseType(string type)
+    {
+        if (type.Contains("input", StringComparison.Ordinal) || type == "response.event")
+        {
+            return false;
+        }
+
+        var last = type[(type.LastIndexOf('.') + 1)..];
+        return last is "done" or "completed" or "complete" or "end" or "ended" or "finished" or "stopped"
+            && (type.Contains("output", StringComparison.Ordinal) || type.Contains("response", StringComparison.Ordinal)
+                || type.Contains("turn", StringComparison.Ordinal) || type.Contains("audio", StringComparison.Ordinal));
+    }
+
+    private static readonly HashSet<string> SecretKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "key", "api_key", "api-key", "authorization", "token", "access_token", "secret", "password", "client_secret"
+    };
+
+    private static readonly HashSet<string> BulkyKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "audio", "instructions", "tools", "session", "headers"
+    };
+
+    /// <summary>Scalar fields of an upstream event (nested up to 3 levels) for the trace: no audio, no instructions, no secrets.</summary>
+    internal static string Summarize(JsonElement message)
+    {
+        var parts = new List<string>();
+        void Walk(JsonElement element, string path, int depth)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                var name = property.Name;
+                if (depth == 0 && name == "type")
+                {
+                    continue;
+                }
+
+                if (SecretKeys.Contains(name) || BulkyKeys.Contains(name))
+                {
+                    parts.Add($"{path}{name}=<omitted>");
+                    continue;
+                }
+
+                switch (property.Value.ValueKind)
+                {
+                    case JsonValueKind.Object when depth < 3:
+                        Walk(property.Value, $"{path}{name}.", depth + 1);
+                        break;
+                    case JsonValueKind.Object:
+                    case JsonValueKind.Array:
+                        parts.Add($"{path}{name}=<{property.Value.ValueKind.ToString().ToLowerInvariant()}>");
+                        break;
+                    case JsonValueKind.String:
+                        var text = property.Value.GetString() ?? string.Empty;
+                        text = text.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal);
+                        parts.Add($"{path}{name}=\"{(text.Length > 160 ? text[..160] + "…" : text)}\"");
+                        break;
+                    default:
+                        parts.Add($"{path}{name}={property.Value.GetRawText()}");
+                        break;
+                }
+            }
+        }
+
+        if (message.ValueKind == JsonValueKind.Object)
+        {
+            Walk(message, string.Empty, 0);
+        }
+
+        return string.Join(' ', parts);
     }
 
     private static async Task<int> ObserveInterruptAsync(
@@ -488,7 +752,7 @@ internal static class AskProbeCommand
 
         var first = await observer.WaitForVoicedAfterAsync(0, 20_000, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException("no narration audio within 20 s");
-        var end = await observer.WaitForAnswerEndAsync(first, QuietAfterNarrationMs, first + 90_000, cancellationToken).ConfigureAwait(false);
+        var end = await observer.WaitForAnswerEndAsync(first, QuietAfterNarrationMs, first + 90_000, new HashSet<string>(), cancellationToken).ConfigureAwait(false);
         var events = observer.Snapshot();
         await output.WriteLineAsync(
             $"narration: {Seconds(VoicedMs(events, first, (end ?? observer.Now) + 1))} voiced, first audio +{first} ms; " +
@@ -587,12 +851,34 @@ internal static class AskProbeCommand
         return string.Join(' ', builder.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
-    /// <summary>Index of the first keyword in the space-free normalised text, or -1.</summary>
+    /// <summary>
+    /// Lower case, no diacritics, letters and digits only; a '.' or ',' survives only between two digits (4.2, 4,2).
+    /// So case, spacing and punctuation never hide a keyword.
+    /// </summary>
+    internal static string Canonical(string text)
+    {
+        var normalized = Normalize(text);
+        var builder = new StringBuilder(normalized.Length);
+        for (var index = 0; index < normalized.Length; index++)
+        {
+            var character = normalized[index];
+            if (char.IsLetterOrDigit(character)
+                || (character is '.' or ',' && index > 0 && index + 1 < normalized.Length
+                    && char.IsDigit(normalized[index - 1]) && char.IsDigit(normalized[index + 1])))
+            {
+                builder.Append(character);
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    /// <summary>Position of the first keyword in the canonical text (<see cref="Canonical"/>), or -1.</summary>
     internal static int Find(string text, IEnumerable<string> keywords)
     {
-        var haystack = Normalize(text).Replace(" ", string.Empty, StringComparison.Ordinal);
+        var haystack = Canonical(text);
         var found = keywords
-            .Select(keyword => haystack.IndexOf(Normalize(keyword).Replace(" ", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal))
+            .Select(keyword => haystack.IndexOf(Canonical(keyword), StringComparison.Ordinal))
             .Where(index => index >= 0)
             .ToList();
         return found.Count == 0 ? -1 : found.Min();
@@ -618,7 +904,7 @@ internal static class AskProbeCommand
     private static string FormatUsage(double? value) =>
         value?.ToString("0.###", CultureInfo.InvariantCulture) ?? "unconfirmed";
 
-    private sealed record ProbeRun(
+    internal sealed record ProbeRun(
         ProbeDeck Deck,
         long MuteAt,
         long MuteControlEnd,
@@ -633,9 +919,12 @@ internal static class AskProbeCommand
         long? ReplyAt,
         long? ReplyMarkMs,
         long SendDurationMs,
-        AskRecorderStats Stats);
+        AskRecorderStats Stats,
+        bool Trace,
+        bool SignalEnd,
+        IReadOnlySet<string> EndSignalTypes);
 
-    private enum EventKind
+    internal enum EventKind
     {
         Voiced,
         User,
@@ -643,10 +932,12 @@ internal static class AskProbeCommand
         Delegation,
         DelegationDone,
         Tool,
-        Error
+        Error,
+        Raw,
+        Mark
     }
 
-    private sealed record ProbeEvent(long At, EventKind Kind, string Text, long? StartMs = null, long? EndMs = null, double VoicedMs = 0);
+    internal sealed record ProbeEvent(long At, EventKind Kind, string Text, long? StartMs = null, long? EndMs = null, double VoicedMs = 0, string? Type = null);
 
     /// <summary>Collects session events on a probe-relative clock (ms). Thread-safe; holds no audio bytes.</summary>
     private sealed class Observer
@@ -710,7 +1001,23 @@ internal static class AskProbeCommand
                 {
                     _marks[id] = (sentMs, Now);
                 }
+
+                Add(new ProbeEvent(Now, EventKind.Mark, $"{id} at input {sentMs} ms"));
             };
+            if (session is LiveSession live)
+            {
+                // Everything else the upstream sends (lifecycle, thinking, delegation envelopes, usage, ...) for the trace
+                // and the end-of-response signal; transcript deltas are already recorded above with their start/end ms.
+                live.EventReceived += (type, message) =>
+                {
+                    if (type is "session.input_transcript.delta" or "session.output_transcript.delta")
+                    {
+                        return;
+                    }
+
+                    Add(new ProbeEvent(Now, EventKind.Raw, Summarize(message), Type: type));
+                };
+            }
         }
 
         public long Now => _clock.ElapsedMilliseconds;
@@ -771,17 +1078,43 @@ internal static class AskProbeCommand
             }
         }
 
-        /// <summary>The last voiced audio after <paramref name="from"/> once it is followed by <paramref name="quietMs"/> of quiet and no backend delegation is pending; null at the cap.</summary>
-        public async Task<long?> WaitForAnswerEndAsync(long from, int quietMs, long capAt, CancellationToken cancellationToken)
+        /// <summary>Upstream event types seen so far that <see cref="IsEndOfResponseType"/> accepts.</summary>
+        public IReadOnlySet<string> EndSignalTypes()
+        {
+            lock (_gate)
+            {
+                return _events.Where(e => e.Kind == EventKind.Raw && e.Type is not null && IsEndOfResponseType(e.Type))
+                    .Select(e => e.Type!).ToHashSet(StringComparer.Ordinal);
+            }
+        }
+
+        /// <summary>
+        /// The end of the response that started at <paramref name="from"/>, once no backend delegation is pending. With
+        /// end-of-response types: the latest such event after <paramref name="from"/> once no assistant output followed
+        /// it for 500 ms. Without: the last assistant output (voiced audio or transcript) once <paramref name="quietMs"/>
+        /// passed without any. Null at the cap.
+        /// </summary>
+        public async Task<long?> WaitForAnswerEndAsync(long from, int quietMs, long capAt, IReadOnlySet<string> endTypes, CancellationToken cancellationToken)
         {
             while (Now < capAt)
             {
                 lock (_gate)
                 {
-                    var last = _events.LastOrDefault(e => e.Kind == EventKind.Voiced && e.At >= from)?.At ?? from;
-                    if (Now - last >= quietMs && _pendingBackend.Count == 0)
+                    var last = _events.LastOrDefault(e => e.At >= from && (e.Kind == EventKind.Voiced || (e.Kind == EventKind.Assistant && e.Text.Length > 0)))?.At ?? from;
+                    if (_pendingBackend.Count == 0)
                     {
-                        return last;
+                        if (endTypes.Count > 0)
+                        {
+                            var signal = _events.LastOrDefault(e => e.Kind == EventKind.Raw && e.At >= from && endTypes.Contains(e.Type ?? string.Empty));
+                            if (signal is not null && signal.At >= last && Now - signal.At >= EndSignalSettleMs)
+                            {
+                                return signal.At;
+                            }
+                        }
+                        else if (Now - last >= quietMs)
+                        {
+                            return last;
+                        }
                     }
                 }
 

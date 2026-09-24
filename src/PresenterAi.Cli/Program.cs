@@ -217,7 +217,7 @@ public static class Program
         output.WriteLine("Usage:");
         output.WriteLine("  presenter-cli smoke --provider azure|openai");
         output.WriteLine("  presenter-cli ask-probe --provider azure|openai --part1 <wav> --part2 <wav> [--gap-seconds 10] [--variant vad|continue|raw]");
-        output.WriteLine("            [--tail-ms 1000] [--gap-keep-ms 320] [--reply <wav>] [--lang en|vi] [--observe-interrupt] [--absent <wav>]");
+        output.WriteLine("            [--tail-ms 1000] [--gap-keep-ms 320] [--reply <wav>] [--lang en|vi] [--observe-interrupt] [--absent <wav>] [--trace]");
         output.WriteLine("            WAVs are 24 kHz mono PCM16; prints transcripts, timings and usage, never audio or secrets.");
         output.WriteLine("  presenter-cli run <id> [--owner <email>] [--max-seconds N] [--stop-after-slide N] [--content-root DIR]");
         output.WriteLine("  presenter-cli import <path-or-pattern>... --owner <email> [--content-root DIR]");
@@ -286,6 +286,7 @@ internal static class CliParser
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         var observeInterrupt = false;
+        var trace = false;
         string[] valued = ["--provider", "--part1", "--part2", "--gap-seconds", "--variant", "--tail-ms", "--gap-keep-ms", "--reply", "--lang", "--absent"];
         for (var index = 0; index < args.Length; index++)
         {
@@ -299,6 +300,12 @@ internal static class CliParser
             if (argument == "--observe-interrupt")
             {
                 observeInterrupt = true;
+                continue;
+            }
+
+            if (argument == "--trace")
+            {
+                trace = true;
                 continue;
             }
 
@@ -366,7 +373,7 @@ internal static class CliParser
         }
 
         return new AskProbeArguments(provider, part1, part2, gapSeconds, variant, tailMs, gapKeepMs, observeInterrupt,
-            values.GetValueOrDefault("--reply"), lang, values.GetValueOrDefault("--absent"));
+            values.GetValueOrDefault("--reply"), lang, values.GetValueOrDefault("--absent"), trace);
     }
 
     private static ImportArguments? ParseImport(string[] args, TextWriter error)
@@ -506,6 +513,7 @@ internal sealed record AskProbeArguments(
     bool ObserveInterrupt,
     string? Reply,
     string Lang,
-    string? Absent) : CliArguments;
+    string? Absent,
+    bool Trace = false) : CliArguments;
 public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot, string? Owner = null) : CliArguments;
 public sealed record ImportArguments(IReadOnlyList<string> Paths, string Owner, string? ContentRoot) : CliArguments;
