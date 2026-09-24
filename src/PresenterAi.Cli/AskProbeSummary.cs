@@ -8,7 +8,8 @@ namespace PresenterAi.Cli;
 /// cap24, cap28, cap40, raw or interrupt), prints a table and the T1 verdict. Rules (plan §6 T1 with the owner's
 /// 2026-09-24 decisions: timestamp-based (iv), a 25 s kept-speech cap sent unpaced):
 /// <list type="bullet">
-/// <item>en ×3, vi ×1 and cap24 ×3 each PASS (i)–(vi), are not TRUNCATED and confirm provenance;</item>
+/// <item>en ×3, vi ×1 and cap24 ×3 each PASS (i)–(vii) and the reply check (turn-taking, owner decision 2026-09-24) and
+/// are not TRUNCATED; provenance is a diagnostic column only;</item>
 /// <item>cap40 (over the cap) is TRUNCATED or FAILs, which confirms the limit;</item>
 /// <item>cap16, cap28, raw and interrupt are evidence only, but must have completed (usage printed).</item>
 /// </list>
@@ -17,7 +18,7 @@ namespace PresenterAi.Cli;
 /// </summary>
 internal static partial class AskProbeSummary
 {
-    private static readonly string[] Criteria = ["i", "ii", "iii", "iv", "v", "vi"];
+    private static readonly string[] Criteria = ["i", "ii", "iii", "iv", "v", "vi", "vii", "reply"];
 
     internal static readonly IReadOnlyDictionary<string, int> RequiredPasses = new Dictionary<string, int>
     {
@@ -102,10 +103,6 @@ internal static partial class AskProbeSummary
                     reasons.Add($"{run.Name}: TRUNCATED");
                 }
 
-                if (run.Provenance != true)
-                {
-                    reasons.Add($"{run.Name}: provenance not confirmed");
-                }
             }
         }
 
@@ -139,21 +136,21 @@ internal static partial class AskProbeSummary
     {
         var lines = new List<string>
         {
-            $"{"run",-18} {"i",-4} {"ii",-4} {"iii",-4} {"iv",-4} {"v",-4} {"vi",-4} {"trunc",-6} {"prov",-5} {"latency",9} {"wire lag",9} {"overrun",8} {"usage s",8}  result",
-            new string('-', 111)
+            $"{"run",-18} {"i",-4} {"ii",-4} {"iii",-4} {"iv",-4} {"v",-4} {"vi",-4} {"vii",-4} {"rply",-4} {"trunc",-6} {"prov",-5} {"latency",9} {"wire lag",9} {"overrun",8} {"usage s",8}  result",
+            new string('-', 121)
         };
         foreach (var run in runs)
         {
             string Cell(string id) => run.Criteria.TryGetValue(id, out var pass) ? (pass ? "PASS" : "FAIL") : "-";
             lines.Add(
-                $"{run.Name,-18} {Cell("i"),-4} {Cell("ii"),-4} {Cell("iii"),-4} {Cell("iv"),-4} {Cell("v"),-4} {Cell("vi"),-4} " +
+                $"{run.Name,-18} {Cell("i"),-4} {Cell("ii"),-4} {Cell("iii"),-4} {Cell("iv"),-4} {Cell("v"),-4} {Cell("vi"),-4} {Cell("vii"),-4} {Cell("reply"),-4} " +
                 $"{(run.Truncated ? "YES" : "no"),-6} {(run.Provenance is null ? "-" : run.Provenance.Value ? "ok" : "NO"),-5} " +
                 $"{(run.LatencyMs is { } ms ? $"{ms} ms" : "-"),9} {(run.WireLagMs is { } wl ? $"{wl} ms" : "-"),9} " +
                 $"{(run.OverrunMs is { } ov ? $"{ov:+#;-#;0}" : "-"),8} {(run.UsageSeconds is { } s ? s.ToString("0.0", CultureInfo.InvariantCulture) : "-"),8}  " +
                 $"{(run.Passed is null ? "-" : run.Passed.Value ? "PASS" : "FAIL")}");
         }
 
-        lines.Add(new string('-', 111));
+        lines.Add(new string('-', 121));
         lines.Add($"total usage: {verdict.TotalUsageSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s over {runs.Count} runs");
         lines.Add($"AnswerStartBudgetMs: {(verdict.AnswerStartBudgetMs is { } b ? b.ToString(CultureInfo.InvariantCulture) : "n/a (no answer latency)")}");
         lines.Add($"T1 verdict: {(verdict.Passed ? "PASS" : "FAIL")}{(verdict.Reasons.Count == 0 ? string.Empty : " — " + string.Join("; ", verdict.Reasons))}");
@@ -163,7 +160,7 @@ internal static partial class AskProbeSummary
     [GeneratedRegex(@"^\d+-(?<kind>[a-z]+\d*)-\d+$")]
     private static partial Regex KindPattern();
 
-    [GeneratedRegex(@"^(?<verdict>PASS|FAIL) \((?<id>i|ii|iii|iv|v|vi)\)", RegexOptions.Multiline)]
+    [GeneratedRegex(@"^(?<verdict>PASS|FAIL) \((?<id>i|ii|iii|iv|v|vi|vii|reply)\)", RegexOptions.Multiline)]
     private static partial Regex CriterionPattern();
 
     [GeneratedRegex(@"latency: Ask done -> first answer audio (?<ms>\d+) ms")]
@@ -181,7 +178,7 @@ internal static partial class AskProbeSummary
     [GeneratedRegex(@"^result: (?<verdict>PASS|FAIL)", RegexOptions.Multiline)]
     private static partial Regex ResultPattern();
 
-    [GeneratedRegex(@"^provenance check: (?<verdict>CONFIRMED|NOT CONFIRMED)", RegexOptions.Multiline)]
+    [GeneratedRegex(@"^provenance check(?: \(diagnostic, not scored\))?: (?<verdict>CONFIRMED|NOT CONFIRMED)", RegexOptions.Multiline)]
     private static partial Regex ProvenancePattern();
 }
 

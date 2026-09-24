@@ -34,7 +34,9 @@ public sealed class AskProbeScoringTests
         passed.Should().BeFalse("the live answer was split");
         text.Should().Contain("burst turn: \"Did the programme change at the Da Nang office in its first year, and how much did the Hanoi expansion cost\"")
             .And.NotContain("other turn");
-        text.Should().Contain("PASS (iv) every user delta before the reply is in the burst range, part 1 before part 2: 18 deltas, all in the burst range; part-1 keyword before part-2 keyword");
+        text.Should().Contain("PASS (iv) one question turn, part 1 before part 2, no new utterance before the reply: 18 deltas in one turn; part-1 keyword before part-2 keyword")
+            .And.Contain("PASS (vii) question transcript finished before the answer ended: margin +607 ms")
+            .And.Contain("PASS (reply) the reply is a new utterance");
         text.Should().Contain("[answer]: \"It did. It\"")
             .And.Contain("+7739..+8339 ms after Ask done, 0.7 s voiced: \"moved to paperless contracts.\"");
         text.Should().Contain("FAIL (vi) no second unsolicited response within 15 s: a new response started 4739 ms after the answer ended");
@@ -42,15 +44,72 @@ public sealed class AskProbeScoringTests
     }
 
     [Fact]
-    public async Task A_user_delta_outside_the_burst_range_before_the_reply_fails_iv()
+    public async Task A_new_utterance_after_the_answer_and_before_the_reply_fails_iv()
     {
         var events = Run1Events();
-        events.Add(new ProbeEvent(AskDone + 2_500, EventKind.User, " cost", 27_000, 27_200));
+        events.Add(new ProbeEvent(AskDone + 20_000, EventKind.User, " Thanks", 60_000, 60_200));
 
         var output = new StringWriter();
         await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), Sorted(events), output);
 
-        output.ToString().Should().Contain("FAIL (iv) every user delta before the reply is in the burst range, part 1 before part 2: 1 user deltas outside the burst range before the reply (start_ms 27000)");
+        output.ToString().Should().Contain("FAIL (iv) one question turn, part 1 before part 2, no new utterance before the reply: 1 new utterance(s) before the reply (first at +20000 ms: \"Thanks\")")
+            .And.Contain("(iv) start_ms range diagnostic (not scored): 1 user deltas outside the burst range before the reply (start_ms 60000)");
+    }
+
+    [Fact]
+    public async Task A_late_question_delta_after_the_answer_ended_fails_vii()
+    {
+        // " cost" arrives 1 s after the previous question delta but after the answer ended: still the question, too late.
+        var events = Run1Events().Where(e => e.Text != " cost").ToList();
+        events.Add(new ProbeEvent(AskDone + 3_050, EventKind.User, " cost", 25_800, 26_000));
+
+        var output = new StringWriter();
+        await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), Sorted(events), output);
+
+        output.ToString().Should().Contain("FAIL (vii) question transcript finished before the answer ended: margin -50 ms")
+            .And.Contain("PASS (iv)");
+    }
+
+    [Fact]
+    public async Task A_reply_less_than_1_5_s_after_a_question_delta_is_not_a_new_utterance()
+    {
+        var events = Run1Events().Where(e => e.Text != " Yes").ToList();
+        events.Add(new ProbeEvent(AskDone + 40_000 - 500, EventKind.User, " and", 30_000, 30_200));
+        events.Add(new ProbeEvent(AskDone + 40_700, EventKind.User, " Yes", 30_400, 30_600));
+
+        var output = new StringWriter();
+        await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), Sorted(events), output);
+
+        output.ToString().Should().Contain("FAIL (reply) the reply is a new utterance: first reply delta +40700 ms after Ask done, 1200 ms after the previous user delta");
+    }
+
+    [Theory]
+    [InlineData("01-en-1")]
+    [InlineData("05-cap24-1")]
+    [InlineData("06-cap24-2")]
+    public async Task Suite_20260924_144029_replays_pass_iv_vii_and_the_reply_check(string name)
+    {
+        var (user, assistant, voiced, burstStart, burstEnd, replyAt) = name switch
+        {
+            "01-en-1" => (En1User, En1Assistant, En1Voiced, En1BurstStart, En1BurstEnd, En1ReplyAt),
+            "05-cap24-1" => (Cap24FirstUser, Cap24FirstAssistant, Cap24FirstVoiced, Cap24FirstBurstStart, Cap24FirstBurstEnd, Cap24FirstReplyAt),
+            _ => (Cap24SecondUser, Cap24SecondAssistant, Cap24SecondVoiced, Cap24SecondBurstStart, Cap24SecondBurstEnd, Cap24SecondReplyAt)
+        };
+        var events = user.Select(d => new ProbeEvent(AskDone + d.At, EventKind.User, d.Text, d.Start, d.Start + 200))
+            .Concat(assistant.Select(d => new ProbeEvent(AskDone + d.At, EventKind.Assistant, d.Text, d.Start, d.Start + 200)))
+            .Concat(voiced.SelectMany(v => Enumerable.Range(0, (int)((v.Stop - v.Start) / 100) + 1)
+                .Select(i => new ProbeEvent(AskDone + v.Start + i * 100, EventKind.Voiced, string.Empty, VoicedMs: 100))))
+            .ToList();
+        var run = Run(answerStart: voiced[0].Start, answerEnd: voiced[^1].Stop) with
+        {
+            BurstStartMs = burstStart, BurstEndMs = burstEnd, ReplyAt = AskDone + replyAt, LastQueuedAt = AskDone, EndMarkAt = AskDone
+        };
+
+        var output = new StringWriter();
+        await ReportAsync(run, Sorted(events), output);
+
+        var text = output.ToString();
+        text.Should().Contain("PASS (iv) one question turn", name).And.Contain("PASS (vii)", name).And.Contain("PASS (reply)", name);
     }
 
     [Fact]
@@ -74,7 +133,7 @@ public sealed class AskProbeScoringTests
         var output = new StringWriter();
         await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_000), events, output);
 
-        output.ToString().Should().Contain("FAIL (iv) every user delta before the reply is in the burst range, part 1 before part 2: part-2 keyword missing");
+        output.ToString().Should().Contain("FAIL (iv) one question turn, part 1 before part 2, no new utterance before the reply: part-2 keyword missing");
     }
 
     // Live runs en-3, en-4 and raw: the model began answering while the burst transcript was still arriving (and, raw,
@@ -82,7 +141,7 @@ public sealed class AskProbeScoringTests
     // Live runs en-3, en-4 and raw: the model began answering while the burst transcript was still arriving (and, raw,
     // answered part 1 before part 2 was transcribed). Every user delta is in the burst range, so (iv) passes.
     [Fact]
-    public Task Live_replay_en3_passes_iv_by_timestamps() => AssertReplayPassesIvAsync(
+    public Task Live_replay_en3_passes_iv() => AssertReplayPassesIvAsync(
         "en-3",
         [(421, 18000, " What did"), (548, 18200, " the"), (652, 18800, " programme"), (835, 19200, " change at"), (922, 19400, " the"),
              (997, 19600, " Da"), (1056, 19800, " Nang"), (1231, 20200, " office in"), (1276, 20400, " its"), (1528, 20800, " first"),
@@ -92,7 +151,7 @@ public sealed class AskProbeScoringTests
         17180, 24580, 26201, 46000);
 
     [Fact]
-    public Task Live_replay_en4_passes_iv_by_timestamps() => AssertReplayPassesIvAsync(
+    public Task Live_replay_en4_passes_iv() => AssertReplayPassesIvAsync(
         "en-4",
         [(368, 17800, "What"), (453, 18000, " did"), (501, 18200, " the"), (640, 18600, " programme"), (848, 19000, " change"),
              (940, 19200, " at the"), (1034, 19400, " Da"), (1072, 19600, " Nang"), (1254, 20000, " office"), (1348, 20200, " in"),
@@ -102,7 +161,7 @@ public sealed class AskProbeScoringTests
         17040, 24440, 27587, 47400);
 
     [Fact]
-    public Task Live_replay_raw_passes_iv_by_timestamps() => AssertReplayPassesIvAsync(
+    public Task Live_replay_raw_passes_iv() => AssertReplayPassesIvAsync(
         "raw",
         [(504, 18200, " Um"), (686, 18600, ", change"), (760, 18800, " at the"), (835, 19000, " Da"), (878, 19200, " Nang"),
              (1029, 19600, " office"), (1098, 19800, " in"), (1175, 20000, " its"), (1217, 20200, " first"), (1338, 20600, " year"),
@@ -125,7 +184,7 @@ public sealed class AskProbeScoringTests
         var output = new StringWriter();
         await ReportAsync(run, Sorted(events), output);
 
-        output.ToString().Should().Contain("PASS (iv) every user delta before the reply is in the burst range, part 1 before part 2", name)
+        output.ToString().Should().Contain("PASS (iv) one question turn, part 1 before part 2, no new utterance before the reply", name)
             .And.Contain("truncation: none detected");
     }
 
@@ -144,7 +203,7 @@ public sealed class AskProbeScoringTests
         output.ToString().Should().Contain("ingested: max user end_ms before the reply 50400 (end mark 125200, -74800 ms); reply start_ms - end mark -69600 ms")
             .And.Contain("truncation: TRUNCATED (the reply starts at 55600 on the input clock, under end mark - 1000 = 124200; about 69.6 s of the burst was not ingested)")
             .And.Contain("result: FAIL TRUNCATED")
-            .And.Contain("FAIL (iv) every user delta before the reply is in the burst range, part 1 before part 2: part-1 keyword missing; part-2 keyword missing");
+            .And.Contain("FAIL (iv) one question turn, part 1 before part 2, no new utterance before the reply: part-1 keyword missing; part-2 keyword missing");
     }
 
     [Fact]
@@ -153,6 +212,7 @@ public sealed class AskProbeScoringTests
         var events = Run1Events().Where(e => e.At < AskDone + 7_000).ToList();
         events.Add(new ProbeEvent(AskDone + 2_700, EventKind.Assistant, " It moved to paperless contracts, and Hanoi cost 4.2 billion dong. Shall I carry on?"));
         events.Add(new ProbeEvent(AskDone + 3_050, EventKind.Raw, "response_id=\"r1\"", Type: "session.output_audio.done"));
+        events.Add(new ProbeEvent(AskDone + 41_392, EventKind.User, " Yes", 39_600, 39_800));
         var output = new StringWriter();
 
         var passed = await ReportAsync(Run(answerStart: 2_600, answerEnd: 3_050, trace: true, endTypes: ["session.output_audio.done"]), Sorted(events), output);
@@ -281,6 +341,42 @@ public sealed class AskProbeScoringTests
             .And.Contain("nested.audio=<omitted>").And.Contain("nested.item.type=\"message\"").And.Contain("start_ms=5")
             .And.NotContain("abc").And.NotContain("AAAA").And.NotContain("long");
     }
+
+    // 01-en-1: burst [17120, 25380], reply sent at +27970.
+    private static readonly (long At, long Start, string Text)[] En1User =
+    [
+        (414, 21200, "What"), (484, 21400, " did"), (527, 21600, " the"), (719, 22200, " programme"), (918, 22800, " change"), (996, 23000, " at the"), (1073, 23200, " Da"), (1117, 23400, " Nang"), (1386, 24200, " office in"), (1448, 24400, " its"), (1570, 24800, " first"), (1696, 25200, " year"), (1851, 25600, "? And"), (2000, 26000, " how"), (2093, 26200, " much"), (2138, 26400, " did the"), (2264, 26800, " Hanoi"), (2390, 27200, " expansion"), (2692, 27800, " cost"), (2796, 28000, "?"), (29366, 52000, " Yes")
+    ];
+    private static readonly (long At, long Start, string Text)[] En1Assistant =
+    [
+        (2693, 27800, " It made"), (2798, 28000, " the Da"), (2900, 28200, " Nang"), (8784, 28600, " office"), (8981, 28800, " paperless"), (9112, 29000, ","), (9421, 29600, " and"), (9527, 29800, " the"), (9628, 30000, " Hanoi"), (9823, 30400, " expansion"), (10030, 30800, " cost"), (10253, 31200, " 4"), (10342, 31400, ".2"), (10555, 31800, " billion"), (10968, 32200, " dong.")
+    ];
+    private static readonly (long Start, long Stop)[] En1Voiced = [(2925, 3425), (8675, 12871)];
+    private const long En1BurstStart = 17120, En1BurstEnd = 25380, En1ReplyAt = 27970;
+
+    // 05-cap24-1: burst [19760, 44920], reply sent at +50775.
+    private static readonly (long At, long Start, string Text)[] Cap24FirstUser =
+    [
+        (611, 25600, " I'd"), (691, 25800, " like to"), (787, 26000, " hear"), (833, 26200, " it from"), (4849, 26600, " you"), (7077, 26800, " in"), (7146, 27000, " your"), (7146, 27200, " own"), (7248, 27800, " words"), (7386, 28600, ", briefly"), (7386, 28800, " and"), (7420, 29600, " precisely"), (7454, 30000, ". If"), (7488, 30200, " some of"), (7521, 30400, " this"), (7524, 30600, " is"), (7524, 30800, " not"), (7558, 31200, " covered in"), (7558, 31400, " your"), (7593, 32000, " material"), (7627, 32400, ", that is"), (7661, 32800, " fine"), (7730, 33400, ". Just"), (7730, 33600, " tell"), (7730, 33800, " me"), (7765, 34400, ", and I"), (7765, 34600, " will"), (7765, 34800, " follow"), (7765, 35000, " up"), (7799, 35200, " with the"), (7799, 35400, " right"), (7831, 35800, " people"), (7833, 36800, ". So"), (7867, 37200, ", keeping"), (7902, 37400, " all of"), (7902, 37600, " that"), (7902, 37800, " in"), (7969, 38400, " mind"), (7969, 38800, ", here is"), (7969, 39000, " what"), (7969, 39200, " I would"), (7969, 39400, " like"), (8004, 39600, " to"), (8004, 40000, " understand"), (8004, 40200, " about"), (8004, 40400, " the"), (8004, 40800, " programme"), (8039, 41000, " and"), (8039, 41200, " its"), (8039, 41400, " first"), (8073, 41800, " year"), (8073, 42400, ". What"), (8107, 42800, " did"), (8107, 43000, " the"), (8107, 43600, " programme"), (8142, 44200, " change"), (8142, 44400, " at the"), (8142, 44600, " Da"), (8176, 44800, " Nang"), (8176, 45600, " office in"), (8177, 45800, " its"), (8209, 46200, " first"), (8210, 46600, " year"), (8211, 47000, "? And"), (8211, 47200, " how"), (8243, 47600, " much"), (8244, 47800, " did the"), (8362, 48200, " Hanoi"), (8496, 48600, " expansion"), (8831, 49200, " cost"), (52429, 76400, " Yes")
+    ];
+    private static readonly (long At, long Start, string Text)[] Cap24FirstAssistant =
+    [
+        (8831, 49200, " In its"), (8958, 49400, " first"), (9040, 49600, " year,"), (28611, 50000, " the programme"), (28936, 50600, " moved"), (29154, 51000, " the Da"), (29336, 51200, " Nang"), (29464, 51600, " office"), (29727, 52000, " to"), (29820, 52200, " paperless"), (30129, 52800, " contracts,"), (30558, 53600, " and"), (30654, 53800, " the Hanoi"), (30859, 54200, " expansion"), (31185, 54800, " cost"), (31304, 55000, " "), (31424, 55200, "4."), (31519, 55400, "2"), (31902, 55800, " billion"), (32290, 56200, " dong.")
+    ];
+    private static readonly (long Start, long Stop)[] Cap24FirstVoiced = [(9416, 9916), (28595, 35695)];
+    private const long Cap24FirstBurstStart = 19760, Cap24FirstBurstEnd = 44920, Cap24FirstReplyAt = 50775;
+
+    // 06-cap24-2: burst [16000, 41160], reply sent at +47645.
+    private static readonly (long At, long Start, string Text)[] Cap24SecondUser =
+    [
+        (418, 18800, " like to"), (492, 19000, " hear"), (571, 19200, " it"), (642, 19400, " from"), (717, 19600, " you"), (792, 19800, " in"), (868, 20000, " your"), (911, 20200, " own"), (1073, 20800, " words"), (1328, 21600, ", briefly"), (1370, 21800, " and"), (1531, 22400, " precisely"), (1756, 23000, ". If"), (1832, 23200, " some of"), (1906, 23400, " this"), (1982, 23600, " is"), (2025, 23800, " not"), (2195, 24200, " covered in"), (2235, 24400, " your"), (2413, 25000, " material"), (2565, 25400, ", that is"), (2725, 26000, " fine"), (2894, 26400, ". Just"), (2966, 26600, " tell"), (3015, 26800, " me"), (3236, 27400, ", and I"), (3312, 27600, " will"), (3387, 27800, " follow"), (3479, 28000, " up"), (3554, 28200, " with the"), (3603, 28400, " right"), (3717, 28800, " people"), (3997, 29800, ". So"), (4185, 30200, ", keeping"), (4260, 30400, " all of"), (4332, 30600, " that"), (4375, 30800, " in"), (4540, 31400, " mind"), (4720, 31800, ", here"), (4812, 32000, " is what"), (4887, 32200, " I would"), (4962, 32400, " like"), (5005, 32600, " to"), (5156, 33000, " understand"), (5232, 33200, " about"), (5277, 33400, " the"), (5429, 33800, " programme"), (5506, 34000, " and"), (5580, 34200, " its"), (5622, 34400, " first"), (5742, 34800, " year"), (5918, 35400, ". What"), (6068, 35800, " did"), (6142, 36000, " "), (6188, 36200, "the"), (6305, 36600, " programme"), (6517, 37200, " change"), (6591, 37400, " at the"), (6636, 37600, " Da"), (6754, 38000, " Nang"), (6965, 38600, " office in"), (7027, 38800, " its"), (7142, 39200, " first"), (7261, 39600, " year"), (7473, 40200, "? And"), (7548, 40400, " how"), (7638, 40600, " much"), (7685, 40800, " did the"), (7805, 41200, " Hanoi"), (7922, 41600, " expansion"), (8239, 42200, " cost"), (54721, 73200, " Yes")
+    ];
+    private static readonly (long At, long Start, string Text)[] Cap24SecondAssistant =
+    [
+        (8239, 42200, " It moved"), (8321, 42400, " the Da"), (8410, 42600, " Nang"), (25646, 43000, " office"), (25899, 43400, " to paper"), (27199, 43600, "less"), (28276, 44000, " contracts"), (28410, 44600, "."), (28443, 44800, " The"), (28589, 45000, " Hanoi"), (28632, 45400, " expansion"), (28733, 45800, " cost"), (28766, 46200, " "), (28800, 46400, "4."), (28802, 46600, "2"), (28834, 47000, " billion"), (28907, 47400, " dong"), (29000, 47600, ".")
+    ];
+    private static readonly (long Start, long Stop)[] Cap24SecondVoiced = [(8637, 9137), (25548, 25949), (28192, 30647)];
+    private const long Cap24SecondBurstStart = 16000, Cap24SecondBurstEnd = 41160, Cap24SecondReplyAt = 47645;
 
     private static List<ProbeEvent> Run1Events()
     {

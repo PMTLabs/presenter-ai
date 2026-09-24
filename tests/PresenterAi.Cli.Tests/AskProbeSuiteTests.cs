@@ -48,7 +48,7 @@ public sealed class AskProbeSuiteTests
         var run = AskProbeSummary.Parse("09-cap40-1", Log(pass: false, failing: "iv", truncated: true, latencyMs: 32_893, usage: 59.1, provenance: false));
 
         run.Kind.Should().Be("cap40");
-        run.Criteria.Should().HaveCount(6);
+        run.Criteria.Should().HaveCount(8);
         run.Criteria["iv"].Should().BeFalse();
         run.Criteria["v"].Should().BeTrue();
         run.Truncated.Should().BeTrue();
@@ -223,7 +223,7 @@ public sealed class AskProbeSuiteTests
             $"latency: Ask done -> first answer audio {latencyMs} ms; last chunk queued -> {latencyMs} ms",
             truncated ? "truncation: TRUNCATED (the reply starts at 55600 on the input clock)" : "truncation: none detected"
         };
-        foreach (var id in new[] { "i", "ii", "iii", "iv", "v", "vi" })
+        foreach (var id in new[] { "i", "ii", "iii", "iv", "v", "vi", "vii", "reply" })
         {
             lines.Add($"{(id == failing ? "FAIL" : "PASS")} ({id}) criterion text");
         }

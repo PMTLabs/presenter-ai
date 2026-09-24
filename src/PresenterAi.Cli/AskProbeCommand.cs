@@ -34,6 +34,7 @@ internal static class AskProbeCommand
     private const int ReplyObserveMs = 10_000;
     private const int ProvenanceSlackMs = 250;
     private const int TruncationSlackMs = 1_000;
+    private const int NewUtteranceQuietMs = 1_500;
     private const int VoicedIntervalGapMs = 500;
     private const int EndSignalSettleMs = 500;
     private const string WavHint = "Convert it with: ffmpeg -i <in> -ar 24000 -ac 1 -c:a pcm_s16le <out.wav>";
@@ -491,18 +492,69 @@ internal static class AskProbeCommand
             ? $"truncation: TRUNCATED (the reply starts at {replyStartMs} on the input clock, under end mark - {TruncationSlackMs} = {run.BurstEndMs - TruncationSlackMs}; about {Seconds(run.BurstEndMs - replyStartMs!.Value)} of the burst was not ingested)"
             : $"truncation: {(replyStartMs is null ? "not checked (no reply delta)" : "none detected")}").ConfigureAwait(false);
 
-        var criteria = new (string Name, bool Pass, string Detail)[]
+        // Owner decision 2026-09-24: turn-taking, not start_ms provenance. The question turn is the user deltas from Ask
+        // done: every delta that arrives before the answer ends, and any later one that follows the previous user delta
+        // within 1.5 s (the same utterance still arriving). A user delta after the answer ended that follows a quiet gap
+        // of 1.5 s or more is a NEW utterance; before the reply there must be none. The reply must itself be a new
+        // utterance: its first delta arrives after the answer ended and after 1.5 s with no user transcript.
+        var turn = TurnTaking(run, events, answerEnd);
+        var questionText = string.Concat(turn.Question.Select(e => e.Text));
+        var questionPart1 = Find(questionText, deck.Part1Keywords);
+        var questionPart2 = Find(questionText, deck.Part2Keywords);
+        var ivReasons = new List<string>();
+        if (turn.Question.Count == 0)
+        {
+            ivReasons.Add("no user delta after Ask done");
+        }
+
+        if (turn.NewUtterancesBeforeReply.Count > 0)
+        {
+            ivReasons.Add($"{turn.NewUtterancesBeforeReply.Count} new utterance(s) before the reply (first at +{turn.NewUtterancesBeforeReply[0].At - run.AskDoneAt} ms: \"{turn.NewUtterancesBeforeReply[0].Text.Trim()}\")");
+        }
+
+        if (questionPart1 < 0)
+        {
+            ivReasons.Add("part-1 keyword missing");
+        }
+
+        if (questionPart2 < 0)
+        {
+            ivReasons.Add("part-2 keyword missing");
+        }
+
+        if (questionPart1 >= 0 && questionPart2 >= 0 && questionPart2 < questionPart1)
+        {
+            ivReasons.Add("part-2 keyword before part-1 keyword");
+        }
+
+        var lastQuestionAt = turn.Question.Count == 0 ? (long?)null : turn.Question.Max(e => e.At);
+        var viiMargin = answerEnd is { } ae && lastQuestionAt is { } lq ? ae - lq : (long?)null;
+        await output.WriteLineAsync($"question turn: \"{questionText.Trim()}\" ({turn.Question.Count} deltas, the last at +{(lastQuestionAt is { } l ? l - run.AskDoneAt : 0)} ms after Ask done)").ConfigureAwait(false);
+        await output.WriteLineAsync(
+            $"(iv) start_ms range diagnostic (not scored): {(turnReasons.Count == 0 ? $"{burstDeltas.Count} deltas, all in the burst range; part-1 keyword before part-2 keyword" : string.Join("; ", turnReasons))}").ConfigureAwait(false);
+
+        var criteria = new List<(string Name, bool Pass, string Detail)>
         {
             ("(i) no upstream error", errors.Count == 0, $"{errors.Count} errors"),
             ("(ii) mute control silent", muteVoicedMs == 0 && muteUserDeltas == 0, $"{muteVoicedMs} ms voiced assistant audio, {muteUserDeltas} user deltas while muted"),
             ("(iii) nothing voiced before the last chunk was queued", earlyVoicedMs == 0, $"{earlyVoicedMs} ms voiced"),
-            ("(iv) every user delta before the reply is in the burst range, part 1 before part 2", turnReasons.Count == 0,
-                turnReasons.Count == 0 ? $"{burstDeltas.Count} deltas, all in the burst range; part-1 keyword before part-2 keyword" : string.Join("; ", turnReasons)),
+            ("(iv) one question turn, part 1 before part 2, no new utterance before the reply", ivReasons.Count == 0,
+                ivReasons.Count == 0 ? $"{turn.Question.Count} deltas in one turn; part-1 keyword before part-2 keyword" : string.Join("; ", ivReasons)),
             ("(v) one answer with fact A and fact B", answer is not null && factA is not null && factB is not null,
                 $"fact A {(factA is null ? "missing" : $"\"{factA}\"")}; fact B {(factB is null ? "missing" : $"\"{factB}\"")}"),
             ("(vi) no second unsolicited response within 15 s", answerEnd is not null && secondResponseAt is null,
-                answerEnd is null ? "the answer did not end" : secondResponseAt is null ? "none" : $"a new response started {secondResponseAt - answerEnd} ms after the answer ended")
+                answerEnd is null ? "the answer did not end" : secondResponseAt is null ? "none" : $"a new response started {secondResponseAt - answerEnd} ms after the answer ended"),
+            ("(vii) question transcript finished before the answer ended", viiMargin is > 0,
+                viiMargin is null ? (answerEnd is null ? "the answer did not end" : "no question delta") : $"margin {viiMargin:+#;-#;0} ms (last question delta +{lastQuestionAt - run.AskDoneAt} ms, answer end +{answerEnd - run.AskDoneAt} ms after Ask done)")
         };
+        if (run.ReplyAt is not null)
+        {
+            criteria.Add(("(reply) the reply is a new utterance", turn.ReplyIsNewUtterance,
+                turn.ReplyFirst is null
+                    ? "no reply delta arrived"
+                    : $"first reply delta +{turn.ReplyFirst.At - run.AskDoneAt} ms after Ask done, {(turn.ReplyGapMs is { } gap ? $"{gap} ms after the previous user delta" : "no earlier user delta")}, " +
+                      $"{(answerEnd is { } end2 ? $"{turn.ReplyFirst.At - end2:+#;-#;0} ms after the answer ended" : "the answer did not end")}"));
+        }
 
         foreach (var (name, pass, detail) in criteria)
         {
@@ -510,10 +562,53 @@ internal static class AskProbeCommand
         }
 
         var provenance = burstOk && replyOk;
-        await output.WriteLineAsync($"provenance check: {(provenance ? "CONFIRMED" : "NOT CONFIRMED")} (burst deltas {(burstOk ? "in range" : "not all in range")}; reply {(run.ReplyAt is null ? "not run" : replyOk ? "after burst end" : "not after burst end")})").ConfigureAwait(false);
+        await output.WriteLineAsync($"provenance check (diagnostic, not scored): {(provenance ? "CONFIRMED" : "NOT CONFIRMED")} (burst deltas {(burstOk ? "in range" : "not all in range")}; reply {(run.ReplyAt is null ? "not run" : replyOk ? "after burst end" : "not after burst end")})").ConfigureAwait(false);
         var passed = criteria.All(criterion => criterion.Pass);
         await output.WriteLineAsync($"result: {(passed ? "PASS" : "FAIL")}{(truncated ? " TRUNCATED" : string.Empty)} (variant run; send duration {run.SendDurationMs} ms, kept {Seconds(run.Stats.KeptMs)})").ConfigureAwait(false);
         return passed;
+    }
+
+    internal sealed record TurnTakingResult(
+        IReadOnlyList<ProbeEvent> Question,
+        IReadOnlyList<ProbeEvent> NewUtterancesBeforeReply,
+        ProbeEvent? ReplyFirst,
+        long? ReplyGapMs,
+        bool ReplyIsNewUtterance);
+
+    /// <summary>The turn-taking view of the user deltas after Ask done (owner decision 2026-09-24; see ReportAsync).</summary>
+    internal static TurnTakingResult TurnTaking(ProbeRun run, IReadOnlyList<ProbeEvent> events, long? answerEnd)
+    {
+        var question = new List<ProbeEvent>();
+        var fresh = new List<ProbeEvent>();
+        ProbeEvent? previous = null;
+        ProbeEvent? replyFirst = null;
+        long? replyGap = null;
+        foreach (var e in events.Where(e => e.Kind == EventKind.User && e.At >= run.AskDoneAt && e.Text.Trim().Length > 0))
+        {
+            var gap = previous is null ? (long?)null : e.At - previous.At;
+            var newUtterance = previous is not null && gap >= NewUtteranceQuietMs && (answerEnd is null || e.At > answerEnd);
+            if (run.ReplyAt is { } replyAt && e.At >= replyAt)
+            {
+                if (replyFirst is null)
+                {
+                    replyFirst = e;
+                    replyGap = gap;
+                }
+            }
+            else if (question.Count == 0 || !newUtterance)
+            {
+                question.Add(e);
+            }
+            else
+            {
+                fresh.Add(e);
+            }
+
+            previous = e;
+        }
+
+        var replyIsNew = replyFirst is not null && answerEnd is { } end && replyFirst.At > end && (replyGap is null || replyGap >= NewUtteranceQuietMs);
+        return new TurnTakingResult(question, fresh, replyFirst, replyGap, replyIsNew);
     }
 
     private static bool InBurst(ProbeRun run, ProbeEvent e) =>
