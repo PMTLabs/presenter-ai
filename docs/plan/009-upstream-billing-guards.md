@@ -690,7 +690,7 @@ T3–T5. T10 after the shapes settle; T11 last. Every "Test that dies" is new un
 | 1 | Start a talk with the picker at 5 min (web) | "limit: max length 5 min" in the log; banner at 4:00 with countdown; one spoken warning; ends `max_length` at 5:00 |
 | 2 | Pause, wait 2 min | Banner "Paused — disconnected"; server log "Upstream socket disposed: session=…"; usage stops |
 | 3 | Resume | "Reconnecting…", then the current slide is narrated again; `resume: reconnected via …` |
-| 4 | Say nothing, answer "no" to carry on, wait 5 min | Idle warning at 4:00; ends `idle` |
+| 4 | Ask a question; when the presenter asks "Shall I carry on?", say "no" (it holds on the slide); then stay silent 5 min. Do not pause (pausing stops the idle timer), and a "no" with no pending question is ordinary speech that resets it | Idle warning at 4:00; ends `idle` |
 | 5 | Kill the browser's network (DevTools offline) mid-talk | Within 45 s the server logs a heartbeat abort; row `end_reason = heartbeat` |
 | 6 | CLI `run <slug>`, Ctrl+C on slide 2 | "closed … end=cli_cancelled" within a few seconds, exit 1 |
 | 7 | Inspect the latest `sessions` rows | `end_reason`, `usage_confirmed`, `estimated_seconds` filled; usage not 0 |
