@@ -135,11 +135,6 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             // supplies its own source.
             services.RemoveAll<ISessionToolSource>();
             services.AddSingleton(SessionToolSource ?? new EmptySessionToolSource());
-            if (ScriptRevisions is not null)
-            {
-                services.RemoveAll<PresenterAi.Application.Scripts.Revisions.IScriptRevisionService>();
-                services.AddSingleton<PresenterAi.Application.Scripts.Revisions.IScriptRevisionService>(ScriptRevisions);
-            }
             if (UseQueuedPresenter)
             {
                 services.RemoveAll<IPresenter>();
@@ -148,11 +143,11 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             }
 
             // Plan 010 T4: revisions come from the in-memory store (seeded from the pinned content for test-user) and
-            // reverts go to the scriptable fake service.
+            // reverts go to the scriptable fake service. A bridge test (T8) may supply its own fake instead.
             services.RemoveAll<IPresentationRevisionStore>();
             services.AddSingleton<IPresentationRevisionStore>(serviceProvider => RevisionStore ??= CreateRevisionStore(serviceProvider));
             services.RemoveAll<IScriptRevisionService>();
-            services.AddSingleton<IScriptRevisionService>(RevisionService);
+            services.AddSingleton<IScriptRevisionService>(ScriptRevisions ?? RevisionService);
             services.RemoveAll<ITicketStore>();
             services.RemoveAll<IPresentationRepository>();
             services.AddScoped<IPresentationRepository, TestPresentationRepository>();
