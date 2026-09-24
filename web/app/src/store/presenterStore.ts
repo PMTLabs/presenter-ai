@@ -179,6 +179,14 @@ export const usePresenterStore = create<State>((set) => ({
           voiceTraining: Boolean(m.voiceTraining),
         };
       }
+      if (m.type === "trainer_state") {
+        // The switch shows only what the server holds: idle requests, refusals and the reset at End arrive here.
+        return {
+          trainerMode: Boolean(m.trainerMode),
+          trainerAvailable: Boolean(m.trainerAvailable),
+          voiceTraining: m.voiceTraining === undefined ? true : Boolean(m.voiceTraining),
+        };
+      }
       if (m.type === "script_edit") {
         const id = String(m.id);
         const existing = s.edits[id];

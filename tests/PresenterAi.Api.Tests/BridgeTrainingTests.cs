@@ -42,6 +42,68 @@ public sealed class BridgeTrainingTests
     }
 
     [Fact]
+    public async Task Idle_trainer_toggle_and_the_reset_at_end_reach_the_client_as_trainer_state()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = TrainingFactory(fake, out _);
+        using var socket = await BridgeTestSupport.ConnectWithTicketAsync(factory);
+        _ = await BridgeTestSupport.ReceiveUntilAsync(socket, f => Type(f) == "state");
+        var initial = await BridgeTestSupport.ReceiveUntilAsync(socket, f => Type(f) == "trainer_state");
+        initial.Select(pair => pair.Key).Should().BeEquivalentTo(["type", "trainerMode", "trainerAvailable", "voiceTraining"]);
+        (initial["trainerMode"]!.GetValue<bool>(), initial["trainerAvailable"]!.GetValue<bool>()).Should().Be((false, true));
+
+        // Idle: the request is stored for the next Start and echoed at once, so the switch shows it.
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"trainer_mode\",\"on\":true}");
+        (await BridgeTestSupport.ReceiveUntilAsync(socket, f => Type(f) == "trainer_state"))["trainerMode"]!.GetValue<bool>()
+            .Should().BeTrue();
+
+        await BridgeTestSupport.SendAsync(socket, $"{{\"type\":\"start\",\"presentation\":\"{Pid}\"}}");
+        (await BridgeTestSupport.ReceiveUntilAsync(socket, f => Type(f) == "script_version"))["trainerMode"]!.GetValue<bool>()
+            .Should().BeTrue();
+
+        // End resets Trainer mode on the server; the client hears it.
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"end\"}");
+        (await BridgeTestSupport.ReceiveUntilAsync(socket, f => Type(f) == "trainer_state" && !f["trainerMode"]!.GetValue<bool>()))
+            ["trainerAvailable"]!.GetValue<bool>().Should().BeTrue();
+        factory.Services.GetRequiredService<IPresenter>().CurrentTrainerState().TrainerMode.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Connecting_client_hears_only_its_own_idle_trainer_request()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = TrainingFactory(fake, out _);
+        using (var first = await BridgeTestSupport.ConnectAsync(factory))
+        {
+            await BridgeTestSupport.SendAsync(first, "{\"type\":\"trainer_mode\",\"on\":true}");
+            _ = await BridgeTestSupport.ReceiveUntilAsync(first, f => Type(f) == "trainer_state" && f["trainerMode"]!.GetValue<bool>());
+            await first.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        }
+
+        using var same = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
+        (await BridgeTestSupport.ReceiveUntilAsync(same, f => Type(f) == "trainer_state"))["trainerMode"]!.GetValue<bool>()
+            .Should().BeTrue();
+        await same.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
+        await Task.Delay(100);
+
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        while (true)
+        {
+            using var other = await BridgeTestSupport.ConnectWithTicketAsync(factory, userId: "other-user");
+            var frame = await BridgeTestSupport.ReceiveAsync(other);
+            if (frame.Text is not null && !frame.Text.Contains("\"code\":\"busy\"", StringComparison.Ordinal))
+            {
+                (await BridgeTestSupport.ReceiveUntilAsync(other, f => Type(f) == "trainer_state"))["trainerMode"]!.GetValue<bool>()
+                    .Should().BeFalse();
+                return;
+            }
+
+            DateTimeOffset.UtcNow.Should().BeBefore(deadline);
+            await Task.Delay(20);
+        }
+    }
+
+    [Fact]
     public async Task Tool_call_yes_then_applied_emits_script_edit_frames_in_order()
     {
         await using var fake = await FakeLiveServer.StartAsync();

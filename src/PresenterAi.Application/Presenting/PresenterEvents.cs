@@ -44,3 +44,15 @@ public sealed record PresenterScriptVersion(
     bool TrainerMode,
     bool TrainerAvailable,
     bool VoiceTraining);
+
+/// <summary>
+/// The server-authoritative Trainer mode for the <c>trainer_state</c> frame (additive to plan 010 §4.3): the running
+/// talk's mode, or while no talk runs the stored request for the next Start. <paramref name="OwnerId"/> is whose talk or
+/// request it is (null when neither); a bridge reports <paramref name="TrainerMode"/> only to that user.
+/// <paramref name="VoiceTraining"/> describes the live connection and is true outside a talk.
+/// </summary>
+public sealed record PresenterTrainerState(
+    string? OwnerId,
+    bool TrainerMode,
+    bool TrainerAvailable,
+    bool VoiceTraining);

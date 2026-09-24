@@ -194,8 +194,9 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   - `state` adds `suspended` (boolean) to indicate that the talk is paused with its upstream closed.
 - Live training (plan 010; additive, only the talk owner's connection can reach them):
   - C→S `{"type":"trainer_mode","on":true}` — `on` must be a boolean. Accepted during the sender's own talk (answered
-    by `script_version`) or while idle (stored for that user's next Start, acknowledged by the Start's
-    `script_version`). A reasoning route is required; otherwise Trainer mode stays off (`trainerAvailable:false`).
+    by `script_version` and `trainer_state`) or while idle (stored for that user's next Start, answered at once by
+    `trainer_state` and applied by the Start's `script_version`); a refused toggle is answered by `trainer_state` with
+    the unchanged value. A reasoning route is required; otherwise Trainer mode stays off (`trainerAvailable:false`).
   - C→S `{"type":"train_turn","question":"…","answer":"…","slideIndex":3}` — "Train on this": `question` and `answer`
     strings of 1…2,000 characters, `slideIndex` an integer in `0…slideCount-1` of the running talk. A wrong type, a
     missing field, an empty or too long text, or a negative or out-of-range index is `error{code:"protocol"}`. With
@@ -210,6 +211,13 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
     "voiceTraining":true}` — after the `state` frame on connect while a talk runs, after Start, on a toggle, after an
     upstream reconnect (which may change `voiceTraining`: false on a connection without a delegation model, where
     only "Train on this" works) and on every head change, always before the matching `script_edit` `applied`.
+  - S→C `{"type":"trainer_state","trainerMode":true,"trainerAvailable":true,"voiceTraining":true}` (additive after plan
+    010, UI polish) — the server-authoritative Trainer mode, in or out of a talk: after the `state` frame on every
+    connect (before any `script_version`), on every idle request or refusal, whenever the running talk's mode or voice
+    availability changes, and when a talk ends (End, upstream loss, take-over), where Trainer mode resets to off.
+    Outside a talk `trainerMode` is the stored request for the next Start and is true only for the user who made it;
+    `voiceTraining` describes a live connection and is true outside a talk. The client's switch shows this value and
+    never flips optimistically.
   - Transcript frames are unchanged: the client assembles the chosen exchange and its slide itself.
 - Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on
   pause). This is a server-to-client event, not a command; clients that do not recognize it may ignore it.

@@ -15,6 +15,7 @@ public interface IPresenter : IAsyncDisposable
     event Action<PresenterUpstreamStatus>? UpstreamStatus { add { } remove { } }
     event Action<PresenterScriptEdit>? ScriptEdit { add { } remove { } }
     event Action<PresenterScriptVersion>? ScriptVersion { add { } remove { } }
+    event Action<PresenterTrainerState>? TrainerState { add { } remove { } }
 
     PresenterSnapshot Snapshot();
 
@@ -43,6 +44,12 @@ public interface IPresenter : IAsyncDisposable
     /// The running talk's last <c>script_version</c> (plan 010), for a bridge that connects mid-talk; null when no talk runs.
     /// </summary>
     PresenterScriptVersion? CurrentScriptVersion() => null;
+
+    /// <summary>
+    /// The current Trainer mode (plan 010), in a talk or requested for the next Start, for a bridge that connects; raised
+    /// again through <see cref="TrainerState"/> on every change.
+    /// </summary>
+    PresenterTrainerState CurrentTrainerState() => new(null, false, false, true);
 
     /// <summary>"Train on this": queues an edit of <paramref name="slideIndex"/> from a transcript exchange.</summary>
     Task<bool> TrainOnTurnAsync(

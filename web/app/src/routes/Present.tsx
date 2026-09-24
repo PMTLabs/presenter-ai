@@ -146,6 +146,7 @@ export function Present() {
       "upstream",
       "script_edit",
       "script_version",
+      "trainer_state",
     ] as const)
       bridge.on(event, (eventMessage) => {
         message(eventMessage);

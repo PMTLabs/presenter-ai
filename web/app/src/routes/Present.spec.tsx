@@ -583,6 +583,42 @@ describe("Present", () => {
     expect(screen.getByRole("status").textContent).toBe("Couldn't update — timed out");
   });
 
+  it("trainer switch shows only server state: an idle toggle turns it on, End turns it off", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    // On connect, before any talk, the server reports availability and the idle value.
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    const toggle = () => screen.getByRole("checkbox", { name: "Trainer mode" }) as HTMLInputElement;
+    expect(toggle().checked).toBe(false);
+
+    fireEvent.click(toggle());
+    expect(bridgeSetTrainerMode).toHaveBeenCalledWith(true);
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: true, trainerAvailable: true, voiceTraining: true });
+    expect(toggle().checked).toBe(true);
+
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 1,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+    expect(toggle().checked).toBe(true);
+
+    emitBridge("closed", { type: "closed", endReason: "user" });
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 1, muted: false });
+    expect(toggle().checked).toBe(false);
+    fireEvent.click(toggle());
+    expect(bridgeSetTrainerMode).toHaveBeenLastCalledWith(true);
+  });
+
   it("shows voice training unavailable on a client-mode connection", async () => {
     signIn();
     get.mockResolvedValue({
