@@ -1,0 +1,73 @@
+# r010-plan-r2 — confirmation review
+
+Read-only review of revised `docs/plan/010-live-presenter-training.md` against round 1 (`docs/review/021-plan-010-plan-review.md`) and existing code. No repository edits, tests, builds or secret-file reads. The single-instance and revert-followed-by-pending-edits policies are accepted as decided.
+
+## Round-1 disposition
+
+| Finding | Verdict | Revised-plan evidence and code check |
+|---|---|---|
+| **A1** catalogue snapshot | **RESOLVED** | §3 `:119-123`, §4.1 `:344-348`, T1 `:698-716`, T7 `:829-832` copy/test the question through direct and `call_tool` resolution; existing `SnapshotTool` explicitly forwards members and wraps originals (`src/PresenterAi.Application/Tools/ToolSessionCatalogue.cs:32-43`, `:95-109`). A distinct *new* marker-type issue is below. |
+| **A2** hold-path coverage | **PARTIAL** | §3 `:102-114`, §4.1 `:375-391`, T7 `:840-848` now gate audio timers, part gap, nudge, question resume, hold entry and wrap-up, and test each. But the new reconnect wording contradicts the transition in `ResumeAfterReconnectAsync` (`src/PresenterAi.Application/Presenting/Presenter.cs:2055-2062`); see **D9**. |
+| **D1** singleton/scoped store | **RESOLVED** | §4.1 `:229-253`, T6 `:788-811`, T11 `:927-931` specify scope per operation, no scope over model await, DI and concurrent-Postgres tests. Matches existing singleton-presenter scoped-load precedent (`src/PresenterAi.Infrastructure/DependencyInjection.cs:162-191`) and scoped DbContext (`:26-34`). |
+| **D2** process-local commits | **RESOLVED within the owner policy** | §4.1 `:218-224`, §5 `:636-641`, §8 `:1036-1041` constrain deployment to one API instance, explicitly delimit external writes, and reload durable head on Start/conflict. T11 `:932-936` exercises both; existing singleton presenter and slot are process-local (`src/PresenterAi.Infrastructure/DependencyInjection.cs:162-166`; `src/PresenterAi.Api/Realtime/PresenterBridge.cs:97-99`). Not claiming multi-instance live notification. The *in-process gap-reload implementation* has a separate defect **D10**. |
+| **D3** wrong target after navigation | **RESOLVED** | §4.1 `:353-368`, T7 `:835-839` capture original target/ticket/owner and revalidate the command; after yes, navigation retains original target. Existing navigation increments generation and current approval invokes off-loop (`src/PresenterAi.Application/Presenting/Presenter.cs:1973-1976`, `:1733-1749`). See **D11** for the new `IScriptEditTool` transport. |
+| **D4** applied-before-swap | **PARTIAL** | §4.1 `:272-275`, `:394-412`, T7 `:850-853` remove the second `applied` callback and specify swap → replay → version → applied. But a gapped/out-of-order commit still skips per-edit status and can miss changes; see **D10**. `QueueFromProducer` can asynchronously reorder when the channel fills (`src/PresenterAi.Application/Presenting/Presenter.cs:370-401`). |
+| **C1** background events claim | **RESOLVED for the original claim** | §3 `:92-99` now explicitly names off-loop ticket cancellation; guard callback does cancel the ticket (`src/PresenterAi.Application/Presenting/Presenter.cs:683-691`). Its *new* assertion about `_runCts` cancellation is not supported; see **C2**. |
+| **A3** actual connection mode | **RESOLVED** | §4.1 `:422-430`, frame `:499-501`, T7 `:861-864` separate transcript capability from active-socket `voiceTraining` and re-evaluate after reconnect. Existing live session can report `client` even for a configured route (`src/PresenterAi.Infrastructure/Live/LiveSession.cs:582-585`, `:699-726`); existing presenter can change routes on reconnect (`src/PresenterAi.Application/Presenting/Presenter.cs:2029-2053`). |
+| **D5** zero-change success | **RESOLVED** | Validator §4.1 `:238-246`, T1 `:710-715`, T6 `:803-806` reject empty/unchanged output and drop unchanged targets before append. `ScriptWriter.Format` would otherwise write an unchanged script (`src/PresenterAi.Application/Scripts/ScriptWriter.cs:8-60`). |
+| **D6** destructive Down | **RESOLVED** | §4.3 `:483-488`, §5 `:670-680`, T2 `:728-735` guard nontrivial history and document export/count check before downgrade. Existing version is currently only an import counter (`src/PresenterAi.Cli/ImportCommand.cs:85-105`); backfill v1/reset remains a confirmed decision. |
+| **D7** revert/in-flight edit | **RESOLVED within the owner policy** | §4.1 `:267-280`, response `:512-518`, panel T10 `:910-918`, same-target gated test `:798-804` explicitly show that revert becomes head, pending edits may follow on top and the reverted row stays readable. Existing CLI writer changes the same current script (`src/PresenterAi.Cli/ImportCommand.cs:88-105`); the new CAS/revision store provides the stated ordering. |
+| **B1** prior exchange oracle | **RESOLVED** | §4.1 Web `:445-451`, T9 `:895-906`, T11 `:929-931` stamp slide on the first delta, preserve it through merge, test two exchanges across navigation and assert the committed target. This addresses existing time/role merging without slide (`web/app/src/store/presenterStore.ts:3`, `:81-103`). See **D13** for multi-second answers. |
+| **B2** Responses test oracle | **RESOLVED** | §4.1 `:282-315`, T5 `:767-786` assert both routes' URL/auth/model, strict schema, `store`, effort, token cap, output element parsing, no-retry cases and log redaction. Existing routes carry separate URL/headers/model (`src/PresenterAi.Infrastructure/Live/UpstreamRoute.cs:3-8`, `:26-49`). |
+| **D8** transcript prompt injection | **RESOLVED to the stated bounded-risk design** | §4.1 `:240-245`, `:319-339`, T1 `:711-715` distinguish confirmed request from untrusted recent context, reject instruction-like markers and explicitly disclaim immunity. Narration still reaches the live model in `SlideInstruction` (`src/PresenterAi.Application/Presenting/PromptBuilder.cs:104-141`), so manual quality/revert remains appropriate. |
+| **Sequencing and AC/chain notes** | **RESOLVED** | §6 `:681-693` adds a T1 service port/fake, moves real Postgres endpoint test to T11 and states dependencies. T4 `:751-758`, §7 `:1002-1006` fix snapshot → TS generation → staged no-drift order; `web/shared/scripts/generate-client.ts:8-27` supports `--url` and writes the snapshot before types. §6 `:955-973`, `:977-990` trace voice and transcript hops to ACs. |
+| **Unhappy-path notes** | **PARTIAL** | T6 `:803-811`, T7 `:855-864`, T8 `:873-887`, T11 `:927-936` add overflow/cancel, owner, wrong types, UTF-8 boundary, 409, provider fallback and external-import tests; bridge really has separate auth/text caps (`src/PresenterAi.Api/Realtime/PresenterBridge.cs:30-32`, `:202-240`, `:329-347`). End during the *DB append*, not just the hung reviser, remains untested and undefined; see **D12**. |
+
+## New findings introduced or exposed by the revision
+
+### D9 — Held reconnect can leave the talk paused after the user resumes
+**Severity:** blocker. **Plan:** §4.1 narration gate `:379-388`, Apply `:403-406`, T7 `:840-848`.
+
+**Evidence:** The revised plan says `ResumeCore` while held “leaves Paused/WaitingOnSlide” without narration, but also says `ResumeAfterReconnectAsync` checks the gate **before calling `ResumeCore`**. Today it is `ReconnectAsync` → `ResumeCore` → `PresentSlide` (`src/PresenterAi.Application/Presenting/Presenter.cs:2055-2062`); `ResumeCore` alone changes state to Presenting and restarts the idle guard (`:2070-2111`). Skipping it means the user-issued Resume leaves Paused, so a commit merely sets `_replayOnResume` rather than auto-replaying; the owner must resume twice. The named reconnect test only asserts no narration **before** release.
+
+**Fix:** Always perform a hold-aware `ResumeCore` state transition after reconnect; suppress only the stale instruction/nudge and the subsequent `PresentSlide` while held. Test state = Presenting immediately after held reconnect and automatic replay on completion without a second Resume.
+
+### D10 — Gap reload discards intermediate changes and edit acknowledgements
+**Severity:** blocker. **Plan:** §4.1 monotonic apply `:394-413`, T7 `:850-853`.
+
+**Evidence:** On receiving v7 while at v5, the plan reloads the head, applies the *head* and says the event's status waits; a late v6 is then `<= _scriptVersion` and “skip[s] the swap.” It does not derive a **net diff against v5** or settle the pending edit id from v6. Example: v6 edits current slide 2, v7 edits later slide 5. Apply v7's `ChangedSlideIndexes` only → slide 2 is swapped but never replayed; v6 later gets skipped, so edit 6 can remain pending/held and never emit `script_edit:applied`. Old `PresentSlide` chunks `_parts` once from `_presentation` (`src/PresenterAi.Application/Presenting/Presenter.cs:910-952`), and the producer queue can reorder under pressure (`:370-401`). A version-order test that only checks versions it *did* announce can miss the omitted acknowledgement.
+
+**Fix:** On a gap, reconcile old slides to the durable head (not just the last row's `changed_slides`), and explicitly settle all skipped local edit ids with their actual committed version/summary, or buffer/replay every intervening revision in order. Require the test to assert slide-2 replay and a terminal frame for **each** v6/v7 edit under reversed delivery, including a same-slide revert.
+
+### D11 — `IScriptEditTool` marker disappears at the snapshot and intent id has no specified transport
+**Severity:** blocker. **Plan:** §4.1 Tool/Capture/Confirm `:343-367`, T1 `:698-716`, T7 `:835-839`.
+
+**Evidence:** The revision introduces `ReviseScriptTool : IScriptEditTool` and says “for an `IScriptEditTool` the arguments passed to `InvokeAsync` carry the intent id.” The pending confirmation stores the **resolved** `ITool` and its cloned original JSON arguments (`src/PresenterAi.Application/Presenting/Presenter.cs:1561-1567`, `:1801-1803`); approval calls `InvokeBoundedAsync(pending.Tool, pending.Arguments, …)` unchanged (`:1733-1749`). `ToolSessionCatalogue.SnapshotTool` implements `ITool` and delegates `InvokeAsync` to the original, but does not implement the marker (`src/PresenterAi.Application/Tools/ToolSessionCatalogue.cs:95-111`). Forwarding `ConfirmationQuestion` does not fix marker-type checks. Neither §4.1 nor T1/T7 specifies how the private id enters the validated argument object without letting the model supply/spoof it (`ToolArgumentValidator.cs:26-76`).
+
+**Fix:** Recognize the resolved tool by a stable snapped capability/name, not an unsnapped runtime marker; pass intent id via trusted presenter-side invocation context (or an explicitly post-validation injected argument excluded from the public schema). Test through the *real catalogue* that approving once invokes the command with the captured id and that a model-supplied id cannot select another intent.
+
+### D12 — Checking cancellation before the DB await does not prevent a commit after End
+**Severity:** blocker. **Plan:** §4.1 service `:254-265`, lifecycle `:416-421`, sequence `:592-598`, T6/T7 `:804-807`, `:855-860`.
+
+**Evidence:** The worker checks `talkToken` **before** `TryAppendAsync`; the port's proposed `TryAppendAsync(owner,id,expected,revision)` has no cancellation token (`:228-231`). If End happens after the check while the DB transaction is blocked, `EndAsyncCore` can finish (`src/PresenterAi.Application/Presenting/Presenter.cs:2140-2182`) and the transaction then commit. Existing `EndWithReasonAsync` cancels the *StartTicket*, not `_runCts`, off-loop (`:253-277`); `CancelRun` is called in loop-side `EndAsyncCore` (`:2148-2153`, definition `:2472-2476`). The named “hung reviser” tests never gate the DB commit. This contradicts “no commit after End” in revised §4.4 and §5.
+
+**Fix:** Define an End-versus-append linearization barrier: pass the linked run token into the store transaction, check it before committing, and ensure End waits for (or serializes with) any commit already in its commit phase before reporting completion; a prior commit remains durable even if its status is dropped. Test with a gated transaction **after CAS/before commit** and End/max-length on the other side, asserting the defined order, version and revision-row count.
+
+### C2 — New off-loop `_runCts` assertion is unsupported by current code
+**Severity:** minor. **Plan:** §4.1 “Idle / billing / cancellation” `:416-421`, §4.4 failure `:595-597`.
+
+**Unsupported claim:** “End and the max-length callback keep cancelling off-loop: `CancelRun()` (`_runCts`) cancels the reviser call … even while the loop is busy.” Today `EndWithReasonAsync` calls only `CancelConnect` (`src/PresenterAi.Application/Presenting/Presenter.cs:253-277`), and the timer callback only cancels `ticket` (`:683-691`). `_runCts` is cancelled in loop-side `EndAsyncCore`/`OnClosed` (`:2152`, `:2215`) or off-loop `DisposeAsync` (`:303-310`), not from an ordinary End or max timer. This matters if Start/reconnect blocks the loop while reviser work is ongoing.
+
+**Fix:** Either explicitly add run cancellation to off-loop End/max/abort, safely keyed to the talk ticket, or change the prose to the actual queued-End guarantee and link edit calls to the off-loop-cancelled ticket. Test a blocked reconnect plus hung reviser at max-length, not only an unblocked event loop.
+
+### D13 — Multi-second assistant answers split into separate, untrainable turns
+**Severity:** major. **Plan:** §4.1 Web `:445-451`, T9 `:899-905`.
+
+**Evidence:** The plan still builds exchanges out of the existing client `Turn`s: deltas merge only when the same role's `end_ms` differs by <1,000 ms (`web/app/src/store/presenterStore.ts:81-103`). If an answer pauses for 1.1 s and resumes, the second presenter turn has no immediately preceding user turn. The revised UI disables it (“No question before this answer”) or trains only the first fragment, though the owner selected a prior **question + answer** exchange (AC6). Its new test uses multi-delta turns and a >1 s gap **between exchanges**, not within an answer.
+
+**Fix:** Establish stable exchange/answer grouping across natural speech pauses (or introduce turn identifiers/boundaries from the backend), retaining the initial slide and complete answer. Test a single answer split by a >1 s pause and a following different question; clicking any part must send exactly the full selected Q&A and original slide.
+
+## IS THIS PLAN READY TO IMPLEMENT?
+
+**No. Blockers:** D9–D12 (held reconnect, gap reconciliation, intent transport, End/DB linearization). **Improvements:** C2 and D13; tighten the remaining unhappy-path oracle. Round-1 policies D2 and D7 need no further decision.
+<!-- REVIEW-COMPLETE r010-plan-r2 -->
