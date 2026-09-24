@@ -29,6 +29,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     public string EnvironmentName { get; set; } = "Testing";
     public bool UseQueuedPresenter { get; set; }
     public ISessionToolSource? SessionToolSource { get; set; }
+    /// <summary>Plan 010 T8: when set, replaces the registered <see cref="IScriptRevisionService"/> for bridge tests.</summary>
+    public PresenterAi.TestSupport.FakeScriptRevisionService? ScriptRevisions { get; set; }
     private FakeTimeProvider? _fakeClock;
 
     public FakeTimeProvider UseFakeClock() => _fakeClock ??= new FakeTimeProvider();
@@ -133,6 +135,11 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             // supplies its own source.
             services.RemoveAll<ISessionToolSource>();
             services.AddSingleton(SessionToolSource ?? new EmptySessionToolSource());
+            if (ScriptRevisions is not null)
+            {
+                services.RemoveAll<PresenterAi.Application.Scripts.Revisions.IScriptRevisionService>();
+                services.AddSingleton<PresenterAi.Application.Scripts.Revisions.IScriptRevisionService>(ScriptRevisions);
+            }
             if (UseQueuedPresenter)
             {
                 services.RemoveAll<IPresenter>();

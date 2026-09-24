@@ -94,6 +94,7 @@ public static class PromptBuilder
 
         return $"Answer audience questions about the talk titled \"{title}\" in one to three short spoken sentences; if unsure, say so.\n\n" +
                "Use the tools for any request to pause, continue, move or end; never claim an action the tool did not confirm.\n\n" +
+               "When the speaker asks for the script itself to change (add, correct or remove something said on a slide), call revise_script with their feedback in their words; if it returns a question, say exactly that question and wait; if it reports that editing is off, answer it as a question.\n\n" +
                "Slide outline:\n" +
                outline;
     }
@@ -192,6 +193,24 @@ public static class PromptBuilder
 
     public static string WrapUpInstruction() =>
         "That was the last slide. Thank the audience in one or two sentences, then stop speaking.";
+
+    /// <summary>Feedback of a "Train on this" edit; the selected exchange carries the content.</summary>
+    public const string TrainOnTurnFeedback = "Add what this answer says to the slide.";
+
+    public static string ScriptEditPendingInstruction() =>
+        "Say briefly: Got it, updating that — one moment.";
+
+    public static string ScriptEditHoldInstruction(int index, int total, string title) =>
+        $"Stop whatever you are saying now. Tell the audience in one short sentence that {SlideLabel(index, total, title)} is being updated, then stay silent until you are told to continue.";
+
+    public static string ScriptUpdatedInstruction(int index, int total, string title) =>
+        $"The narration of {SlideLabel(index, total, title)} has been updated; the new text replaces what you said before.";
+
+    public static string ScriptEditFailedInstruction() =>
+        "Say briefly that you couldn't apply the change and continue with the current script.";
+
+    public static string ScriptEditDeclinedInstruction() =>
+        "Don't change the script. If the speaker asked something, answer it briefly, then carry on.";
 
     private static string SlideLabel(int index, int total, string title) =>
         $"slide {index + 1} of {total}{(title.Length > 0 ? $" (\"{title}\")" : string.Empty)}";

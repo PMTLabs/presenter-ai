@@ -113,9 +113,31 @@ public sealed class FakeScriptRevisionService : IScriptRevisionService
         }
     }
 
+    /// <summary>
+    /// Test seam (plan 010 T7): runs at the start of <see cref="GetReconciliationSnapshot"/>, before the lock is taken, so a
+    /// test can land a commit while the presenter's read is in progress.
+    /// </summary>
+    public Action<string>? BeforeSnapshot { get; set; }
+
+    /// <summary>Number of <see cref="GetReconciliationSnapshot"/> calls.</summary>
+    public int SnapshotReads => Volatile.Read(ref _snapshotReads);
+
+    private int _snapshotReads;
+
+    /// <summary>The head currently held for <paramref name="presentationId"/>, if any.</summary>
+    public HeadSnapshot? Head(string presentationId)
+    {
+        lock (_gate)
+        {
+            return _heads.GetValueOrDefault(presentationId);
+        }
+    }
+
     public ReconciliationSnapshot GetReconciliationSnapshot(string presentationId, IReadOnlyCollection<string> localEditIds)
     {
         ArgumentNullException.ThrowIfNull(localEditIds);
+        Interlocked.Increment(ref _snapshotReads);
+        BeforeSnapshot?.Invoke(presentationId);
         lock (_gate)
         {
             var outcomes = new Dictionary<string, EditOutcome>(StringComparer.Ordinal);

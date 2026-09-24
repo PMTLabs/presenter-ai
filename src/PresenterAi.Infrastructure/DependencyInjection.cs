@@ -259,7 +259,10 @@ public static class DependencyInjection
                         await using var scope = serviceProvider.GetRequiredService<IServiceScopeFactory>().CreateAsyncScope();
                         return await scope.ServiceProvider.GetRequiredService<ISessionToolSource>().LoadAsync(ownerId, ct).ConfigureAwait(false);
                     } : null,
-                TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000));
+                TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000),
+                // Plan 010: optional so hosts without the revision service still build; the presenter subscribes to its
+                // Changed signal itself (a reconcile request only).
+                serviceProvider.GetService<IScriptRevisionService>());
         });
         return services;
     }
