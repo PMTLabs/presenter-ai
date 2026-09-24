@@ -188,6 +188,127 @@ public sealed class PresenterLifetimeTests
         Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
     }
 
+    [Fact]
+    public async Task End_while_a_start_is_queued_behind_a_busy_idle_loop_rejects_it_without_an_upstream()
+    {
+        var h = CreateStartRace();
+        await using var presenter = h.Presenter;
+        var mute = h.BlockNextState("idle", () => presenter.MuteAsync());
+        await h.Blocked.Task;
+        var start = presenter.StartAsync("deck", null, "owner");
+        var end = presenter.EndAsync(EndReasons.User);
+        h.Release.SetResult();
+        Assert.False((await start).Started);
+        await mute;
+        await end;
+        await presenter.WaitUntilIdleAsync();
+        Assert.Equal(0, h.Created);
+        Assert.Empty(h.Closed);
+        Assert.Equal("idle", presenter.Snapshot().State);
+    }
+
+    [Fact]
+    public async Task End_while_a_start_is_queued_behind_a_starting_talk_rejects_it_and_ends_the_talk_as_user()
+    {
+        var loaderGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var h = CreateStartRace(async _ => await loaderGate.Task); // ignores cancellation
+        await using var presenter = h.Presenter;
+        var first = presenter.StartAsync("deck", null, "owner");
+        await h.LoaderEntered.Task;
+        var queued = presenter.StartAsync("deck", null, "owner");
+        var end = presenter.EndAsync(EndReasons.User);
+        loaderGate.SetResult();
+        Assert.False((await first).Started);
+        Assert.False((await queued).Started);
+        await end;
+        await presenter.WaitUntilIdleAsync();
+        Assert.Equal(0, h.Created);
+        Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
+    }
+
+    [Fact]
+    public async Task End_while_a_start_is_being_accepted_cancels_the_load_and_a_later_cap_does_not_relabel_it()
+    {
+        var h = CreateStartRace(token => Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, token));
+        await using var presenter = h.Presenter;
+        // Holds the loop inside acceptance: the snapshot already says connecting, the load has not begun.
+        var start = h.BlockNextState("connecting", () => presenter.StartAsync("deck", null, "owner"));
+        await h.Blocked.Task;
+        var end = presenter.EndAsync(EndReasons.User);
+        h.Release.SetResult();
+        await h.LoaderCancelled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False((await start).Started);
+        await end;
+        h.Clock.Advance(TimeSpan.FromMinutes(6));
+        await presenter.WaitUntilIdleAsync();
+        Assert.Equal(0, h.Created);
+        Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
+        Assert.Equal("idle", presenter.Snapshot().State);
+    }
+
+    [Fact]
+    public async Task Abort_pending_start_racing_acceptance_creates_no_upstream_and_a_later_start_is_accepted()
+    {
+        var h = CreateStartRace();
+        await using var presenter = h.Presenter;
+        var start = h.BlockNextState("connecting", () => presenter.StartAsync("deck", null, "owner"));
+        await h.Blocked.Task;
+        presenter.AbortPendingStart();
+        h.Release.SetResult();
+        Assert.False((await start).Started);
+        await presenter.WaitUntilIdleAsync();
+        Assert.Equal(0, h.Created);
+        Assert.Equal("idle", presenter.Snapshot().State);
+
+        Assert.True((await presenter.StartAsync("deck", null, "owner")).Started);
+        Assert.Equal(1, h.Created);
+    }
+
+    private static StartRace CreateStartRace(Func<CancellationToken, Task>? load = null) => new(load);
+
+    /// <summary>A presenter whose loop can be held inside a State notification, with a counting upstream.</summary>
+    private sealed class StartRace
+    {
+        private int _created;
+        private string? _blockOn;
+
+        public StartRace(Func<CancellationToken, Task>? load)
+        {
+            Presenter = new Presenter((_, _) => { Interlocked.Increment(ref _created); return new FakeSession(); },
+                async (_, id, token) =>
+                {
+                    LoaderEntered.TrySetResult();
+                    try { if (load is not null) await load(token); }
+                    catch (OperationCanceledException) { LoaderCancelled.TrySetResult(); throw; }
+                    return new LoadedPresentation(id, new PresentationMeta(id, "Title", "deck", "show", null, null, null),
+                        [new Slide(0, 1, "One", "Narration.", null)], null);
+                }, new PresenterSettings(MaxTalkMinutes: 5), Clock);
+            Presenter.Closed += Closed.Add;
+            Presenter.State += snapshot =>
+            {
+                if (snapshot.State != Volatile.Read(ref _blockOn)) return;
+                Volatile.Write(ref _blockOn, null);
+                Blocked.TrySetResult();
+                Release.Task.Wait(); // holds the presenter loop
+            };
+        }
+
+        public Presenter Presenter { get; }
+        public FakeTimeProvider Clock { get; } = new();
+        public int Created => Volatile.Read(ref _created);
+        public List<PresenterClosed> Closed { get; } = [];
+        public TaskCompletionSource LoaderEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource LoaderCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Blocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public T BlockNextState<T>(string state, Func<T> action)
+        {
+            Volatile.Write(ref _blockOn, state);
+            return action();
+        }
+    }
+
     private static Harness Create(Func<int, FakeSession>? factory = null, ITool? tool = null)
     {
         var clock = new FakeTimeProvider();

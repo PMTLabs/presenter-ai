@@ -177,6 +177,31 @@ public sealed class PresenterPauseCloseTests
     }
 
     [Fact]
+    public async Task End_before_a_reconnect_publishes_its_connect_creates_no_upstream_and_keeps_user_reason()
+    {
+        await using var h = Create();
+        await h.Start();
+        await h.Suspend();
+        var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        h.Presenter.UpstreamStatus += status =>
+        {
+            if (status.Status != "reconnecting") return;
+            blocked.TrySetResult();
+            release.Task.Wait(); // holds the loop after Resume is accepted, before its connect begins
+        };
+        var resume = h.Presenter.ResumeAsync();
+        await blocked.Task;
+        var end = h.Presenter.EndAsync(EndReasons.User);
+        release.SetResult();
+        Assert.False(await resume);
+        await end;
+        await h.Settle();
+        Assert.Single(h.Sessions);
+        Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
+    }
+
+    [Fact]
     public async Task Two_pause_close_resume_cycles_do_not_extend_the_cap()
     {
         await using var h = Create();

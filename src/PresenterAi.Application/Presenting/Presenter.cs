@@ -129,11 +129,13 @@ public sealed class Presenter : IPresenter
     private double _priorEstimatedSeconds;
     private bool _usageConfirmed = true;
     private DateTimeOffset? _connectedAt;
-    private CancellationTokenSource? _connectCts;
-    private CancellationTokenSource? _startCts;
     private CancellationTokenSource? _runCts;
-    private string? _pendingEndReason;
-    private long _startAbortEpoch;
+    // Off-loop signals (End, the guard's max-length callback, AbortPendingStart, Dispose) reach a Start or talk only
+    // through tickets: a ticket exists from the moment StartAsync enqueues, so there is no queued or accepting
+    // window in which a signal finds nothing to cancel. _queuedStarts and _talk are changed under _ticketGate.
+    private readonly object _ticketGate = new();
+    private readonly List<StartTicket> _queuedStarts = [];
+    private StartTicket? _talk;
     private bool _suspended;
     private string? _endDiagnostic;
 
@@ -194,9 +196,20 @@ public sealed class Presenter : IPresenter
     public async Task<PresenterStartResult> StartAsync(
         string id, int? fromIndex, string ownerId, int? maxMinutes, CancellationToken cancellationToken = default)
     {
-        var command = new StartCommand(ownerId, id, fromIndex, maxMinutes, Volatile.Read(ref _startAbortEpoch));
         ThrowIfDisposed();
-        await WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        var ticket = new StartTicket();
+        // Registered before the command is written, so an End or abort from now on cancels this Start.
+        lock (_ticketGate) _queuedStarts.Add(ticket);
+        var command = new StartCommand(ownerId, id, fromIndex, maxMinutes, ticket);
+        try
+        {
+            await WriteAsync(command, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            lock (_ticketGate) _queuedStarts.Remove(ticket);
+            throw;
+        }
         return await command.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -239,24 +252,28 @@ public sealed class Presenter : IPresenter
         return EnqueueCommandAsync(new EndCommand(resumable, endReason), cancellationToken);
     }
 
-    private void CancelConnect(string reason)
+    /// <summary>
+    /// Cancels every queued Start and the current talk's load, connects and reconnects, and records
+    /// <paramref name="reason"/> on each (first one wins per ticket). An End while idle with nothing queued touches
+    /// only the finished talk's ticket, so it cannot label the next talk.
+    /// </summary>
+    private void CancelConnect(string? reason)
     {
-        if (Snapshot().State != "idle")
-            Interlocked.CompareExchange(ref _pendingEndReason, reason, null);
-        try { Volatile.Read(ref _connectCts)?.Cancel(); }
-        catch (ObjectDisposedException) { }
-        try { Volatile.Read(ref _startCts)?.Cancel(); }
-        catch (ObjectDisposedException) { }
+        StartTicket[] tickets;
+        lock (_ticketGate)
+        {
+            tickets = _talk is null ? [.. _queuedStarts] : [.. _queuedStarts, _talk];
+            foreach (var ticket in tickets) ticket.RecordEndReason(reason);
+        }
+        // Cancel outside the gate: token callbacks may run loop continuations inline on this thread.
+        foreach (var ticket in tickets) ticket.Cancel();
     }
 
-    public void AbortPendingStart()
-    {
-        Interlocked.Increment(ref _startAbortEpoch);
-        try { Volatile.Read(ref _connectCts)?.Cancel(); }
-        catch (ObjectDisposedException) { }
-        try { Volatile.Read(ref _startCts)?.Cancel(); }
-        catch (ObjectDisposedException) { }
-    }
+    /// <summary>
+    /// Cancels queued and in-flight Starts and connects without choosing an end reason. Callers end the talk next
+    /// (bridge cleanup, shutdown, CLI cancellation); a Start enqueued after this call is unaffected.
+    /// </summary>
+    public void AbortPendingStart() => CancelConnect(null);
 
     /// <summary>Test hook that completes after all currently queued producer events have been consumed.</summary>
     public async Task WaitUntilIdleAsync(CancellationToken cancellationToken = default)
@@ -282,8 +299,8 @@ public sealed class Presenter : IPresenter
             return;
         }
 
+        // Cancels queued Starts and the current talk's load and connects.
         CancelConnect(EndReasons.Shutdown);
-        AbortPendingStart();
         CancelRun();
 
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -550,24 +567,31 @@ public sealed class Presenter : IPresenter
 
     private async Task ProcessStartAsync(StartCommand command)
     {
-        if (command.AbortEpoch != Volatile.Read(ref _startAbortEpoch) || Volatile.Read(ref _disposed) != 0)
+        var ticket = command.Ticket;
+        bool rejected;
+        lock (_ticketGate)
         {
+            _queuedStarts.Remove(ticket);
+            rejected = ticket.Token.IsCancellationRequested || Volatile.Read(ref _disposed) != 0;
+            // Only an accepted Start becomes the talk; a Start ignored because a talk is running must not
+            // replace that talk's ticket. Under the gate, a signal sees the ticket either queued or as the talk.
+            if (!rejected && _state == PresenterState.Idle) _talk = ticket;
+        }
+        if (rejected)
+        {
+            LogMessage("info", $"start cancelled before it began ({ticket.EndReason ?? "aborted"})");
             command.Completion.TrySetResult(new PresenterStartResult(false, command.Id, null, null, null));
             return;
         }
         try
         {
             command.Completion.TrySetResult(await StartAsyncCore(command.OwnerId, command.Id, command.FromIndex,
-                command.MaxMinutes).ConfigureAwait(false));
+                command.MaxMinutes, ticket).ConfigureAwait(false));
         }
         catch (Exception exception)
         {
             await FailSafeCloseAsync(exception).ConfigureAwait(false);
             command.Completion.TrySetResult(new PresenterStartResult(false, command.Id, null, null, null));
-        }
-        finally
-        {
-            Volatile.Write(ref _startCts, null);
         }
     }
 
@@ -601,7 +625,8 @@ public sealed class Presenter : IPresenter
         }
     }
 
-    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex, int? maxMinutes)
+    private async Task<PresenterStartResult> StartAsyncCore(string ownerId, string id, int? fromIndex, int? maxMinutes,
+        StartTicket ticket)
     {
         if (_state != PresenterState.Idle)
         {
@@ -620,7 +645,6 @@ public sealed class Presenter : IPresenter
         _approvedTools.Clear();
         _hostedStarted.Clear();
         _requestedEndReason = null;
-        Interlocked.Exchange(ref _pendingEndReason, null);
         _runCts?.Dispose();
         _runCts = new CancellationTokenSource();
         _talkStartedAt = _timeProvider.GetUtcNow();
@@ -636,15 +660,16 @@ public sealed class Presenter : IPresenter
             _settings.PauseGraceSeconds, generation => QueueFromProducer(new GuardElapsed(guard!, generation)),
             () =>
             {
-                if (ReferenceEquals(Volatile.Read(ref _guard), guard)) CancelConnect(EndReasons.MaxLength);
+                if (ReferenceEquals(Volatile.Read(ref _guard), guard)) ticket.Cancel(EndReasons.MaxLength);
             });
         Volatile.Write(ref _guard, guard);
         _talkStartedAt = guard.StartedAt;
         _suspended = false;
         _endDiagnostic = null;
         SetState(PresenterState.Connecting);
-        using var startCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-        Volatile.Write(ref _startCts, startCts);
+        // The ticket was cancellable since StartAsync enqueued it, so there is no check-then-publish gap: an End or
+        // abort before, during or after acceptance is already visible here.
+        using var startCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, ticket.Token);
         using var toolsCts = CancellationTokenSource.CreateLinkedTokenSource(startCts.Token);
         var toolsStartedAt = _timeProvider.GetTimestamp();
         Task<SessionToolSet>? toolsTask = null;
@@ -662,7 +687,7 @@ public sealed class Presenter : IPresenter
         {
             toolsCts.Cancel();
             if (toolsTask is not null) ObserveLateToolSet(toolsTask);
-            await EndAsyncCore(false, _pendingEndReason ?? EndReasons.Shutdown).ConfigureAwait(false);
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.Shutdown).ConfigureAwait(false);
             return new PresenterStartResult(false, id, null, null, null);
         }
         catch (Exception exception)
@@ -717,7 +742,7 @@ public sealed class Presenter : IPresenter
         }
         if (startCts.IsCancellationRequested)
         {
-            await EndAsyncCore(false, _pendingEndReason ?? EndReasons.Shutdown).ConfigureAwait(false);
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.Shutdown).ConfigureAwait(false);
             return new PresenterStartResult(false, id, null, null, null);
         }
         _catalogue = ToolSessionCatalogue.Build(_toolRegistry, _sessionTools?.Tools, _settings.MaxInlineTools);
@@ -726,7 +751,7 @@ public sealed class Presenter : IPresenter
         var connection = await ConnectUpstreamAsync().ConfigureAwait(false);
         if (connection.Cancelled)
         {
-            await EndAsyncCore(false, _pendingEndReason ?? EndReasons.MaxLength).ConfigureAwait(false);
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.MaxLength).ConfigureAwait(false);
             return new PresenterStartResult(false, id, null, null, null);
         }
         if (connection.Session is null || connection.Info is null)
@@ -780,64 +805,59 @@ public sealed class Presenter : IPresenter
     {
         var presentation = _presentation!;
         var hasExternalTools = _sessionTools is { Tools.Count: > 0 } or { HostedTools.Count: > 0 };
+        // Start and every reconnect run under the talk's ticket, which off-loop End, abort and the guard cancel
+        // directly. Nothing is published here, so a signal that arrives before this line is still observed below,
+        // before any candidate upstream is created.
         using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token,
-            _startCts?.Token ?? CancellationToken.None);
-        Volatile.Write(ref _connectCts, connectCts);
-        try
+            _talk?.Token ?? CancellationToken.None);
+        for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
         {
-            for (var attempt = 0; attempt < MaxUpstreamAttempts; attempt++)
+            if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                return new ConnectResult(null, null, null, true);
+            var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
+            var instructions = PromptBuilder.SystemInstructions(presentation.Meta.Title, presentation.Slides,
+                presentation.Context, onWarn: message => LogMessage("warn", message), managedMode: isManaged) +
+                (isManaged && hasExternalTools ? PromptBuilder.ExternalToolsSystemRules() : "");
+            var inlineTools = isManaged ? _catalogue?.GetInlineToolDefinitions() : null;
+            var delegationInstructions = isManaged
+                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides) +
+                  (hasExternalTools ? PromptBuilder.ExternalToolsBackendRules() : "") : null;
+            var request = new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice,
+                presentation.Meta.Title, inlineTools, delegationInstructions,
+                isManaged ? _sessionTools?.HostedTools : null);
+            var candidate = _createSession(request, attempt);
+            if (candidate is null) break;
+            var label = candidate.Name ?? $"upstream #{attempt + 1}";
+            try
             {
+                WireSession(candidate);
+                var info = await candidate.ConnectAsync(connectCts.Token).ConfigureAwait(false);
                 if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
-                    return new ConnectResult(null, null, null, true);
-                var isManaged = _hasDelegationModel?.Invoke(attempt) ?? true;
-                var instructions = PromptBuilder.SystemInstructions(presentation.Meta.Title, presentation.Slides,
-                    presentation.Context, onWarn: message => LogMessage("warn", message), managedMode: isManaged) +
-                    (isManaged && hasExternalTools ? PromptBuilder.ExternalToolsSystemRules() : "");
-                var inlineTools = isManaged ? _catalogue?.GetInlineToolDefinitions() : null;
-                var delegationInstructions = isManaged
-                    ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides) +
-                      (hasExternalTools ? PromptBuilder.ExternalToolsBackendRules() : "") : null;
-                var request = new SessionRequest(instructions, presentation.Meta.Voice ?? _settings.Voice,
-                    presentation.Meta.Title, inlineTools, delegationInstructions,
-                    isManaged ? _sessionTools?.HostedTools : null);
-                var candidate = _createSession(request, attempt);
-                if (candidate is null) break;
-                var label = candidate.Name ?? $"upstream #{attempt + 1}";
-                try
-                {
-                    WireSession(candidate);
-                    var info = await candidate.ConnectAsync(connectCts.Token).ConfigureAwait(false);
-                    if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
-                    {
-                        await DisposeSessionAsync(candidate, "cancelled connect").ConfigureAwait(false);
-                        return new ConnectResult(null, null, null, true);
-                    }
-                    LogMessage(attempt > 0 ? "warn" : "info", $"connected via {label}");
-                    return new ConnectResult(candidate, info, label, false);
-                }
-                catch (OperationCanceledException) when (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
                 {
                     await DisposeSessionAsync(candidate, "cancelled connect").ConfigureAwait(false);
                     return new ConnectResult(null, null, null, true);
                 }
-                catch (Exception exception)
-                {
-                    _endDiagnostic = exception.Message;
-                    await DisposeSessionAsync(candidate, $"failed start via {label}").ConfigureAwait(false);
-                    LogMessage("error", $"session start via {label} failed: {exception.Message}");
-                    var startup = exception as LiveStartupException;
-                    UpstreamError?.Invoke(new PresenterUpstreamError($"{label}: {exception.Message}",
-                        startup?.Code ?? "connect"));
-                    if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
-                        return new ConnectResult(null, null, null, true);
-                }
+                LogMessage(attempt > 0 ? "warn" : "info", $"connected via {label}");
+                return new ConnectResult(candidate, info, label, false);
             }
-            return new ConnectResult(null, null, null, false);
+            catch (OperationCanceledException) when (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+            {
+                await DisposeSessionAsync(candidate, "cancelled connect").ConfigureAwait(false);
+                return new ConnectResult(null, null, null, true);
+            }
+            catch (Exception exception)
+            {
+                _endDiagnostic = exception.Message;
+                await DisposeSessionAsync(candidate, $"failed start via {label}").ConfigureAwait(false);
+                LogMessage("error", $"session start via {label} failed: {exception.Message}");
+                var startup = exception as LiveStartupException;
+                UpstreamError?.Invoke(new PresenterUpstreamError($"{label}: {exception.Message}",
+                    startup?.Code ?? "connect"));
+                if (connectCts.IsCancellationRequested || _guard?.MaxExpired == true)
+                    return new ConnectResult(null, null, null, true);
+            }
         }
-        finally
-        {
-            Volatile.Write(ref _connectCts, null);
-        }
+        return new ConnectResult(null, null, null, false);
     }
 
     private sealed record ConnectResult(ILiveSession? Session, LiveSessionInfo? Info, string? Label, bool Cancelled);
@@ -1983,7 +2003,7 @@ public sealed class Presenter : IPresenter
         var connection = await ConnectUpstreamAsync().ConfigureAwait(false);
         if (connection.Cancelled)
         {
-            await EndAsyncCore(false, _pendingEndReason ?? EndReasons.MaxLength).ConfigureAwait(false);
+            await EndAsyncCore(false, _talk?.EndReason ?? EndReasons.MaxLength).ConfigureAwait(false);
             return false;
         }
         if (connection.Session is null || connection.Info is null)
@@ -2094,7 +2114,7 @@ public sealed class Presenter : IPresenter
             return false;
         }
 
-        endReason = Volatile.Read(ref _pendingEndReason) ?? endReason;
+        endReason = _talk?.EndReason ?? endReason;
         Debug.Assert(EndReasons.All.Contains(endReason));
         _requestedEndReason = endReason;
         _talkEndedAt = endReason == EndReasons.MaxLength ? _guard?.MaxEndsAt : _timeProvider.GetUtcNow();
@@ -2526,9 +2546,33 @@ public sealed class Presenter : IPresenter
     }
 
     private sealed record StartCommand(string OwnerId, string Id, int? FromIndex, int? MaxMinutes,
-        long AbortEpoch) : PresenterEvent
+        StartTicket Ticket) : PresenterEvent
     {
         public TaskCompletionSource<PresenterStartResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>
+    /// One Start's cancellation handle, created when StartAsync enqueues it. Once accepted it is the talk's handle
+    /// (load, connects, reconnects) until the next accepted Start. The end reason is first-wins.
+    /// </summary>
+    private sealed class StartTicket
+    {
+        private readonly CancellationTokenSource _cts = new();
+        private string? _endReason;
+
+        public CancellationToken Token => _cts.Token;
+        public string? EndReason => Volatile.Read(ref _endReason);
+
+        public void RecordEndReason(string? endReason)
+        {
+            if (endReason is not null) Interlocked.CompareExchange(ref _endReason, endReason, null);
+        }
+
+        public void Cancel(string? endReason = null)
+        {
+            RecordEndReason(endReason);
+            _cts.Cancel();
+        }
     }
     private sealed record NextCommand : Command;
     private sealed record PrevCommand : Command;
