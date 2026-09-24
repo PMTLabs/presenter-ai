@@ -31,3 +31,10 @@ The T1 live-probe evidence (`docs/progress/002-work-log-phase0.md:654-723`) reco
 **Improvements:** single disposal (4), strengthen the burst oracle (5), remove the wall-clock test race (6), correct coverage and diagram claims (7–8). No builds/tests were run for this review.
 
 <!-- REVIEW-COMPLETE r011-impl-r1 -->
+## Orchestrator note (2026-09-24)
+
+An earlier draft of this report, the one the fixes were briefed from, also had a finding the reviewer later removed:
+**D — Medium — A second Ask during Answering/CheckIn silently discards the first answer** (`Presenter.Asking.cs:99-120`,
+`EndExchange(Stay, "paused")`). The owner decided it anyway: a second Ask is a **follow-up question**. The current
+answer stops and the new question is answered, then the check-in resumes from the sentence interrupted before the
+first Ask, with no "paused" notice. It is fixed in the round-1 fix pass.
