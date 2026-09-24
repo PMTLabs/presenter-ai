@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { usePresenterStore } from "../store/presenterStore";
 import { LogPanel } from "./LogPanel";
 import { Transcript } from "./Transcript";
@@ -22,7 +22,7 @@ function fakeScrollBox(element: HTMLElement) {
   return element;
 }
 
-const turn = (text: string) => ({ role: "assistant", text, endMs: null });
+const turn = (text: string) => ({ role: "assistant", text, endMs: null, slide: 0 });
 const line = (message: string) => ({ level: "info", message, time: "20:00:00" });
 
 describe.each([
@@ -67,5 +67,56 @@ describe.each([
     fireEvent.scroll(box);
     act(() => add("fourth"));
     expect(box.scrollTop).toBe(box.scrollHeight);
+  });
+});
+
+describe("Transcript train on this", () => {
+  beforeEach(() => usePresenterStore.setState({ transcript: [], trainerMode: true }));
+
+  it("train on this sends the exchange of the clicked fragment", () => {
+    usePresenterStore.setState({
+      transcript: [
+        { role: "user", text: "What about the coating?", endMs: null, slide: 2 },
+        { role: "assistant", text: "The coating uses a new alloy.", endMs: null, slide: 2 },
+        { role: "assistant", text: "It also resists corrosion.", endMs: null, slide: 2 },
+      ],
+    });
+    const onTrainOnThis = vi.fn();
+    render(<Transcript onTrainOnThis={onTrainOnThis} />);
+
+    const buttons = screen.getAllByRole("button", { name: "Train on this" });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[1]);
+
+    expect(onTrainOnThis).toHaveBeenCalledTimes(1);
+    expect(onTrainOnThis).toHaveBeenCalledWith(
+      "What about the coating?",
+      "The coating uses a new alloy. It also resists corrosion.",
+      2,
+    );
+  });
+
+  it("disables train on this without a preceding question", () => {
+    usePresenterStore.setState({
+      transcript: [{ role: "assistant", text: "Welcome to the talk.", endMs: null, slide: 0 }],
+    });
+    render(<Transcript onTrainOnThis={vi.fn()} />);
+
+    const button = screen.getByRole("button", { name: "Train on this" });
+    expect(button).toHaveProperty("disabled", true);
+    expect(button).toHaveProperty("title", "No question before this answer");
+  });
+
+  it("hides train on this when trainer mode is off", () => {
+    usePresenterStore.setState({
+      trainerMode: false,
+      transcript: [
+        { role: "user", text: "What about the coating?", endMs: null, slide: 2 },
+        { role: "assistant", text: "The coating uses a new alloy.", endMs: null, slide: 2 },
+      ],
+    });
+    render(<Transcript onTrainOnThis={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "Train on this" })).toBeNull();
   });
 });

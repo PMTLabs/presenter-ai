@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAuthSession, setAuthSession, useAuthStore } from "@presenter/shared";
 import { usePresenterStore } from "../store/presenterStore";
 
-const { bridgeConnect, bridgeDisconnect, bridgeHandlers, bridgeStart, bridgeTakeOver, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
+const { bridgeConnect, bridgeDisconnect, bridgeHandlers, bridgeSetTrainerMode, bridgeStart, bridgeTakeOver, bridgeTrainTurn, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   load: vi.fn().mockResolvedValue({ adapter: "sections", count: 1 }),
@@ -20,6 +20,8 @@ const { bridgeConnect, bridgeDisconnect, bridgeHandlers, bridgeStart, bridgeTake
   bridgeDisconnect: vi.fn(),
   bridgeStart: vi.fn(),
   bridgeTakeOver: vi.fn(),
+  bridgeSetTrainerMode: vi.fn(),
+  bridgeTrainTurn: vi.fn(),
   bridgeHandlers: new Map<string, ((...args: unknown[]) => void)[]>(),
 }));
 vi.mock("@presenter/shared/api", () => ({ default: { GET: get, POST: post } }));
@@ -52,6 +54,8 @@ vi.mock("../ws/bridgeClient", () => ({
     disconnect() { bridgeDisconnect(); }
     start(...args: unknown[]) { bridgeStart(...args); }
     takeOver() { bridgeTakeOver(); }
+    setTrainerMode(...args: unknown[]) { bridgeSetTrainerMode(...args); }
+    trainTurn(...args: unknown[]) { bridgeTrainTurn(...args); }
     sendAudio() {}
   },
 }));
@@ -91,6 +95,8 @@ describe("Present", () => {
     bridgeDisconnect.mockClear();
     bridgeStart.mockClear();
     bridgeTakeOver.mockClear();
+    bridgeSetTrainerMode.mockClear();
+    bridgeTrainTurn.mockClear();
     bridgeHandlers.clear();
     clearAuthSession();
     window.history.replaceState({}, "", "/");
@@ -104,6 +110,13 @@ describe("Present", () => {
       endReason: null,
       usageConfirmed: null,
       estimatedSeconds: null,
+      trainerMode: false,
+      trainerAvailable: false,
+      voiceTraining: true,
+      scriptVersion: null,
+      edits: {},
+      editOrder: [],
+      currentEditId: null,
     });
     post.mockResolvedValue({ data: { ticket: "ticket" } });
     startAudio.mockResolvedValue({
@@ -481,5 +494,115 @@ describe("Present", () => {
     });
     emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 1, muted: false });
     expect(await screen.findByText("Talk ended: Maximum talk length reached")).toBeTruthy();
+  });
+
+  it("shows updating then updated with version and summary", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_4",
+      status: "queued",
+      slideIndexes: [3],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    expect(screen.getByRole("status").textContent).toBe("Updating…");
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_4",
+      status: "processing",
+      slideIndexes: [3],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    expect(screen.getByRole("status").textContent).toBe("Updating…");
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_4",
+      status: "applied",
+      slideIndexes: [3],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    });
+    expect(screen.getByRole("status").textContent).toBe("Updated — v7: Added the 2025 figures");
+  });
+
+  it("shows failure reason", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_5",
+      status: "queued",
+      slideIndexes: [1],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_5",
+      status: "failed",
+      slideIndexes: [1],
+      version: null,
+      summary: null,
+      error: "timeout",
+    });
+    expect(screen.getByRole("status").textContent).toBe("Couldn't update — timed out");
+  });
+
+  it("shows voice training unavailable on a client-mode connection", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    expect(screen.queryByText("Voice training is unavailable on this connection — use Train on this")).toBeNull();
+
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: false,
+    });
+
+    expect(
+      await screen.findByText("Voice training is unavailable on this connection — use Train on this"),
+    ).toBeTruthy();
   });
 });

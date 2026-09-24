@@ -18,6 +18,13 @@ describe("presenterStore", () => {
       endReason: null,
       usageConfirmed: null,
       estimatedSeconds: null,
+      trainerMode: false,
+      trainerAvailable: false,
+      voiceTraining: true,
+      scriptVersion: null,
+      edits: {},
+      editOrder: [],
+      currentEditId: null,
     });
   });
 
@@ -91,5 +98,114 @@ describe("presenterStore", () => {
       muted: false,
     });
     expect(usePresenterStore.getState().suspended).toBe(false);
+  });
+
+  it("tracks edit status by id", () => {
+    const store = usePresenterStore.getState();
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "queued",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    store.message({
+      type: "script_edit",
+      id: "edit_2",
+      status: "queued",
+      slideIndexes: [5],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "processing",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+
+    const state = usePresenterStore.getState();
+    expect(state.edits.edit_1).toEqual({
+      id: "edit_1",
+      status: "processing",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    expect(state.edits.edit_2).toEqual({
+      id: "edit_2",
+      status: "queued",
+      slideIndexes: [5],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    // The most recently queued edit becomes the one the chip follows.
+    expect(state.currentEditId).toBe("edit_2");
+  });
+
+  it("does not regress a terminal edit status", () => {
+    const store = usePresenterStore.getState();
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "queued",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "applied",
+      slideIndexes: [2],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    });
+    // A stale/duplicate non-terminal frame for the same id must never overwrite the terminal status.
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "processing",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+
+    expect(usePresenterStore.getState().edits.edit_1).toEqual({
+      id: "edit_1",
+      status: "applied",
+      slideIndexes: [2],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    });
+  });
+
+  it("stamps slide on the first delta and keeps it while merging", () => {
+    const store = usePresenterStore.getState();
+    store.message({ type: "slide", index: 2 });
+    store.message({ type: "transcript", role: "assistant", delta: "Hello", end_ms: 100 });
+    // Navigation mid-utterance must not retroactively move the turn's stamped slide.
+    store.message({ type: "slide", index: 5 });
+    store.message({ type: "transcript", role: "assistant", delta: " world", end_ms: 900 });
+
+    const transcript = usePresenterStore.getState().transcript;
+    expect(transcript).toHaveLength(1);
+    expect(transcript[0]).toEqual({ role: "assistant", text: "Hello world", endMs: 900, slide: 2 });
+
+    // A new turn (role change) picks up the current slide.
+    store.message({ type: "transcript", role: "user", delta: "Question", end_ms: 1500 });
+    expect(usePresenterStore.getState().transcript[1].slide).toBe(5);
   });
 });
