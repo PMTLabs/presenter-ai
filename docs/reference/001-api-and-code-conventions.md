@@ -167,10 +167,10 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
   The auth frame is limited to 4 KiB, authenticated text commands to 16 KiB (UTF-8 bytes; plan 010 raised it from
   4 KiB for `train_turn`) and binary audio frames to 4 KiB while fragments accumulate; an oversized auth frame closes
   `4401`, an authenticated oversized frame closes 1009 (Message Too Big). The frozen command/message set is in plan
-  002 §4.3; changes are additive only (plan 010 added the training frames below): new message types are added, never
-  renamed, and existing frames keep their shape.
+  002 §4.3; changes are additive only (plan 010 added the training frames below, plan 011 the ask frames): new message
+  types are added, never renamed, and existing frames keep their shape.
 - Error frames: `{"type":"error","code":"<catalogue code>","message":"…"}` — the same `code` values as HTTP.
-  Close codes: `1000` normal, `1013` busy (second client), `1011` server cannot keep up, `4401` auth,
+  Close codes: `1000` normal, `1013` busy (second client), `1011` server cannot keep up (reason `backpressure` when the admission queue is full), `4401` auth,
   `4409` `session.already_running`, `4429` `session.slots_busy`.
 - Take over (plan 006): the busy frame carries `canTakeOver` (true when the slot holder is the same user). An `auth`
   frame with `"takeOver":true` from that user ends the holder's talk (Start then resumes at its slide) and replaces
@@ -219,6 +219,42 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
     `voiceTraining` describes a live connection and is true outside a talk. The client's switch shows this value and
     never flips optimistically.
   - Transcript frames are unchanged: the client assembles the chosen exchange and its slide itself.
+- Ordered admission (plan 011): binary audio and every presenter command except `start` and `end` (`next`, `prev`,
+  `goto`, `pause`, `resume`, `mute`, `unmute`, `trainer_mode`, `train_turn` and the four `ask_*` commands) enter the
+  presenter through one bounded queue per connection (256 items) with one reader that makes at most one presenter
+  call at a time, each awaited to completion. The presenter therefore sees them in socket order, e.g. every PCM frame
+  sent before `ask_done` is recorded and none sent after it. The receive loop never waits for this queue: when it is
+  full the server closes `1011` with reason `backpressure` and the talk ends (end reason `backpressure`). `end` is always
+  read at once and bypasses the queue; items delivered after it find the talk no longer live and are ignored. On
+  disconnect the queue is dropped: an item already handed to the presenter finishes (bounded, 5 s) before the End.
+- Press-to-ask (plan 011; additive, any talk):
+  - C→S `{"type":"ask_start"}` — stops narration and listens: the upstream is muted and the mic audio is buffered on
+    the server. Answered by `ask_state` `listening`, or `off` with `refused_muted`, `refused_not_live` or
+    `unavailable`. A start while already listening re-sends `listening`.
+  - C→S `{"type":"ask_done"}` — while listening: `answering` (reason `sent`) or `off` (`empty`, `send_failed`);
+    otherwise ignored, with no frame.
+  - C→S `{"type":"ask_extend"}` — while listening: restarts the 90 s quiet timer and answers `listening` with
+    `quietRemainingMs` 90000; otherwise ignored.
+  - C→S `{"type":"ask_cancel"}` — while listening or waiting for the upstream's unmute ack: `off` `cancelled`;
+    otherwise ignored.
+  - Extra fields on the four commands are ignored, as for `pause`; an unknown `ask_*` type is `error{code:"protocol"}`.
+    `unmute` while listening is ignored (the upstream stays muted). The `state` frame shows `paused:true` while
+    listening.
+  - S→C `{"type":"ask_state","state":"listening"|"answering"|"off","elapsedMs":23000,"quietRemainingMs":67000|null,
+    "speechRemainingMs":13400|null,"heard":true,"transcribing":false,"reason":null|"…"}` — every field is always
+    present. `listening` on start, every second and on extend (`quietRemainingMs` and `speechRemainingMs`, the kept
+    speech left of the 25 s cap, only here; `reason` null). `answering` once, when the whole question is **queued** on
+    the live upstream session (`sent` means fully queued, not acknowledged), with `reason` `sent`, `quiet_sent` (90 s
+    of quiet after speech), `limit_sent` (25 s speech cap) or `phrase_sent`; it covers the answer and the check-in.
+    `off` exactly once per ask and once per refused start. Its reasons while listening are `cancelled`, `empty`,
+    `quiet_cancelled`, `muted`, `resumed`, `navigated`, `send_failed`, `ended`, `unavailable`, `refused_muted` and
+    `refused_not_live`. After `answering` they are `continued` (yes, Continue, follow-up timeout, or no answer within
+    the budget), `waiting` ("no" at the check-in), `paused`, `navigated` and `ended`. `transcribing` is false while
+    the transcriber port is disabled (the default).
+  - Frame sequence: `listening` (every 1 s) → [the upstream's unmute ack, at most 2 s, no frame] → `answering` (once)
+    → `off` (once). A cancellation while listening goes straight from `listening` to `off`. On End, `off` `ended`
+    precedes `closed` while the socket is open. `ask_state` is not sent on connect.
+  - While `answering`, `resume` is **Continue**: it skips the check-in and resumes the interrupted sentence.
 - Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on
   pause). This is a server-to-client event, not a command; clients that do not recognize it may ignore it.
 
