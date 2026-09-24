@@ -560,10 +560,17 @@ public sealed class PresenterBridge : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_presenter is IAsyncDisposable disposable)
+        if (_presenter is not IAsyncDisposable disposable) return;
+        // Presenter.DisposeAsync is bounded (Presenter.ShutdownBound) and reports an abandoned loop only through its
+        // Log event; no browser is attached at disposal, so route warnings and errors to the host log meanwhile.
+        void OnLog(PresenterLog log)
         {
-            await disposable.DisposeAsync().ConfigureAwait(false);
+            if (log.Level is "warn" or "error") _logger.LogWarning("Presenter disposal: {Message}", log.Message);
         }
+
+        _presenter.Log += OnLog;
+        try { await disposable.DisposeAsync().ConfigureAwait(false); }
+        finally { _presenter.Log -= OnLog; }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);

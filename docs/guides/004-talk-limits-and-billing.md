@@ -43,7 +43,10 @@ turns off the server ceiling.
   Any inbound frame, including audio, also counts as alive. No inbound frame before the timeout aborts the socket
   and ends the talk. A background tab that continues responding to pings remains connected; the idle guard still
   bounds a silent talk. A frozen tab that cannot answer or send frames is disconnected by the heartbeat.
-- **CLI:** the first Ctrl+C requests graceful End and waits for close; disposal is a backstop. `--max-seconds` remains
+- **CLI:** the first Ctrl+C cancels a pending start, requests graceful End and waits for close; disposal is a
+  backstop. Both waits are bounded (5 s for the End, 10 s for presenter disposal), so a wedged presenter, such as a
+  load that ignores cancellation, cannot keep the process alive, and a cancelled start never opens an upstream. The
+  API's shutdown and presenter disposal are bounded in the same way. `--max-seconds` remains
   an additional client-side stop and is clamped to the configured ceiling (with a warning) if it exceeds that
   ceiling. The presenter-level cap applies independently.
 

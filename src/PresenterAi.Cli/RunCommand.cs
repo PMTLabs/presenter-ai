@@ -14,6 +14,10 @@ public static class RunCommand
 {
     // The local content root has no owner boundary; the file-backed presenter loader intentionally ignores this.
     private const string LocalContentOwner = "local-file-content";
+    // Ctrl+C's wait for the presenter to end, the same bound as the API bridge's EndToIdleBound: LiveSession's close
+    // is itself bounded, so only a wedged presenter loop (e.g. a loader that ignores cancellation) reaches it. The
+    // Start was cancelled first (AbortPendingStart), so exiting after the bound cannot leave an upstream behind.
+    internal static readonly TimeSpan CancelEndBound = TimeSpan.FromSeconds(5);
 
     public static async Task<int> RunAsync(
         RunArguments arguments,
@@ -77,8 +81,10 @@ public static class RunCommand
         TextWriter error,
         CancellationToken cancellationToken,
         string? ownerId = null,
-        ISessionRecorderFactory? recorderFactory = null)
+        ISessionRecorderFactory? recorderFactory = null,
+        TimeProvider? clock = null)
     {
+        clock ??= TimeProvider.System;
         var stopwatch = Stopwatch.StartNew();
         var closed = new TaskCompletionSource<PresenterClosed>(TaskCreationOptions.RunContinuationsAsynchronously);
         var lastRole = string.Empty;
@@ -224,12 +230,13 @@ public static class RunCommand
             if (completed == timeout && !closed.Task.IsCompleted && Interlocked.Exchange(ref endRequested, 1) == 0)
             {
                 output.WriteLine($"{At()} max-seconds reached; ending");
-                await RequestEndAsync(EndReasons.CliMaxSeconds).ConfigureAwait(false);
+                // Ctrl+C must still reach the bounded cancellation path below while an End waits on the loop.
+                await RequestEndAsync(EndReasons.CliMaxSeconds).WaitAsync(cancellationToken).ConfigureAwait(false);
             }
 
             if (endTask is not null)
             {
-                await endTask.ConfigureAwait(false);
+                await endTask.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
 
             PresenterClosed result;
@@ -248,22 +255,34 @@ public static class RunCommand
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             presenter.AbortPendingStart();
+            var ended = true;
             try
             {
-                await presenter.EndAsync(EndReasons.CliCancelled, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                await presenter.EndAsync(EndReasons.CliCancelled, cancellationToken: CancellationToken.None)
+                    .WaitAsync(CancelEndBound, clock).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                ended = false;
+                await error.WriteLineAsync(
+                    $"Run cancellation: the presenter did not end within {CancelEndBound.TotalSeconds:0} s; exiting anyway.")
+                    .ConfigureAwait(false);
             }
             catch (Exception exception)
             {
                 await error.WriteLineAsync($"Run cancellation close failed: {exception.Message}").ConfigureAwait(false);
             }
 
-            try
+            if (ended)
             {
-                await closed.Task.WaitAsync(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                await error.WriteLineAsync("Run failed: timed out waiting for session close.").ConfigureAwait(false);
+                try
+                {
+                    await closed.Task.WaitAsync(TimeSpan.FromSeconds(8)).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    await error.WriteLineAsync("Run failed: timed out waiting for session close.").ConfigureAwait(false);
+                }
             }
 
             return 1;

@@ -340,6 +340,43 @@ public sealed class BridgeBillingGuardTests
     }
 
     [Fact]
+    public async Task Shutdown_and_disposal_during_a_start_stuck_in_its_loader_finish_without_an_upstream()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        var clock = factory.UseFakeClock();
+        var load = factory.Services.GetRequiredService<TestLoadGate>();
+        load.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        var presenter = (Presenter)factory.Services.GetRequiredService<IPresenter>();
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await load.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Host stop, then container disposal (the bridge disposes the presenter), as at process exit.
+        var bridge = factory.Services.GetRequiredService<PresenterBridge>();
+        var shutdown = factory.Services.GetServices<IHostedService>().OfType<PresenterShutdownService>().Single();
+        var exiting = Task.Run(async () =>
+        {
+            await shutdown.StopAsync(CancellationToken.None);
+            await bridge.DisposeAsync();
+        });
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
+        while (!exiting.IsCompleted && DateTimeOffset.UtcNow < deadline)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(10);
+        }
+        exiting.IsCompleted.Should().BeTrue("shutdown and presenter disposal must finish after their bounds");
+        await exiting;
+        presenter.Snapshot().State.Should().Be("connecting", "the Start is still stuck in its loader");
+
+        load.Gate.SetResult();
+        await BridgeTestSupport.WaitForAsync(() => presenter.Snapshot().State == "idle");
+        fake.ConnectionCount.Should().Be(0);
+        fake.ReceivedSnapshot().Should().NotContain(message => message["type"]!.GetValue<string>() == "session.start");
+    }
+
+    [Fact]
     public async Task Application_stopping_closes_the_live_upstream()
     {
         await using var fake = await FakeLiveServer.StartAsync();

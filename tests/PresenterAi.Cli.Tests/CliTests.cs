@@ -1,9 +1,11 @@
 using FluentAssertions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Time.Testing;
 using PresenterAi.Application.Tools.External;
 using PresenterAi.Cli;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Scripts;
 using PresenterAi.Infrastructure.Tests.Live;
 using Xunit;
 
@@ -173,6 +175,64 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Cancel_during_a_load_that_ignores_cancellation_exits_after_the_bound_without_an_upstream()
+    {
+        var clock = new FakeTimeProvider();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var created = 0;
+        var presenter = new Presenter((_, _) => { Interlocked.Increment(ref created); return null; },
+            async (_, id, _) =>
+            {
+                entered.TrySetResult();
+                await gate.Task; // ignores cancellation
+                return new LoadedPresentation(id, new PresentationMeta(id, "Title", "deck", "show", null, null, null),
+                    [new Slide(0, 1, "One", "Narration.", null)], null);
+            }, new PresenterSettings(MaxTalkMinutes: 5), clock);
+        using var cancellation = new CancellationTokenSource();
+        var error = new StringWriter();
+        var run = RunCommand.RunWithPresenterAsync(new RunArguments("sample", 300, 0, null), presenter,
+            new StringWriter(), error, cancellation.Token, clock: clock);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        cancellation.Cancel();
+        await AdvanceUntilAsync(clock, run);
+        (await run).Should().Be(1);
+        error.ToString().Should().Contain("the presenter did not end within 5 s");
+
+        // RunCommand.RunAsync then disposes its service provider, which disposes the presenter: bounded too.
+        var dispose = presenter.DisposeAsync().AsTask();
+        await AdvanceUntilAsync(clock, dispose);
+        await dispose;
+        presenter.Snapshot().State.Should().Be("connecting", "the Start is still stuck in its loader");
+
+        gate.SetResult();
+        await WaitUntilAsync(() => presenter.Snapshot().State == "idle");
+        Volatile.Read(ref created).Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(0)] // max-seconds reached: the CLI awaits its own End
+    [InlineData(1)] // stop-after-slide requested the End: after max-seconds the CLI awaits that End
+    public async Task Cancel_while_an_end_waits_on_a_wedged_presenter_exits_after_the_bound(int stopAfterSlide)
+    {
+        var clock = new FakeTimeProvider();
+        await using var presenter = new WedgedEndPresenter();
+        using var cancellation = new CancellationTokenSource();
+        var error = new StringWriter();
+        var run = RunCommand.RunWithPresenterAsync(new RunArguments("sample", 1, stopAfterSlide, null), presenter,
+            new StringWriter(), error, cancellation.Token, clock: clock);
+        await presenter.EndRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(TimeSpan.FromSeconds(1.5)); // past --max-seconds 1, so the CLI is awaiting the End
+
+        cancellation.Cancel();
+        await AdvanceUntilAsync(clock, run);
+        (await run).Should().Be(1);
+        error.ToString().Should().Contain("the presenter did not end within 5 s");
+        presenter.EndReasons.Should().Contain(EndReasons.CliCancelled);
+    }
+
+    [Fact]
     public async Task Missing_key_exits_2_with_one_line()
     {
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -306,6 +366,62 @@ public sealed class CliTests
         public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) => Task.FromResult(false);
         public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) => Task.FromException<bool>(new InvalidOperationException("close failed"));
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>A presenter that starts, then never finishes an End, like a loop wedged behind a stuck handler.</summary>
+    private sealed class WedgedEndPresenter : IPresenter
+    {
+        public event Action<PresenterSnapshot>? State { add { } remove { } }
+        public event Action<int>? Slide;
+        public event Action<PresenterAudio>? Audio { add { } remove { } }
+        public event Action<PresenterTranscript>? Transcript { add { } remove { } }
+        public event Action<PresenterUsage>? Usage { add { } remove { } }
+        public event Action<PresenterClosed>? Closed { add { } remove { } }
+        public event Action<PresenterLog>? Log { add { } remove { } }
+        public event Action<PresenterUpstreamError>? UpstreamError { add { } remove { } }
+
+        public TaskCompletionSource EndRequested { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public System.Collections.Concurrent.ConcurrentQueue<string> EndReasons { get; } = new();
+
+        public PresenterSnapshot Snapshot() => new("presenting", "sample", "sample", 0, 3, false, false, "test", null, 0, 200);
+
+        public Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default)
+        {
+            Slide?.Invoke(1);
+            return Task.FromResult(new PresenterStartResult(true, id, "test", "test", "test-model"));
+        }
+
+        public Task<bool> NextAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> PrevAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> GotoAsync(int index, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> PauseAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> ResumeAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> MuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> UnmuteAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> SendAudioAsync(ReadOnlyMemory<byte> pcm16, CancellationToken cancellationToken = default) => Task.FromResult(false);
+        public Task<bool> EndAsync(bool resumable = false, CancellationToken cancellationToken = default) =>
+            EndAsync(PresenterAi.Application.Presenting.EndReasons.User, resumable, cancellationToken);
+
+        public Task<bool> EndAsync(string endReason, bool resumable = false, CancellationToken cancellationToken = default)
+        {
+            EndReasons.Enqueue(endReason);
+            EndRequested.TrySetResult();
+            return new TaskCompletionSource<bool>().Task; // never completes
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private static async Task AdvanceUntilAsync(FakeTimeProvider clock, Task task)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!task.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(10);
+        }
+
+        task.IsCompleted.Should().BeTrue("the wait must end once its bound elapses on the clock");
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

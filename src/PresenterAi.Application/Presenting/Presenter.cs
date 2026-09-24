@@ -36,6 +36,10 @@ public sealed class Presenter : IPresenter
     public const int DefaultFollowUpWaitMs = 5_000;
     public const int MaxUpstreamAttempts = 4;
     public const int PartGapMs = 2_500;
+    // DisposeAsync's wait for the loop. The shutdown close is LiveSession.CloseAsync, itself bounded by
+    // LiveSessionOptions.CloseTimeout (5 s), so twice that expires only for a loop wedged elsewhere, e.g. in a
+    // presentation loader that ignores cancellation. Past it the process can exit; no upstream can be created.
+    public static readonly TimeSpan ShutdownBound = TimeSpan.FromSeconds(10);
 
     private readonly Func<SessionRequest, int, ILiveSession?> _createSession;
     private readonly Func<string, string, CancellationToken, Task<LoadedPresentation>> _loadPresentation;
@@ -299,10 +303,35 @@ public sealed class Presenter : IPresenter
             return;
         }
 
-        // Cancels queued Starts and the current talk's load and connects.
+        // Cancels queued Starts and the current talk's load and connects. From here no Start or reconnect can create
+        // an upstream: acceptance rejects a cancelled ticket and ConnectUpstreamAsync checks the ticket before every
+        // candidate, so abandoning a loop wedged in a loader that ignores cancellation is safe.
         CancelConnect(EndReasons.Shutdown);
         CancelRun();
 
+        var stopping = StopLoopAsync();
+        try
+        {
+            await stopping.WaitAsync(ShutdownBound, _timeProvider).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            LogMessage("warn", $"presenter loop did not stop within {ShutdownBound.TotalSeconds:0} s; abandoning it");
+            _events.Writer.TryComplete();
+            _lifetime.Cancel();
+            _ = stopping.ContinueWith(task => _ = task.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            // The abandoned loop still reads _lifetime.Token and _runCts, so neither is disposed here.
+            return;
+        }
+
+        _runCts?.Dispose();
+        _lifetime.Dispose();
+    }
+
+    private async Task StopLoopAsync()
+    {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -316,8 +345,6 @@ public sealed class Presenter : IPresenter
         _events.Writer.TryComplete();
         _lifetime.Cancel();
         await _loop.ConfigureAwait(false);
-        _runCts?.Dispose();
-        _lifetime.Dispose();
     }
 
     private async Task<bool> EnqueueCommandAsync(Command command, CancellationToken cancellationToken)

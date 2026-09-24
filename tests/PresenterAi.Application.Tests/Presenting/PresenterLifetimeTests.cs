@@ -264,6 +264,30 @@ public sealed class PresenterLifetimeTests
         Assert.Equal(1, h.Created);
     }
 
+    [Fact]
+    public async Task Dispose_during_a_load_that_ignores_cancellation_returns_after_the_bound_without_an_upstream()
+    {
+        var loaderGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var h = CreateStartRace(async _ => await loaderGate.Task); // ignores cancellation
+        var logs = new System.Collections.Concurrent.ConcurrentQueue<PresenterLog>();
+        h.Presenter.Log += logs.Enqueue;
+        var start = h.Presenter.StartAsync("deck", null, "owner");
+        await h.LoaderEntered.Task;
+
+        var dispose = h.Presenter.DisposeAsync().AsTask();
+        h.Clock.Advance(Presenter.ShutdownBound - TimeSpan.FromTicks(1));
+        Assert.False(dispose.IsCompleted);
+        h.Clock.Advance(TimeSpan.FromTicks(1));
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains(logs, log => log.Level == "warn" && log.Message.Contains("did not stop within 10 s"));
+        Assert.Equal("connecting", h.Presenter.Snapshot().State);
+
+        // The abandoned Start unblocks later and must not reach an upstream.
+        loaderGate.SetResult();
+        Assert.False((await start.WaitAsync(TimeSpan.FromSeconds(10))).Started);
+        Assert.Equal(0, h.Created);
+    }
+
     private static StartRace CreateStartRace(Func<CancellationToken, Task>? load = null) => new(load);
 
     /// <summary>A presenter whose loop can be held inside a State notification, with a counting upstream.</summary>
