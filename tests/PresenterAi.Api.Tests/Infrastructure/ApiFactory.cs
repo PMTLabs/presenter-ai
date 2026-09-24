@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using PresenterAi.Application.Auth;
 using PresenterAi.Application.Content;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Tools.External;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Infrastructure.Content;
 using Microsoft.IdentityModel.Tokens;
@@ -21,6 +22,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     public IReadOnlyDictionary<string, string?>? Overrides { get; set; }
     public string EnvironmentName { get; set; } = "Testing";
     public bool UseQueuedPresenter { get; set; }
+    public ISessionToolSource? SessionToolSource { get; set; }
 
     public HttpClient CreateAuthenticatedClient(string? userId = null, string? email = null, string role = "user")
     {
@@ -82,6 +84,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
         // No web root by default: a test that wants the SPA served must opt in with WebRootFixture, so nothing
         // passes only because web/app/dist happens to be built on the developer's machine (CI never builds it).
         builder.UseSetting("Content:WebRoot", Path.Combine(Path.GetTempPath(), "presenter-ai-no-web-root"));
+        builder.UseSetting("Tools:CredentialKey", Convert.ToBase64String(new byte[32]));
 
         if (Overrides is not null)
         {
@@ -93,6 +96,10 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
+            // The real MCP source reads Postgres, which these tests do not run; a test that needs external tools
+            // supplies its own source.
+            services.RemoveAll<ISessionToolSource>();
+            services.AddSingleton(SessionToolSource ?? new EmptySessionToolSource());
             if (UseQueuedPresenter)
             {
                 services.RemoveAll<IPresenter>();
@@ -109,8 +116,20 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.AddSingleton<TestSessionRecorderFactory>();
             services.AddSingleton<ISessionRecorderFactory>(serviceProvider =>
                 serviceProvider.GetRequiredService<TestSessionRecorderFactory>());
+            services.RemoveAll<IToolConnectionRepository>();
+            services.AddSingleton<TestToolConnectionRepository>();
+            services.AddSingleton<IToolConnectionRepository>(serviceProvider =>
+                serviceProvider.GetRequiredService<TestToolConnectionRepository>());
+
+            var mockRedis = new Moq.Mock<StackExchange.Redis.IConnectionMultiplexer>();
+            var mockDb = new Moq.Mock<StackExchange.Redis.IDatabase>();
+            mockRedis.Setup(r => r.GetDatabase(Moq.It.IsAny<int>(), Moq.It.IsAny<object>())).Returns(mockDb.Object);
+            services.RemoveAll<StackExchange.Redis.IConnectionMultiplexer>();
+            services.AddSingleton(mockRedis.Object);
         });
     }
+
+    public TestToolConnectionRepository ToolRepository => Services.GetRequiredService<TestToolConnectionRepository>();
 
     private static string FindRepositoryRoot()
     {
@@ -330,4 +349,10 @@ internal sealed class TestTicketStore : ITicketStore
         if (_tickets.TryGetValue(ticketId, out var ticket))
             _tickets[ticketId] = (ticket.UserId, DateTimeOffset.UtcNow.AddSeconds(-1));
     }
+}
+
+internal sealed class EmptySessionToolSource : ISessionToolSource
+{
+    public Task<SessionToolSet> LoadAsync(string ownerId, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new SessionToolSet(tools: [], hostedTools: [], notes: [], disposable: null));
 }

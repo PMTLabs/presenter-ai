@@ -11,9 +11,69 @@ public sealed class PresenterAiDbContext(DbContextOptions<PresenterAiDbContext> 
     public DbSet<Presentation> Presentations => Set<Presentation>();
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<SessionTurn> SessionTurns => Set<SessionTurn>();
+    public DbSet<ToolServer> ToolServers => Set<ToolServer>();
+    public DbSet<ToolServerCredential> ToolServerCredentials => Set<ToolServerCredential>();
+    public DbSet<ToolOverride> ToolOverrides => Set<ToolOverride>();
+    public DbSet<UserToolSettings> UserToolSettings => Set<UserToolSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<ToolServer>(entity =>
+        {
+            entity.ToTable("tool_servers", table =>
+            {
+                table.HasCheckConstraint("ck_tool_servers_auth_kind", "auth_kind IN ('none', 'oauth', 'header')");
+                table.HasCheckConstraint("ck_tool_servers_status", "status IN ('not_connected', 'connected', 'needs_reconnect', 'error')");
+            });
+            entity.HasKey(server => server.Id);
+            entity.Property(server => server.Id).HasColumnName("id");
+            entity.Property(server => server.OwnerId).HasColumnName("owner_id");
+            entity.Property(server => server.Name).HasColumnName("name").HasMaxLength(40).IsRequired();
+            entity.Property(server => server.Slug).HasColumnName("slug").HasMaxLength(16).IsRequired();
+            entity.Property(server => server.Url).HasColumnName("url").HasMaxLength(2048).IsRequired();
+            entity.Property(server => server.AuthKind).HasColumnName("auth_kind").IsRequired();
+            entity.Property(server => server.Status).HasColumnName("status").IsRequired();
+            entity.Property(server => server.LastErrorCode).HasColumnName("last_error_code");
+            entity.Property(server => server.AlwaysAsk).HasColumnName("always_ask");
+            entity.Property(server => server.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone");
+            entity.Property(server => server.UpdatedAt).HasColumnName("updated_at").HasColumnType("timestamp with time zone");
+            entity.Property(server => server.LastConnectedAt).HasColumnName("last_connected_at").HasColumnType("timestamp with time zone");
+            entity.HasIndex(server => new { server.OwnerId, server.Slug }).IsUnique().HasDatabaseName("ux_tool_servers_owner_id_slug");
+            entity.HasOne(server => server.Owner).WithMany().HasForeignKey(server => server.OwnerId).OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<ToolServerCredential>(entity =>
+        {
+            entity.ToTable("tool_server_credentials");
+            entity.HasKey(credential => credential.ServerId);
+            entity.Property(credential => credential.ServerId).HasColumnName("server_id");
+            entity.Property(credential => credential.Ciphertext).HasColumnName("ciphertext").IsRequired();
+            entity.Property(credential => credential.KeyId).HasColumnName("key_id").IsRequired();
+            entity.Property(credential => credential.AccessExpiresAt).HasColumnName("access_expires_at").HasColumnType("timestamp with time zone");
+            entity.Property(credential => credential.UpdatedAt).HasColumnName("updated_at").HasColumnType("timestamp with time zone");
+            entity.Property(credential => credential.Version).IsRowVersion();
+            entity.HasOne(credential => credential.Server).WithOne(server => server.Credential)
+                .HasForeignKey<ToolServerCredential>(credential => credential.ServerId).OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<ToolOverride>(entity =>
+        {
+            entity.ToTable("tool_overrides");
+            entity.HasKey(overrideRow => new { overrideRow.ServerId, overrideRow.ToolName });
+            entity.Property(overrideRow => overrideRow.ServerId).HasColumnName("server_id");
+            entity.Property(overrideRow => overrideRow.ToolName).HasColumnName("tool_name").HasMaxLength(128);
+            entity.Property(overrideRow => overrideRow.AlwaysAsk).HasColumnName("always_ask");
+            entity.HasOne(overrideRow => overrideRow.Server).WithMany(server => server.Overrides)
+                .HasForeignKey(overrideRow => overrideRow.ServerId).OnDelete(DeleteBehavior.Cascade);
+        });
+        modelBuilder.Entity<UserToolSettings>(entity =>
+        {
+            entity.ToTable("user_tool_settings");
+            entity.HasKey(settings => settings.UserId);
+            entity.Property(settings => settings.UserId).HasColumnName("user_id");
+            entity.Property(settings => settings.WebSearchEnabled).HasColumnName("web_search_enabled").HasDefaultValue(false);
+            entity.Property(settings => settings.UpdatedAt).HasColumnName("updated_at").HasColumnType("timestamp with time zone");
+            entity.HasOne(settings => settings.User).WithOne().HasForeignKey<UserToolSettings>(settings => settings.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
         modelBuilder.Entity<User>(entity =>
         {
             entity.ToTable("users");

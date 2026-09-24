@@ -8,6 +8,8 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
 {
     public const int MaxOutputBytes = 4096;
 
+    public string Outcome { get; init; } = Ok ? "ok" : "error";
+
     public static ToolResult Success(string message, JsonNode? data = null) => new(true, message, data);
 
     public static ToolResult Failure(string message, JsonNode? data = null) => new(false, message, data);
@@ -23,8 +25,16 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
         var node = new JsonObject
         {
             ["ok"] = Ok,
+            ["outcome"] = Outcome,
             ["message"] = Message
         };
+
+        if (Outcome is "confirmation_required" or "confirmation_pending" or "running")
+        {
+            node["status"] = Outcome;
+            if (Data is JsonObject data && data["question"] is { } question)
+                node["question"] = question.DeepClone();
+        }
 
         if (Data is not null)
         {
@@ -40,14 +50,12 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
 
         var note = $" [truncated; original data size {bytes} bytes]";
         var truncatedMessage = Message + note;
-
-        var truncatedNode = new JsonObject
+        var fallbackJson = new JsonObject
         {
             ["ok"] = Ok,
+            ["outcome"] = Outcome,
             ["message"] = truncatedMessage
-        };
-
-        var fallbackJson = truncatedNode.ToJsonString();
+        }.ToJsonString();
         if (Encoding.UTF8.GetByteCount(fallbackJson) <= MaxOutputBytes)
         {
             return fallbackJson;
@@ -67,6 +75,7 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
             var candidate = new JsonObject
             {
                 ["ok"] = Ok,
+                ["outcome"] = Outcome,
                 ["message"] = truncatedMessage[..boundaries[mid]]
             }.ToJsonString();
             if (Encoding.UTF8.GetByteCount(candidate) <= MaxOutputBytes)

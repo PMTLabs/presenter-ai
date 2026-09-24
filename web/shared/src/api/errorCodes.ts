@@ -35,6 +35,24 @@ export type ErrorCode =
   | "session.quota_exceeded"
   | "session.slots_busy"
   | "session.ticket_invalid"
+  | "tools_auth"
+  | "tools_credential_key_changed"
+  | "tools_credential_unreadable"
+  | "tools_credentials_unavailable"
+  | "tools_header_invalid"
+  | "tools_name_invalid"
+  | "tools_oauth_client_required"
+  | "tools_oauth_failed"
+  | "tools_oauth_invalid_grant"
+  | "tools_oauth_state_invalid"
+  | "tools_oauth_unsupported"
+  | "tools_redirect_refused"
+  | "tools_response_too_large"
+  | "tools_server_limit"
+  | "tools_server_not_found"
+  | "tools_unreachable"
+  | "tools_url_blocked"
+  | "tools_url_invalid"
   | "upstream.rate_limited"
   | "upstream.rejected"
   | "upstream.unavailable"
@@ -77,6 +95,24 @@ export const ERROR_CODES = {
   "session.quota_exceeded": { status: 429, title: "Session quota exceeded" },
   "session.slots_busy": { status: 429, title: "Session slots busy" },
   "session.ticket_invalid": { status: 401, title: "Invalid session ticket" },
+  "tools_auth": { status: 401, title: "Tool server authentication failed" },
+  "tools_credential_key_changed": { status: 401, title: "Tool credential key changed" },
+  "tools_credential_unreadable": { status: 401, title: "Tool credential unreadable" },
+  "tools_credentials_unavailable": { status: 503, title: "Tool credentials unavailable" },
+  "tools_header_invalid": { status: 400, title: "Tool header is invalid" },
+  "tools_name_invalid": { status: 400, title: "Tool server name is invalid" },
+  "tools_oauth_client_required": { status: 400, title: "Tool OAuth client required" },
+  "tools_oauth_failed": { status: 400, title: "Tool OAuth failed" },
+  "tools_oauth_invalid_grant": { status: 400, title: "Tool OAuth invalid grant" },
+  "tools_oauth_state_invalid": { status: 400, title: "Tool OAuth state invalid" },
+  "tools_oauth_unsupported": { status: 400, title: "Tool OAuth unsupported" },
+  "tools_redirect_refused": { status: 400, title: "Tool redirect refused" },
+  "tools_response_too_large": { status: 502, title: "Tool response too large" },
+  "tools_server_limit": { status: 400, title: "Tool server limit reached" },
+  "tools_server_not_found": { status: 404, title: "Tool server not found" },
+  "tools_unreachable": { status: 502, title: "Tool server unreachable" },
+  "tools_url_blocked": { status: 400, title: "Tool server URL is blocked" },
+  "tools_url_invalid": { status: 400, title: "Tool server URL is invalid" },
   "upstream.rate_limited": { status: 429, title: "Upstream rate limited" },
   "upstream.rejected": { status: 502, title: "Upstream rejected request" },
   "upstream.unavailable": { status: 503, title: "Upstream unavailable" },

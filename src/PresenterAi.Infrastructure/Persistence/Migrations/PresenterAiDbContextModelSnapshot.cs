@@ -284,6 +284,135 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                     b.ToTable("session_turns", (string)null);
                 });
 
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolOverride", b =>
+                {
+                    b.Property<Guid>("ServerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("server_id");
+
+                    b.Property<string>("ToolName")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("tool_name");
+
+                    b.Property<bool>("AlwaysAsk")
+                        .HasColumnType("boolean")
+                        .HasColumnName("always_ask");
+
+                    b.HasKey("ServerId", "ToolName");
+
+                    b.ToTable("tool_overrides", (string)null);
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolServer", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<bool>("AlwaysAsk")
+                        .HasColumnType("boolean")
+                        .HasColumnName("always_ask");
+
+                    b.Property<string>("AuthKind")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("auth_kind");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("LastConnectedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_connected_at");
+
+                    b.Property<string>("LastErrorCode")
+                        .HasColumnType("text")
+                        .HasColumnName("last_error_code");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("OwnerId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("owner_id");
+
+                    b.Property<string>("Slug")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("slug");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("status");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)")
+                        .HasColumnName("url");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerId", "Slug")
+                        .IsUnique()
+                        .HasDatabaseName("ux_tool_servers_owner_id_slug");
+
+                    b.ToTable("tool_servers", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_tool_servers_auth_kind", "auth_kind IN ('none', 'oauth', 'header')");
+
+                            t.HasCheckConstraint("ck_tool_servers_status", "status IN ('not_connected', 'connected', 'needs_reconnect', 'error')");
+                        });
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolServerCredential", b =>
+                {
+                    b.Property<Guid>("ServerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("server_id");
+
+                    b.Property<DateTimeOffset?>("AccessExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("access_expires_at");
+
+                    b.Property<byte[]>("Ciphertext")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("ciphertext");
+
+                    b.Property<string>("KeyId")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("key_id");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<uint>("Version")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("ServerId");
+
+                    b.ToTable("tool_server_credentials", (string)null);
+                });
+
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.User", b =>
                 {
                     b.Property<string>("Id")
@@ -328,6 +457,27 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("users", (string)null);
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.UserToolSettings", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasColumnType("text")
+                        .HasColumnName("user_id");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<bool>("WebSearchEnabled")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("web_search_enabled");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("user_tool_settings", (string)null);
                 });
 
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ExternalLogin", b =>
@@ -393,6 +543,50 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                     b.Navigation("Session");
                 });
 
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolOverride", b =>
+                {
+                    b.HasOne("PresenterAi.Infrastructure.Persistence.Entities.ToolServer", "Server")
+                        .WithMany("Overrides")
+                        .HasForeignKey("ServerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Server");
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolServer", b =>
+                {
+                    b.HasOne("PresenterAi.Infrastructure.Persistence.Entities.User", "Owner")
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Owner");
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolServerCredential", b =>
+                {
+                    b.HasOne("PresenterAi.Infrastructure.Persistence.Entities.ToolServer", "Server")
+                        .WithOne("Credential")
+                        .HasForeignKey("PresenterAi.Infrastructure.Persistence.Entities.ToolServerCredential", "ServerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Server");
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.UserToolSettings", b =>
+                {
+                    b.HasOne("PresenterAi.Infrastructure.Persistence.Entities.User", "User")
+                        .WithOne()
+                        .HasForeignKey("PresenterAi.Infrastructure.Persistence.Entities.UserToolSettings", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.Presentation", b =>
                 {
                     b.Navigation("Sessions");
@@ -401,6 +595,13 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.Session", b =>
                 {
                     b.Navigation("Turns");
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.ToolServer", b =>
+                {
+                    b.Navigation("Credential");
+
+                    b.Navigation("Overrides");
                 });
 
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.User", b =>

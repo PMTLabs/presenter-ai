@@ -46,6 +46,24 @@ public static class ErrorCodes
     [Description("Rate limit exceeded")] public const string RateLimitExceeded = "rate_limit.exceeded";
     [Description("Internal server error")] public const string InternalError = "internal.error";
     [Description("Not implemented")] public const string InternalNotImplemented = "internal.not_implemented";
+    [Description("Tool server URL is invalid")] public const string ToolsUrlInvalid = "tools_url_invalid";
+    [Description("Tool server URL is blocked")] public const string ToolsUrlBlocked = "tools_url_blocked";
+    [Description("Tool server limit reached")] public const string ToolsServerLimit = "tools_server_limit";
+    [Description("Tool server name is invalid")] public const string ToolsNameInvalid = "tools_name_invalid";
+    [Description("Tool server not found")] public const string ToolsServerNotFound = "tools_server_not_found";
+    [Description("Tool header is invalid")] public const string ToolsHeaderInvalid = "tools_header_invalid";
+    [Description("Tool credentials unavailable")] public const string ToolsCredentialsUnavailable = "tools_credentials_unavailable";
+    [Description("Tool OAuth unsupported")] public const string ToolsOAuthUnsupported = "tools_oauth_unsupported";
+    [Description("Tool OAuth client required")] public const string ToolsOAuthClientRequired = "tools_oauth_client_required";
+    [Description("Tool server unreachable")] public const string ToolsUnreachable = "tools_unreachable";
+    [Description("Tool redirect refused")] public const string ToolsRedirectRefused = "tools_redirect_refused";
+    [Description("Tool OAuth state invalid")] public const string ToolsOAuthStateInvalid = "tools_oauth_state_invalid";
+    [Description("Tool OAuth failed")] public const string ToolsOAuthFailed = "tools_oauth_failed";
+    [Description("Tool server authentication failed")] public const string ToolsAuth = "tools_auth";
+    [Description("Tool credential key changed")] public const string ToolsCredentialKeyChanged = "tools_credential_key_changed";
+    [Description("Tool credential unreadable")] public const string ToolsCredentialUnreadable = "tools_credential_unreadable";
+    [Description("Tool response too large")] public const string ToolsResponseTooLarge = "tools_response_too_large";
+    [Description("Tool OAuth invalid grant")] public const string ToolsOAuthInvalidGrant = "tools_oauth_invalid_grant";
 
     public static readonly IReadOnlyDictionary<string, ErrorCodeInfo> Catalogue =
         new Dictionary<string, ErrorCodeInfo>(StringComparer.Ordinal)
@@ -89,6 +107,24 @@ public static class ErrorCodes
             [DocumentTooLarge] = new(DocumentTooLarge, "Document too large", 413),
             [RateLimitExceeded] = new(RateLimitExceeded, "Rate limit exceeded", 429),
             [InternalError] = new(InternalError, "Internal server error", 500),
-            [InternalNotImplemented] = new(InternalNotImplemented, "Not implemented", 501)
+            [InternalNotImplemented] = new(InternalNotImplemented, "Not implemented", 501),
+            [ToolsUrlInvalid] = new(ToolsUrlInvalid, "Tool server URL is invalid", 400),
+            [ToolsUrlBlocked] = new(ToolsUrlBlocked, "Tool server URL is blocked", 400),
+            [ToolsServerLimit] = new(ToolsServerLimit, "Tool server limit reached", 400),
+            [ToolsNameInvalid] = new(ToolsNameInvalid, "Tool server name is invalid", 400),
+            [ToolsServerNotFound] = new(ToolsServerNotFound, "Tool server not found", 404),
+            [ToolsHeaderInvalid] = new(ToolsHeaderInvalid, "Tool header is invalid", 400),
+            [ToolsCredentialsUnavailable] = new(ToolsCredentialsUnavailable, "Tool credentials unavailable", 503),
+            [ToolsOAuthUnsupported] = new(ToolsOAuthUnsupported, "Tool OAuth unsupported", 400),
+            [ToolsOAuthClientRequired] = new(ToolsOAuthClientRequired, "Tool OAuth client required", 400),
+            [ToolsUnreachable] = new(ToolsUnreachable, "Tool server unreachable", 502),
+            [ToolsRedirectRefused] = new(ToolsRedirectRefused, "Tool redirect refused", 400),
+            [ToolsOAuthStateInvalid] = new(ToolsOAuthStateInvalid, "Tool OAuth state invalid", 400),
+            [ToolsOAuthFailed] = new(ToolsOAuthFailed, "Tool OAuth failed", 400),
+            [ToolsAuth] = new(ToolsAuth, "Tool server authentication failed", 401),
+            [ToolsCredentialKeyChanged] = new(ToolsCredentialKeyChanged, "Tool credential key changed", 401),
+            [ToolsCredentialUnreadable] = new(ToolsCredentialUnreadable, "Tool credential unreadable", 401),
+            [ToolsResponseTooLarge] = new(ToolsResponseTooLarge, "Tool response too large", 502),
+            [ToolsOAuthInvalidGrant] = new(ToolsOAuthInvalidGrant, "Tool OAuth invalid grant", 400)
         };
 }

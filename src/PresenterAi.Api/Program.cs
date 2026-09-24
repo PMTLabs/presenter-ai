@@ -14,6 +14,7 @@ using PresenterAi.Api.Endpoints;
 using PresenterAi.Api.Realtime;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Identity;
+using PresenterAi.Infrastructure.Tools;
 using PresenterAi.Application.Content;
 using PresenterAi.Infrastructure.Live;
 using PresenterAi.Api.Errors;
@@ -36,6 +37,7 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
 builder.Services.AddUpstreamOptions(builder.Configuration);
 builder.Services.AddPersistence(builder.Configuration);
 builder.Services.AddRedis(builder.Configuration);
+builder.Services.AddExternalTools();
 builder.Services.AddHttpClient("sso");
 builder.Services.AddOptions<JwtSettings>()
     .Bind(builder.Configuration.GetSection(JwtSettings.SectionName))
@@ -155,17 +157,19 @@ else
 // every deck file (found by the T11 Chrome run: "Deck not found: /ricoh/index.html").
 app.UseRouting();
 app.UseCors();
-app.UseAuthRateLimitHeaders();
-app.UseRateLimiter();
 app.UseWebSockets();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseAuthRateLimitHeaders();
+app.UseRateLimiter();
 
 app.MapHealthEndpoints();
 app.MapPresentationEndpoints();
 app.MapConfigEndpoints();
 app.MapAuthEndpoints(builder.Configuration, app.Environment);
 app.MapSessionEndpoints();
+app.MapToolOAuthMetadataEndpoint();
+app.MapToolEndpoints();
 app.MapPresenterBridge();
 app.MapOpenApi("/openapi/v1.json");
 app.MapGet("/decks/{**path}", async (HttpContext context) =>

@@ -41,6 +41,9 @@ internal sealed class FakeSession : ILiveSession
     public event Action<string>? Warning;
     public event Action<string, string>? DelegatedResponseFinished;
     public event Action<string, string, string, string>? ToolCallRequested;
+    public event Action<string, string, string>? HostedToolActivity;
+
+    public void RaiseHostedActivity(string delegationId, string status) => HostedToolActivity?.Invoke(delegationId, "web_search", status);
     public event Action<string, double?>? Closed;
 
     public Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
@@ -134,6 +137,8 @@ internal sealed class FakeSession : ILiveSession
     public void Silence(int milliseconds = 100) => Audio?.Invoke(new byte[milliseconds * 48], 0, milliseconds);
 
     public void Hear(string text = "hi", long? startMs = 0, long? endMs = 100) => Transcript?.Invoke("user", text, startMs, endMs);
+
+    public void ModelTranscript(string text, long? startMs = 0, long? endMs = 100) => Transcript?.Invoke("assistant", text, startMs, endMs);
 
     public void Drop() => Closed?.Invoke("connection_lost", null);
 

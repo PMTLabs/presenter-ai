@@ -7,6 +7,10 @@ you can interrupt with a question at any time, and the deck advances when the na
 The primary stack is the .NET 10 API with the React workspaces. The Node MVP was retired in plan 003; its last
 commit is `2a0b6a1`.
 
+| Feature | Details |
+|---|---|
+| External tools | Signed-in users can connect public HTTPS MCP servers, require spoken confirmation for non-read-only actions, and optionally enable hosted web search. See [External tools](docs/guides/003-external-tools.md). |
+
 ## Quick start — .NET + React
 
 Prerequisites:
@@ -143,6 +147,12 @@ The names used by Compose are mapped above. The .NET local path uses the `Upstre
 | `ADVANCE_SILENCE_MS` | no | Silence after the model stops speaking before the next slide. Default `3000`. |
 | `FOLLOW_UP_WAIT_MS` | no | Quiet after an answer to an audience question before the slide resumes, so a follow-up can be asked. `2500`–`60000`, default `5000`. See `docs/guides/002-audience-questions.md`. |
 | `LOG_EVENTS` | no | Log every upstream JSON event (audio deltas excluded); the .NET host binds `true`/`false`. |
+
+External tools use API configuration keys (not `.env` values by default): `Tools:CredentialKey` (secret; base64 of
+32 bytes), `Tools:OAuthRedirectUri` (optional), `Tools:Mcp:StartBudgetMs` (default `3000`),
+`Tools:Mcp:CallTimeoutSeconds` (default `10`), `Tools:MaxInlineTools` (default `16`), and `OAuth:ApiBaseUrl`
+(for public OAuth metadata registration). The credential key is optional until storing credentials/OAuth tokens;
+see the [external tools guide](docs/guides/003-external-tools.md#configuration) for defaults, validation and setup.
 
 Sessions cost about $0.05 per minute of session time, silence included. The app closes the session after the
 last slide, when you press End/Esc, and when the browser tab goes away.

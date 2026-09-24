@@ -15,5 +15,13 @@ public interface ITool
 
     bool Pinned { get; }
 
+    bool RequiresConfirmation => false;
+
+    TimeSpan Timeout => TimeSpan.FromSeconds(5);
+
+    string Source => "presenter";
+
+    string Title => Name;
+
     Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default);
 }

@@ -8,6 +8,8 @@ using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Application.Tools;
+using PresenterAi.Application.Tools.External;
+using PresenterAi.Infrastructure.Tools;
 using PresenterAi.Infrastructure.Content;
 using PresenterAi.Infrastructure.Live;
 using PresenterAi.Infrastructure.Persistence;
@@ -26,6 +28,7 @@ public static class DependencyInjection
         services.AddDbContext<PresenterAiDbContext>(options =>
             options.UseNpgsql(connectionString ?? string.Empty, npgsql => npgsql.EnableRetryOnFailure()));
         services.AddScoped<IPresentationRepository, PostgresPresentationRepository>();
+        services.AddScoped<IToolConnectionRepository, PostgresToolConnectionRepository>();
         services.TryAddSingleton<ISessionRecorderFactory, SessionRecorderFactory>();
         return services;
     }
@@ -79,6 +82,15 @@ public static class DependencyInjection
                 options => options.MaxInlineTools is >= ToolsOptions.MinMaxInlineTools and <= ToolsOptions.MaxMaxInlineTools,
                 $"Tools:MaxInlineTools must be between {ToolsOptions.MinMaxInlineTools} and {ToolsOptions.MaxMaxInlineTools}")
             .ValidateOnStart();
+
+        services.AddOptions<ExternalToolsOptions>()
+            .Bind(configuration.GetSection("Tools"))
+            .Validate(options => ExternalToolsOptions.ValidKey(options.CredentialKey), "Tools:CredentialKey must decode to 32 bytes")
+            .Validate(options => ExternalToolsOptions.ValidRedirect(options.OAuthRedirectUri), "Tools:OAuthRedirectUri must be absolute")
+            .Validate(options => options.Mcp.StartBudgetMs > 0 && options.Mcp.CallTimeoutSeconds > 0,
+                "Tools:Mcp budgets must be positive")
+            .ValidateOnStart();
+        services.AddSingleton<CredentialProtector>();
 
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
             UpstreamRoutes.From(serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamOptions>>().Value));
@@ -161,7 +173,8 @@ public static class DependencyInjection
                         request.Voice,
                         request.Title,
                         request.Tools,
-                        request.DelegationInstructions))
+                        request.DelegationInstructions,
+                        request.HostedTools))
                     : null,
                 loader,
                 new PresenterSettings(
@@ -171,7 +184,15 @@ public static class DependencyInjection
                     toolsOptions?.MaxInlineTools ?? ToolsOptions.DefaultMaxInlineTools),
                 timeProvider,
                 toolRegistry,
-                attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel));
+                attempt => attempt < routes.Upstreams.Count && !string.IsNullOrWhiteSpace(routes.Upstreams[attempt].DelegationModel),
+                routes.Upstreams.Any(route => !string.IsNullOrWhiteSpace(route.DelegationModel))
+                    && serviceProvider.GetRequiredService<IServiceProviderIsService>().IsService(typeof(ISessionToolSource))
+                    ? async (ownerId, ct) =>
+                    {
+                        await using var scope = serviceProvider.GetRequiredService<IServiceScopeFactory>().CreateAsyncScope();
+                        return await scope.ServiceProvider.GetRequiredService<ISessionToolSource>().LoadAsync(ownerId, ct).ConfigureAwait(false);
+                    } : null,
+                TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000));
         });
         return services;
     }

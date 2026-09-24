@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Time.Testing;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Scripts;
@@ -132,8 +133,8 @@ public sealed class PresenterVoiceCommandTests
         var (presenter, session, clock) = await Start();
         await using (presenter)
         {
-            var logs = new List<string>();
-            presenter.Log += entry => logs.Add(entry.Message);
+            var logs = new ConcurrentQueue<string>();
+            presenter.Log += entry => logs.Enqueue(entry.Message);
             session.Hear("What is this?", 100, 150);
             await presenter.WaitUntilIdleAsync();
             session.Speak(startMs: 151, endMs: 200);

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Time.Testing;
@@ -212,8 +213,8 @@ public sealed class PresenterToolTests
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         session.Hear("question", 100, 150);
         session.RaiseDelegation("responses", "d");
         await harness.Flush();
@@ -375,7 +376,7 @@ public sealed class PresenterToolTests
         registry.Register(new CrashingTool());
         registry.Register(new SlowTool());
 
-        await using var harness = Create(toolRegistry: registry, toolTimeoutMs: 50);
+        await using var harness = Create(toolRegistry: registry);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
 
@@ -417,7 +418,7 @@ public sealed class PresenterToolTests
         var gate = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var registry = new ToolRegistry();
         registry.Register(new GateTool("ignores_cancel", gate.Task, ignoreCancellation: true));
-        await using var harness = Create(toolRegistry: registry, toolTimeoutMs: 50);
+        await using var harness = Create(toolRegistry: registry);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
         session.RaiseToolCall("del_timeout", "hung", "ignores_cancel", "{}");
@@ -436,9 +437,9 @@ public sealed class PresenterToolTests
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var registry = new ToolRegistry();
         registry.Register(new LateReadingTool(gate.Task));
-        await using var harness = Create(toolRegistry: registry, toolTimeoutMs: 50);
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        await using var harness = Create(toolRegistry: registry);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
         session.RaiseToolCall("d", "late", "late_reader", "{\"value\":\"intact\"}");
@@ -461,8 +462,8 @@ public sealed class PresenterToolTests
         var registry = new ToolRegistry();
         registry.Register(new ImmediateAsyncFaultTool());
         await using var harness = Create(toolRegistry: registry);
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
         session.RaiseToolCall("d", "failed", "async_fault", "{}");
@@ -739,8 +740,8 @@ public sealed class PresenterToolTests
         await using var harness = Create(toolRegistry: registry);
         await harness.Presenter.StartAsync("p");
         var session = harness.Session();
-        var logs = new List<string>();
-        harness.Presenter.Log += entry => logs.Add(entry.Message);
+        var logs = new ConcurrentQueue<string>();
+        harness.Presenter.Log += entry => logs.Enqueue(entry.Message);
         session.Hear("question", 100, 150);
         session.RaiseDelegation("responses", "slow_backend");
         await harness.Flush();
@@ -829,7 +830,6 @@ public sealed class PresenterToolTests
         int chunkChars = 200,
         ToolRegistry? toolRegistry = null,
         Func<int, bool>? hasDelegationModel = null,
-        int toolTimeoutMs = 5000,
         int followUpWaitMs = Presenter.DefaultFollowUpWaitMs)
     {
         var clock = new FakeTimeProvider();
@@ -855,7 +855,7 @@ public sealed class PresenterToolTests
                 new PresentationMeta(id, "T", "deck", "showFn", null, null, advanceSilenceMs, chunkChars),
                 slides ?? DefaultSlides,
                 "ctx")),
-            new PresenterSettings(advanceSilenceMs, "marin", followUpWaitMs, ToolsOptions.DefaultMaxInlineTools, toolTimeoutMs),
+            new PresenterSettings(advanceSilenceMs, "marin", followUpWaitMs, ToolsOptions.DefaultMaxInlineTools),
             clock,
             toolRegistry,
             hasDelegationModel);
@@ -922,6 +922,7 @@ public sealed class PresenterToolTests
     {
         public string Name => "late_reader";
         public string Description => "Reads late";
+        public TimeSpan Timeout => TimeSpan.FromMilliseconds(50);
         public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } } };
         public IReadOnlyList<string> Tags => [];
         public bool Pinned => false;
@@ -969,6 +970,7 @@ public sealed class PresenterToolTests
         public JsonObject Parameters { get; } = new() { ["type"] = "object", ["properties"] = new JsonObject() };
         public IReadOnlyList<string> Tags { get; } = ["test"];
         public bool Pinned => false;
+        public TimeSpan Timeout => TimeSpan.FromMilliseconds(50);
 
         public async Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default)
         {
@@ -989,6 +991,8 @@ public sealed class PresenterToolTests
             _task = task;
             _ignoreCancellation = ignoreCancellation;
         }
+
+        public TimeSpan Timeout => _ignoreCancellation ? TimeSpan.FromMilliseconds(50) : TimeSpan.FromSeconds(5);
 
         public string Name { get; }
         public string Description => "A gate tool.";

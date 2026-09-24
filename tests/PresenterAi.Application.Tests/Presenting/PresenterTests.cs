@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Time.Testing;
+using System.Collections.Concurrent;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Scripts;
 using Xunit;
@@ -1054,7 +1055,7 @@ public sealed class PresenterTests
             Sessions = sessions;
             presenter.Slide += Slides.Add;
             presenter.UpstreamError += Errors.Add;
-            presenter.Log += Logs.Add;
+            presenter.Log += entry => Logs.Enqueue(entry);
         }
 
         public Presenter Presenter { get; }
@@ -1062,7 +1063,7 @@ public sealed class PresenterTests
         public List<FakeSession> Sessions { get; }
         public List<int> Slides { get; } = [];
         public List<PresenterUpstreamError> Errors { get; } = [];
-        public List<PresenterLog> Logs { get; } = [];
+        public ConcurrentQueue<PresenterLog> Logs { get; } = new();
 
         public FakeSession Session() => Sessions[^1];
 

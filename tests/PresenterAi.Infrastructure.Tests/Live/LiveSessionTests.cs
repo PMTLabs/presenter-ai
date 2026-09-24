@@ -156,6 +156,36 @@ public sealed class LiveSessionTests
         startClient["session"]!["delegation"]!["tools"].Should().BeNull();
     }
 
+    [Theory]
+    [InlineData("gpt-5.6-luna", true)]
+    [InlineData("", false)]
+    public async Task Hosted_web_search_is_sent_only_in_managed_mode(string delegationModel, bool managed)
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: delegationModel,
+            hosted: [new JsonObject { ["type"] = "web_search" }]);
+        await session.ConnectAsync();
+        var start = await EventuallyAsync(() => server.ReceivedSnapshot().SingleOrDefault(EventTypeIs("session.start")));
+        var delegation = start!["session"]!["delegation"]!;
+        if (managed) delegation["responses"]!["tools"]![0]!["type"]!.GetValue<string>().Should().Be("web_search");
+        else delegation["responses"].Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Web_search_items_raise_hosted_activity_without_exposing_payload()
+    {
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider(), delegationModel: "gpt-5.6-luna");
+        var statuses = new List<string>();
+        session.HostedToolActivity += (_, type, status) => { type.Should().Be("web_search"); statuses.Add(status); };
+        await session.ConnectAsync();
+        foreach (var (eventType, status) in new[] { ("response.output_item.added", "in_progress"), ("response.output_item.done", "completed") })
+            await server.SendEventAsync(new JsonObject { ["type"] = "response.event", ["delegation_id"] = "d", ["event"] = new JsonObject {
+                ["type"] = eventType, ["item"] = new JsonObject { ["type"] = "web_search_call", ["status"] = status, ["query"] = "private query" } } });
+        await EventuallyAsync(() => statuses.Count == 2);
+        statuses.Should().Equal("in_progress", "completed");
+    }
+
     [Fact]
     public async Task Hundred_registered_tools_real_session_start_has_only_pinned_and_meta_within_budget()
     {
@@ -530,11 +560,12 @@ public sealed class LiveSessionTests
         string delegationModel = "",
         string? presentationTitle = null,
         ILogger<LiveSession>? logger = null,
-        IReadOnlyList<JsonObject>? tools = null)
+        IReadOnlyList<JsonObject>? tools = null,
+        IReadOnlyList<JsonObject>? hosted = null)
     {
         return new LiveSession(
             new UpstreamRoute("azure-like", new Uri(server.Url), headers ?? new Dictionary<string, string> { ["Authorization"] = "Bearer test" }, model, delegationModel),
-            new LiveSessionConfig(model, "test instructions", "test-voice", presentationTitle, tools),
+            new LiveSessionConfig(model, "test instructions", "test-voice", presentationTitle, tools, HostedTools: hosted),
             clock,
             logger ?? NullLogger<LiveSession>.Instance,
             new LiveSessionOptions { SilencePump = silencePump, CloseTimeout = closeTimeout ?? TimeSpan.FromSeconds(5) });

@@ -2,6 +2,8 @@ using System.Text.Json;
 using System.Threading.Channels;
 using PresenterAi.Application.Scripts;
 using PresenterAi.Application.Tools;
+using PresenterAi.Application.Tools.External;
+using System.Text.Json.Nodes;
 using PresenterAi.Application.Presenting.VoiceCommands;
 using PresenterToolsRegistration = PresenterAi.Application.Presenting.Tools.PresenterToolsRegistration;
 
@@ -12,7 +14,8 @@ public sealed record SessionRequest(
     string Voice,
     string Title,
     IReadOnlyList<System.Text.Json.Nodes.JsonObject>? Tools = null,
-    string? DelegationInstructions = null);
+    string? DelegationInstructions = null,
+    IReadOnlyList<JsonObject>? HostedTools = null);
 
 public sealed record LoadedPresentation(
     string Id,
@@ -80,13 +83,19 @@ public sealed class Presenter : IPresenter
     private long? _latestQuestionEndMs;
     private readonly ToolRegistry _toolRegistry;
     private readonly Func<int, bool>? _hasDelegationModel;
+    private readonly Func<string, CancellationToken, Task<SessionToolSet>>? _loadSessionTools;
+    private readonly TimeSpan _startToolBudget;
+    private SessionToolSet? _sessionTools;
+    private PendingToolConfirmation? _pendingTool;
+    private readonly Dictionary<string, ApprovedToolCall> _approvedTools = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _hostedStarted = new(StringComparer.Ordinal);
     private readonly ToolRoundTracker _toolRoundTracker = new();
     private static readonly AsyncLocal<string?> ActiveToolCallId = new();
     private ToolSessionCatalogue? _catalogue;
     private long _runGeneration;
     private readonly Dictionary<string, long> _navigatingCallIds = new(StringComparer.Ordinal);
     private int _resumeSequence;
-    private enum Interaction { None, Answering, AwaitingCarryOn, WaitingOnSlide, AwaitingEndQuestion, AwaitingEndAnswer }
+    private enum Interaction { None, Answering, AwaitingCarryOn, WaitingOnSlide, AwaitingEndQuestion, AwaitingEndAnswer, AwaitingConfirmQuestion, AwaitingConfirmAnswer }
     private Interaction _interaction;
     private bool _rangeReply;
     private ITimer? _interactionTimer;
@@ -118,7 +127,9 @@ public sealed class Presenter : IPresenter
         PresenterSettings? settings = null,
         TimeProvider? timeProvider = null,
         ToolRegistry? toolRegistry = null,
-        Func<int, bool>? hasDelegationModel = null)
+        Func<int, bool>? hasDelegationModel = null,
+        Func<string, CancellationToken, Task<SessionToolSet>>? loadSessionTools = null,
+        TimeSpan? startToolBudget = null)
     {
         _createSession = createSession ?? throw new ArgumentNullException(nameof(createSession));
         _loadPresentation = loadPresentation ?? throw new ArgumentNullException(nameof(loadPresentation));
@@ -126,6 +137,8 @@ public sealed class Presenter : IPresenter
         _timeProvider = timeProvider ?? TimeProvider.System;
         _toolRegistry = toolRegistry ?? new ToolRegistry();
         _hasDelegationModel = hasDelegationModel;
+        _loadSessionTools = loadSessionTools;
+        _startToolBudget = startToolBudget ?? TimeSpan.FromSeconds(4);
         PresenterToolsRegistration.RegisterAll(_toolRegistry, this);
         _snapshot = BuildSnapshot();
         _loop = Task.Run(RunLoopAsync);
@@ -374,6 +387,12 @@ public sealed class Presenter : IPresenter
                     case ToolInvocationCompleted completed:
                         OnToolInvocationCompleted(completed);
                         break;
+                    case ApprovedToolCompleted approved:
+                        OnApprovedToolCompleted(approved);
+                        break;
+                    case HostedActivityReceived hosted when ReferenceEquals(hosted.Session, _session):
+                        OnHostedActivity(hosted);
+                        break;
                     case SessionWarning warning:
                         if (ReferenceEquals(warning.Session, _session))
                         {
@@ -392,6 +411,7 @@ public sealed class Presenter : IPresenter
                         _navigatingCallIds.Clear();
                         _runGeneration++;
                         _toolRoundTracker.Clear();
+                        ReleaseSessionTools();
                         var session = _session;
                         _session = null;
                         if (session is not null)
@@ -425,6 +445,8 @@ public sealed class Presenter : IPresenter
     {
         try
         {
+            if (command is NextCommand or PrevCommand or GotoCommand or PauseCommand or ResumeCommand or EndCommand)
+                CancelToolConfirmation();
             var result = command switch
             {
                 NextCommand next => NextCore(next.InvocationCallId),
@@ -463,21 +485,58 @@ public sealed class Presenter : IPresenter
         _navigatingCallIds.Clear();
         _runGeneration++;
         _toolRoundTracker.Clear();
-        _catalogue = _toolRegistry.CreateCatalogue(_settings.MaxInlineTools);
+        _approvedTools.Clear();
+        _hostedStarted.Clear();
         SetState(PresenterState.Connecting);
+        using var startCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        var toolsStartedAt = _timeProvider.GetTimestamp();
+        Task<SessionToolSet>? toolsTask = null;
+        if (_loadSessionTools is not null && (_hasDelegationModel is null || Enumerable.Range(0, MaxUpstreamAttempts).Any(i => _hasDelegationModel(i))))
+        {
+            try { toolsTask = _loadSessionTools(ownerId, startCts.Token); }
+            catch (Exception ex) { LogMessage("warn", $"tools: load failed ({ex.GetType().Name})"); }
+        }
+        var presentationTask = _loadPresentation(ownerId, id, _lifetime.Token);
         try
         {
-            _presentation = await _loadPresentation(ownerId, id, _lifetime.Token).ConfigureAwait(false);
+            _presentation = await presentationTask.ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             LogMessage("error", $"cannot load presentation \"{id}\": {exception.Message}");
             UpstreamError?.Invoke(new PresenterUpstreamError($"cannot load presentation: {exception.Message}", "presentation"));
+            startCts.Cancel();
+            if (toolsTask is not null) ObserveLateToolSet(toolsTask);
             SetState(PresenterState.Idle);
             return new PresenterStartResult(false, id, null, null, null);
         }
 
+        if (toolsTask is not null)
+        {
+            var remaining = _startToolBudget - _timeProvider.GetElapsedTime(toolsStartedAt);
+            if (remaining > TimeSpan.Zero && await Task.WhenAny(toolsTask, Task.Delay(remaining, _lifetime.Token)).ConfigureAwait(false) == toolsTask)
+            {
+                try
+                {
+                    _sessionTools = await toolsTask.ConfigureAwait(false);
+                    foreach (var note in _sessionTools.Notes) LogMessage("info", note);
+                }
+                catch (Exception ex)
+                {
+                    LogMessage("warn", $"tools: load failed ({ex.GetType().Name})");
+                }
+            }
+            else
+            {
+                startCts.Cancel();
+                LogMessage("warn", "tools: start budget exceeded");
+                ObserveLateToolSet(toolsTask);
+            }
+        }
+        _catalogue = ToolSessionCatalogue.Build(_toolRegistry, _sessionTools?.Tools, _settings.MaxInlineTools);
+        foreach (var note in _catalogue.Notes) LogMessage("info", note);
         var presentation = _presentation;
+        var hasExternalTools = _sessionTools is { Tools.Count: > 0 } or { HostedTools.Count: > 0 };
         ILiveSession? session = null;
         LiveSessionInfo? sessionInfo = null;
         string? upstream = null;
@@ -489,11 +548,11 @@ public sealed class Presenter : IPresenter
                 presentation.Slides,
                 presentation.Context,
                 onWarn: message => LogMessage("warn", message),
-                managedMode: isManaged);
+                managedMode: isManaged) + (isManaged && hasExternalTools ? PromptBuilder.ExternalToolsSystemRules() : "");
 
             var inlineTools = isManaged ? _catalogue.GetInlineToolDefinitions() : null;
             var delegationInstructions = isManaged
-                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides)
+                ? PromptBuilder.BackendInstructions(presentation.Meta.Title, presentation.Slides) + (hasExternalTools ? PromptBuilder.ExternalToolsBackendRules() : "")
                 : null;
 
             var request = new SessionRequest(
@@ -501,7 +560,8 @@ public sealed class Presenter : IPresenter
                 presentation.Meta.Voice ?? _settings.Voice,
                 presentation.Meta.Title,
                 inlineTools,
-                delegationInstructions);
+                delegationInstructions,
+                isManaged ? _sessionTools?.HostedTools : null);
 
             var candidate = _createSession(request, attempt);
             if (candidate is null)
@@ -533,6 +593,7 @@ public sealed class Presenter : IPresenter
         if (session is null || sessionInfo is null)
         {
             LogMessage("error", "no upstream could start a session");
+            ReleaseSessionTools();
             SetState(PresenterState.Idle);
             return new PresenterStartResult(false, id, null, null, null);
         }
@@ -541,6 +602,12 @@ public sealed class Presenter : IPresenter
         _sessionInfo = sessionInfo;
         if (sessionInfo.DelegationMode == "client")
         {
+            if (_sessionTools is not null)
+            {
+                ReleaseSessionTools();
+                _catalogue = ToolSessionCatalogue.Build(_toolRegistry, maxInlineTools: _settings.MaxInlineTools);
+                LogMessage("info", "external tools need a delegation model; not used in this talk");
+            }
             session.AppendInstructions(PromptBuilder.ClientModeInstruction(), "client-mode-controls");
         }
 
@@ -566,6 +633,7 @@ public sealed class Presenter : IPresenter
         session.Warning += message => QueueFromProducer(new SessionWarning(session, message));
         session.DelegatedResponseFinished += (id, type) => QueueFromProducer(new DelegatedResponseReceived(session, id, type));
         session.ToolCallRequested += (delegationId, callId, name, arguments) => QueueFromProducer(new ToolCallReceived(session, delegationId, callId, name, arguments));
+        session.HostedToolActivity += (delegationId, type, status) => QueueFromProducer(new HostedActivityReceived(session, delegationId, type, status));
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
     }
 
@@ -667,6 +735,11 @@ public sealed class Presenter : IPresenter
                 }
             }
 
+            if (_interaction == Interaction.AwaitingConfirmQuestion)
+            {
+                _endQuestionVoiced = true;
+                ArmInteraction(500);
+            }
             if (_state == PresenterState.Paused)
             {
                 ArmPermitQuiet();
@@ -700,7 +773,7 @@ public sealed class Presenter : IPresenter
         if (_state == PresenterState.Presenting)
         {
             // While a backend answer is pending, speech is filler ("One moment."), not the answer.
-            if (_questionHoldOpen && _interaction != Interaction.WaitingOnSlide && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
+            if (_pendingTool is null && _questionHoldOpen && _interaction != Interaction.WaitingOnSlide && !_toolRoundTracker.HasPendingBackendDelegation && IsAfterLatestQuestion(audio))
             {
                 if (!_answerVoiced)
                 {
@@ -713,6 +786,7 @@ public sealed class Presenter : IPresenter
                 }
             }
 
+            if (_pendingTool is not null) return;
             if (_questionHoldOpen && _interaction != Interaction.WaitingOnSlide && _answerVoiced)
             {
                 _lastAnswerAt = _timeProvider.GetTimestamp();
@@ -845,8 +919,13 @@ public sealed class Presenter : IPresenter
         var keepHold = command is { Intent: VoiceCommandIntent.No } && _interaction == Interaction.AwaitingCarryOn;
         if (command is not null && ExecuteVoiceCommand(command, beganDuringWaiting))
         {
-            if (!keepHold) ClearQuestionHold();
+            if (!keepHold && _interaction is not (Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer)) ClearQuestionHold();
             LogMessage("info", $"voice: {command.Intent.ToString().ToLowerInvariant()} (instant)");
+            return;
+        }
+
+        if (_interaction is Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer)
+        {
             return;
         }
 
@@ -866,16 +945,22 @@ public sealed class Presenter : IPresenter
         switch (command.Intent)
         {
             case VoiceCommandIntent.Pause:
+                CancelToolConfirmation();
                 return PauseCore();
             case VoiceCommandIntent.Resume:
+                CancelToolConfirmation();
                 return ResumeCore(beganDuringWaiting);
             case VoiceCommandIntent.Next:
+                CancelToolConfirmation();
                 return NextCore();
             case VoiceCommandIntent.Previous:
+                CancelToolConfirmation();
                 return PrevCore();
             case VoiceCommandIntent.GoTo:
+                CancelToolConfirmation();
                 return GotoCore(command.SlideNumber!.Value - 1);
             case VoiceCommandIntent.End:
+                CancelToolConfirmation();
                 StartEndConfirmation();
                 return true;
             case VoiceCommandIntent.Yes when _interaction == Interaction.AwaitingCarryOn:
@@ -886,6 +971,12 @@ public sealed class Presenter : IPresenter
                 SetInteraction(Interaction.WaitingOnSlide);
                 ClearQuestionTimer();
                 ClearSilenceTimer();
+                return true;
+            case VoiceCommandIntent.Yes when _interaction == Interaction.AwaitingConfirmAnswer:
+                ApproveToolConfirmation();
+                return true;
+            case VoiceCommandIntent.No when _interaction == Interaction.AwaitingConfirmAnswer:
+                CancelToolConfirmation("declined");
                 return true;
             case VoiceCommandIntent.Yes when _interaction == Interaction.AwaitingEndAnswer:
                 ObserveBackground(EndAsync(), "voice confirmed end");
@@ -964,6 +1055,14 @@ public sealed class Presenter : IPresenter
             case Interaction.AwaitingCarryOn:
                 SetInteraction(Interaction.None);
                 ResumeAfterQuestion($"question: no follow-up after {FollowUpWaitMs} ms; resuming");
+                break;
+            case Interaction.AwaitingConfirmQuestion:
+                if (!_endQuestionVoiced) LogMessage("warn", "tool: confirmation question not voiced after 8 s");
+                SetInteraction(Interaction.AwaitingConfirmAnswer);
+                ArmInteraction(10_000);
+                break;
+            case Interaction.AwaitingConfirmAnswer:
+                CancelToolConfirmation("not confirmed");
                 break;
             case Interaction.AwaitingEndQuestion:
                 if (!_endQuestionVoiced)
@@ -1161,7 +1260,37 @@ public sealed class Presenter : IPresenter
 
         if (_questionHoldOpen) ArmQuestionHold();
         LogMessage("info", $"tool: {call.Name} ({call.CallId}) requested for delegation {call.DelegationId}");
-        StartToolInvocation(call.Session, _runGeneration, call.DelegationId, call.CallId, call.Name, call.Arguments);
+        ToolResolution? resolution = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(call.Arguments);
+            resolution = _catalogue?.Resolve(call.Name, doc.RootElement);
+        }
+        catch (JsonException) { }
+        if (resolution?.Tool is { RequiresConfirmation: true } tool)
+        {
+            var key = tool.Name + ":" + Canonicalize(resolution.Arguments).ToJsonString();
+            if (_approvedTools.TryGetValue(key, out var approved) && _timeProvider.GetElapsedTime(approved.At).TotalSeconds < 60)
+            {
+                CompleteImmediateCall(call, approved.Result ?? ToolResult.Failure("running") with { Outcome = "running" });
+                return;
+            }
+            if (_pendingTool is { } pending)
+            {
+                CompleteImmediateCall(call, ToolResult.Failure(pending.Key == key ? "confirmation_pending" : "another action is waiting for confirmation") with { Outcome = pending.Key == key ? "confirmation_pending" : "error" });
+                return;
+            }
+            _pendingTool = new PendingToolConfirmation(key, tool, resolution.Arguments, call.Session, _runGeneration);
+            _endQuestionVoiced = false;
+            SetInteraction(Interaction.AwaitingConfirmQuestion);
+            OpenPermit(null);
+            var question = $"Shall I use {tool.Title} on {tool.Source}?";
+            CompleteImmediateCall(call, ToolResult.Failure(question) with { Outcome = "confirmation_required", Data = new JsonObject { ["status"] = "confirmation_required", ["question"] = question } });
+            LogMessage("info", $"tool: {tool.Source}.{tool.Name} waiting for yes");
+            ArmInteraction(8000);
+            return;
+        }
+        StartToolInvocation(call.Session, _runGeneration, call.DelegationId, call.CallId, call.Name, call.Arguments, resolution?.Tool);
     }
 
     private void StartToolInvocation(
@@ -1170,10 +1299,11 @@ public sealed class Presenter : IPresenter
         string delegationId,
         string callId,
         string name,
-        string argumentsJson)
+        string argumentsJson,
+        ITool? effectiveTool = null)
     {
+        var startedAt = _timeProvider.GetTimestamp();
         var catalogue = _catalogue;
-        var timeoutMs = _settings.ToolTimeoutMs;
         _ = Task.Run(async () =>
         {
             ActiveToolCallId.Value = callId;
@@ -1200,35 +1330,14 @@ public sealed class Presenter : IPresenter
                     {
                         using (doc)
                         {
-                            var tool = catalogue.FindTool(name);
-                            if (tool is null)
+                            var resolution = catalogue.Resolve(name, doc.RootElement);
+                            if (!resolution.IsResolved)
                             {
-                                result = ToolResult.Failure($"unknown tool '{name}'");
+                                result = resolution.Error!;
                             }
                             else
                             {
-                                var validation = ToolArgumentValidator.Validate(doc.RootElement, tool.Parameters);
-                                if (!validation.IsValid)
-                                {
-                                    result = ToolResult.Failure(validation.ErrorMessage ?? "invalid arguments");
-                                }
-                                else
-                                {
-                                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(timeoutMs));
-                                    var invocation = tool.InvokeAsync(doc.RootElement.Clone(), cts.Token);
-                                    try
-                                    {
-                                        result = await invocation.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs), cts.Token).ConfigureAwait(false);
-                                    }
-                                    catch (Exception error) when (error is TimeoutException || error is OperationCanceledException && cts.IsCancellationRequested)
-                                    {
-                                        // Only an abandoned invocation needs a late-fault observer.
-                                        _ = invocation.ContinueWith(t =>
-                                            QueueFromProducer(new BackgroundFailure("late tool fault", t.Exception!.GetBaseException().GetType().Name)),
-                                            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                                        result = ToolResult.Failure("timed out");
-                                    }
-                                }
+                                result = await InvokeBoundedAsync(resolution.Tool!, resolution.Arguments).ConfigureAwait(false);
                             }
                         }
                     }
@@ -1239,8 +1348,33 @@ public sealed class Presenter : IPresenter
                 result = ToolResult.Failure("tool failed");
             }
 
-            QueueFromProducer(new ToolInvocationCompleted(session, runGeneration, delegationId, callId, result));
+            QueueFromProducer(new ToolInvocationCompleted(session, runGeneration, delegationId, callId, result,
+                effectiveTool?.Source, effectiveTool?.Name, startedAt));
         });
+    }
+
+    // Bounded even when a tool ignores its token: the run gives up at the tool's timeout, works on a copy of the
+    // arguments, and a fault that arrives after it gave up is logged by type only.
+    private async Task<ToolResult> InvokeBoundedAsync(ITool tool, JsonElement arguments)
+    {
+        var abandoned = 0;
+        using var cts = new CancellationTokenSource(tool.Timeout);
+        var invocation = tool.InvokeAsync(arguments.Clone(), cts.Token);
+        _ = invocation.ContinueWith(t =>
+            {
+                var fault = t.Exception!.GetBaseException();
+                if (Volatile.Read(ref abandoned) == 1) QueueFromProducer(new BackgroundFailure("late tool fault", fault.GetType().Name));
+            },
+            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        try
+        {
+            return await invocation.WaitAsync(tool.Timeout, cts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is TimeoutException || (ex is OperationCanceledException && cts.IsCancellationRequested))
+        {
+            Volatile.Write(ref abandoned, 1);
+            return ToolResult.Failure("timed out") with { Outcome = "timeout" };
+        }
     }
 
     private void OnToolInvocationCompleted(ToolInvocationCompleted completed)
@@ -1268,7 +1402,10 @@ public sealed class Presenter : IPresenter
         }
         _toolRoundTracker.MarkCallSubmitted(completed.DelegationId, completed.CallId);
         _navigatingCallIds.Remove(completed.CallId);
-        LogMessage("info", $"tool: {completed.CallId} output submitted (ok={result.Ok})");
+        if (completed.ToolSource is { } source && source != "presenter")
+            LogMessage("info", $"tool: {source}.{completed.ToolName} {result.Outcome} {(int)_timeProvider.GetElapsedTime(completed.StartedAt).TotalMilliseconds} ms");
+        else
+            LogMessage("info", $"tool: {completed.CallId} output submitted ({result.Outcome})");
         TryContinueResponses();
     }
 
@@ -1279,6 +1416,99 @@ public sealed class Presenter : IPresenter
             _toolRoundTracker.OnResponsesContinued();
         }
     }
+
+    private static JsonNode Canonicalize(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.Object => new JsonObject(element.EnumerateObject()
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .Select(p => KeyValuePair.Create<string, JsonNode?>(p.Name, Canonicalize(p.Value)))),
+        JsonValueKind.Array => new JsonArray(element.EnumerateArray().Select(Canonicalize).ToArray()),
+        _ => JsonNode.Parse(element.GetRawText())!
+    };
+
+    private void CompleteImmediateCall(ToolCallReceived call, ToolResult result) =>
+        OnToolInvocationCompleted(new ToolInvocationCompleted(call.Session, _runGeneration, call.DelegationId, call.CallId, result));
+
+    private void CancelToolConfirmation(string? reason = null)
+    {
+        if (_pendingTool is not { } pending) return;
+        _pendingTool = null;
+        SetInteraction(Interaction.None);
+        ClosePermit();
+        if (reason is not null) LogMessage("info", $"tool: {pending.Tool.Source}.{pending.Tool.Name} {reason}");
+    }
+
+    private void ApproveToolConfirmation()
+    {
+        if (_pendingTool is not { } pending) return;
+        _pendingTool = null;
+        SetInteraction(Interaction.None);
+        ClosePermit();
+        var startedAt = _timeProvider.GetTimestamp();
+        _approvedTools[pending.Key] = new ApprovedToolCall(startedAt, null);
+        _ = Task.Run(async () =>
+        {
+            ToolResult result;
+            try { result = await InvokeBoundedAsync(pending.Tool, pending.Arguments).ConfigureAwait(false); }
+            catch (Exception) { result = ToolResult.Failure("tool failed"); }
+            QueueFromProducer(new ApprovedToolCompleted(pending, result, startedAt));
+        });
+    }
+
+    private void OnApprovedToolCompleted(ApprovedToolCompleted completed)
+    {
+        var pending = completed.Pending;
+        if (ReferenceEquals(pending.Session, _session) && pending.Generation == _runGeneration)
+        {
+            _approvedTools[pending.Key] = new ApprovedToolCall(_timeProvider.GetTimestamp(), completed.Result);
+            _session?.AppendCommentary($"Tool {pending.Tool.Name} {(completed.Result.Ok ? "succeeded" : "failed")}. External data: {completed.Result.Message[..Math.Min(300, completed.Result.Message.Length)]}");
+            _session?.AppendThinking($"Untrusted external data: {completed.Result.ToJsonString()[..Math.Min(1200, completed.Result.ToJsonString().Length)]}");
+            LogMessage("info", $"tool: {pending.Tool.Source}.{pending.Tool.Name} {completed.Result.Outcome} {(int)_timeProvider.GetElapsedTime(completed.StartedAt).TotalMilliseconds} ms");
+        }
+        else
+        {
+            LogMessage("info", $"tool: {pending.Tool.Source}.{pending.Tool.Name} {completed.Result.Outcome} {(int)_timeProvider.GetElapsedTime(completed.StartedAt).TotalMilliseconds} ms (not announced: the talk moved on)");
+        }
+    }
+
+    private void ObserveLateToolSet(Task<SessionToolSet> task) => ObserveBackground(Task.Run(async () =>
+    {
+        try { var set = await task.ConfigureAwait(false); await set.DisposeAsync().ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { LogMessage("warn", $"tools: load failed ({ex.GetType().Name})"); }
+    }), "late tool set");
+
+    private void OnHostedActivity(HostedActivityReceived activity)
+    {
+        if (activity.Type != "web_search") return;
+        if (activity.Status is "in_progress" or "started")
+            _hostedStarted[activity.DelegationId] = _timeProvider.GetTimestamp();
+        else
+        {
+            var elapsed = _hostedStarted.Remove(activity.DelegationId, out var started)
+                ? $" {(int)_timeProvider.GetElapsedTime(started).TotalMilliseconds} ms" : "";
+            LogMessage("info", $"web search: done{elapsed}");
+        }
+    }
+
+    private void ReleaseSessionTools()
+    {
+        var set = _sessionTools;
+        _sessionTools = null;
+        _pendingTool = null;
+        _approvedTools.Clear();
+        _hostedStarted.Clear();
+        if (set is not null) _ = Task.Run(async () =>
+        {
+            try { await set.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { LogMessage("warn", $"tools: dispose failed ({ex.GetType().Name})"); }
+        });
+    }
+
+    private sealed record PendingToolConfirmation(string Key, ITool Tool, JsonElement Arguments, ILiveSession Session, long Generation);
+    private sealed record ApprovedToolCall(long At, ToolResult? Result);
+    private sealed record ApprovedToolCompleted(PendingToolConfirmation Pending, ToolResult Result, long StartedAt) : PresenterEvent;
+    private sealed record HostedActivityReceived(ILiveSession Session, string DelegationId, string Type, string Status) : PresenterEvent;
 
     private void OnPartGap()
     {
@@ -1447,6 +1677,8 @@ public sealed class Presenter : IPresenter
 
     private void OnNavigationSucceeded(string? sourceCallId)
     {
+        CancelToolConfirmation();
+        _approvedTools.Clear();
         _runGeneration++;
         if (sourceCallId is not null) _navigatingCallIds[sourceCallId] = _runGeneration;
     }
@@ -1459,6 +1691,7 @@ public sealed class Presenter : IPresenter
         }
 
         ClearTimers();
+        CancelToolConfirmation();
         SetInteraction(Interaction.None);
         ClosePermit();
         _session?.AppendInstructions(PromptBuilder.PauseInstruction(), $"pause-{_slideIndex + 1}");
@@ -1489,6 +1722,7 @@ public sealed class Presenter : IPresenter
             StartSlideDiagnostics();
         }
 
+        CancelToolConfirmation();
         SetInteraction(Interaction.None);
         ClosePermit();
         ClearQuestionHold();
@@ -1552,6 +1786,7 @@ public sealed class Presenter : IPresenter
         _lastVoicedAt = 0;
         _runGeneration++;
         _toolRoundTracker.Clear();
+        ReleaseSessionTools();
         _endResumable = resumable;
         var session = _session;
         SetState(PresenterState.Ending);
@@ -1606,6 +1841,7 @@ public sealed class Presenter : IPresenter
         _lastVoicedAt = 0;
         _runGeneration++;
         _toolRoundTracker.Clear();
+        ReleaseSessionTools();
         var endedNormally = IsNormalClose(reason) && !_endResumable;
         if (_presentation is not null)
         {
@@ -1649,7 +1885,7 @@ public sealed class Presenter : IPresenter
 
     private void OnQuestionHoldElapsed()
     {
-        if (!_questionHoldOpen || _interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide)
+        if (!_questionHoldOpen || _interaction is Interaction.Answering or Interaction.AwaitingCarryOn or Interaction.WaitingOnSlide or Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer)
         {
             return;
         }
@@ -1661,6 +1897,7 @@ public sealed class Presenter : IPresenter
     // model is told to resume the slide; the ordinary timers take over from there.
     private bool HoldBlocksProgress()
     {
+        if (_pendingTool is not null) return true;
         if (!_questionHoldOpen)
         {
             return false;
@@ -1874,7 +2111,8 @@ public sealed class Presenter : IPresenter
         _usageSeconds,
         AdvanceSilenceMs);
 
-    private void LogMessage(string level, string message) => Log?.Invoke(new PresenterLog(level, message));
+    private void LogMessage(string level, string message) =>
+        Log?.Invoke(new PresenterLog(level, UntrustedLogText.Sanitize(message, 1024)));
 
     private static string StateName(PresenterState state) => state.ToString().ToLowerInvariant();
 
@@ -1922,7 +2160,8 @@ public sealed class Presenter : IPresenter
     private sealed record UpstreamErrorReceived(ILiveSession Session, JsonElement Raw) : PresenterEvent;
     private sealed record DelegatedResponseReceived(ILiveSession Session, string DelegationId, string Type) : PresenterEvent;
     private sealed record ToolCallReceived(ILiveSession Session, string DelegationId, string CallId, string Name, string Arguments) : PresenterEvent;
-    private sealed record ToolInvocationCompleted(ILiveSession Session, long RunGeneration, string DelegationId, string CallId, ToolResult Result) : PresenterEvent;
+    private sealed record ToolInvocationCompleted(ILiveSession Session, long RunGeneration, string DelegationId, string CallId, ToolResult Result,
+        string? ToolSource = null, string? ToolName = null, long StartedAt = 0) : PresenterEvent;
     private sealed record SessionWarning(ILiveSession Session, string Message) : PresenterEvent;
     private sealed record SessionClosed(ILiveSession Session, string Reason, double? Seconds) : PresenterEvent;
     private sealed record SilenceElapsed(long Generation, bool PartGap) : PresenterEvent;
