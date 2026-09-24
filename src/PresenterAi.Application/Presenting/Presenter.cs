@@ -1648,6 +1648,7 @@ public sealed partial class Presenter : IPresenter
                 return;
             }
             _pendingTool = new PendingToolConfirmation(key, tool, resolution.Arguments, call.Session, _runGeneration, intent);
+            OnToolConfirmationStarted();
             _endQuestionVoiced = false;
             SetInteraction(Interaction.AwaitingConfirmQuestion);
             OpenPermit(null);
