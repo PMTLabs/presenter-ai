@@ -23,7 +23,7 @@ public sealed class MigrationsApplyToPostgresTests(PostgresFixture postgres)
         await connection.OpenAsync();
 
         foreach (var table in new[]
-                 { "users", "external_logins", "refresh_tokens", "presentations", "sessions", "session_turns" })
+                 { "users", "external_logins", "refresh_tokens", "presentations", "sessions", "session_turns", "presentation_revisions" })
         {
             (await ScalarAsync(connection, "SELECT to_regclass(@table_name)::text;", ("table_name", table)))
                 .Should().Be(table);
@@ -48,7 +48,8 @@ public sealed class MigrationsApplyToPostgresTests(PostgresFixture postgres)
                      "FK_presentations_users_owner_id",
                      "FK_sessions_presentations_presentation_id",
                      "FK_sessions_users_user_id",
-                     "FK_session_turns_sessions_session_id"
+                     "FK_session_turns_sessions_session_id",
+                     "FK_presentation_revisions_presentations_presentation_id"
                  })
         {
             (await ScalarAsync(connection, "SELECT confdeltype::text FROM pg_constraint WHERE conname = @name;", ("name", foreignKey)))
@@ -62,7 +63,8 @@ public sealed class MigrationsApplyToPostgresTests(PostgresFixture postgres)
                      ("presentations", "owner_id"),
                      ("sessions", "presentation_id"),
                      ("sessions", "user_id"),
-                     ("session_turns", "session_id")
+                     ("session_turns", "session_id"),
+                     ("presentation_revisions", "presentation_id")
                  })
         {
             (await ScalarAsync(connection, """
@@ -71,6 +73,31 @@ public sealed class MigrationsApplyToPostgresTests(PostgresFixture postgres)
                 WHERE table_schema = 'public' AND table_name = @table_name AND column_name = @column_name;
                 """, ("table_name", table), ("column_name", column)))
                 .Should().Be("NO", $"{table}.{column} is a required relationship key");
+        }
+
+        // Plan 010: presentation_revisions — PK (presentation_id, number), source CHECK, column types.
+        (await IndexDefinitionAsync(connection, "PK_presentation_revisions"))
+            .Should().Contain("UNIQUE INDEX \"PK_presentation_revisions\"").And.Contain("(presentation_id, number)");
+        (await ScalarAsync(connection, "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ck_presentation_revisions_source';"))
+            .Should().Contain("'import'").And.Contain("'live_edit'").And.Contain("'revert'");
+        foreach (var (column, dataType, nullable) in new[]
+                 {
+                     ("script", "text", "NO"),
+                     ("source", "text", "NO"),
+                     ("summary", "character varying", "NO"),
+                     ("base_version", "integer", "YES"),
+                     ("reverted_from", "integer", "YES"),
+                     ("changed_slides", "ARRAY", "NO"),
+                     ("created_at", "timestamp with time zone", "NO"),
+                     ("created_by", "text", "YES")
+                 })
+        {
+            (await ScalarAsync(connection, """
+                SELECT data_type || '|' || is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'presentation_revisions' AND column_name = @column_name;
+                """, ("column_name", column)))
+                .Should().Be($"{dataType}|{nullable}", $"presentation_revisions.{column}");
         }
 
         foreach (var (column, dataType) in new[]
