@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bài 1 — Cấu tạo da</title>
+<style>
+  :root { --bg: #faf6ef; --ink: #2f2a24; --muted: #6f665b; --sage: #6f8a5b; --sage-soft: #e6ecdc; --warn: #c7785a; --warn-soft: #f7e3d6; --line: #e4dccf; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #1d1a16; font-family: "Segoe UI", Arial, sans-serif; color: var(--ink); }
+  .slide { position: absolute; inset: 0; display: none; background: var(--bg); padding: 4.5vh 6vw 8vh; box-sizing: border-box; }
+  .slide.active { display: flex; flex-direction: column; }
+  .slide:before { content: ""; position: absolute; inset: 0 auto 0 0; width: 10px; background: var(--sage); }
+  .kicker { color: var(--sage); font-weight: 800; letter-spacing: .18em; font-size: 1.2vw; margin-bottom: .8vh; }
+  h1 { font-size: 5.4vw; margin: 0 0 2vh; line-height: 1.05; }
+  h2 { font-size: 2.7vw; margin: 0 0 1.2vh; line-height: 1.15; }
+  h3 { font-size: 1.5vw; margin: 0 0 .8vh; color: var(--sage); }
+  p, li, td, th { font-size: 1.35vw; line-height: 1.42; }
+  .intro { color: var(--muted); margin: 0 0 1.8vh; }
+  .body { flex: 1; display: grid; grid-template-columns: 1.2fr .8fr; gap: 3vw; min-height: 0; }
+  .body.one { grid-template-columns: 1fr; }
+  .body.even { grid-template-columns: 1fr 1fr; }
+  .fig { display: flex; align-items: center; justify-content: center; min-height: 0; }
+  .fig img { max-width: 100%; max-height: 58vh; border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.08); background: #fff; }
+  ul, ol { margin: 0; padding-left: 1.4em; }
+  li { margin-bottom: .6vh; }
+  li::marker { color: var(--sage); font-weight: 700; }
+  table { border-collapse: collapse; width: 100%; }
+  th { text-align: left; background: var(--sage-soft); padding: .7vh 1vw; }
+  td { padding: .7vh 1vw; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { font-weight: 600; }
+  .cards { display: grid; gap: 1.4vh; align-content: start; }
+  .card { background: #fff; border: 1px solid var(--line); border-left: 6px solid var(--sage); border-radius: 10px; padding: 1.2vh 1.3vw; }
+  .card b { display: block; font-size: 1.45vw; margin-bottom: .3vh; }
+  .card p { margin: 0; }
+  .card.warn { border-left-color: var(--warn); }
+  .note { margin-top: 1.6vh; background: var(--sage-soft); border-radius: 10px; padding: 1.2vh 1.3vw; font-size: 1.3vw; line-height: 1.42; }
+  .note.warn { background: var(--warn-soft); }
+  .ask { margin-top: 1.6vh; border: 2px dashed var(--sage); border-radius: 10px; padding: 1.1vh 1.3vw; font-size: 1.3vw; line-height: 1.42; }
+  .ask:before { content: "💬 Thảo luận: "; font-weight: 700; color: var(--sage); }
+  .title-wrap { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 4vw; align-items: center; }
+  .subtitle { font-size: 1.8vw; color: var(--muted); line-height: 1.4; }
+  .slide-footer { position: absolute; left: 6vw; right: 6vw; bottom: 2.5vh; border-top: 1px solid var(--line); padding-top: 1vh; display: flex; justify-content: space-between; color: var(--muted); font-size: 1.05vw; }
+  .controls { position: fixed; right: 18px; bottom: 16px; z-index: 10; opacity: .35; }
+  .controls:hover { opacity: 1; }
+  .controls button { border: 0; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 5px; margin-left: 5px; cursor: pointer; }
+  .progress { position: fixed; left: 0; bottom: 0; height: 5px; background: var(--sage); z-index: 20; }
+</style>
+</head>
+<body>
+
+<!-- 1 -->
+<section class="slide">
+  <div class="title-wrap">
+    <div>
+      <div class="kicker">KHÓA 2 — DA LIỄU &amp; SẢN PHẨM · BÀI 1</div>
+      <h1>Cấu tạo da</h1>
+      <p class="subtitle">Hiểu ba lớp da để tư vấn trung thực và chọn đúng dịch vụ — nền tảng của mọi liệu trình.</p>
+      <div class="note"><b>Câu hỏi xuyên suốt:</b> “Sản phẩm / dịch vụ này thực sự tác động ở <b>lớp nào</b> của da?”</div>
+    </div>
+    <div class="fig"><img src="img/skin-layers-b.png" alt="Mặt cắt ba lớp da"></div>
+  </div>
+  <div class="slide-footer"><span>Cấu tạo da</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 2 -->
+<section class="slide">
+  <div class="kicker">1 · TỔNG QUAN</div>
+  <h2>Da — cơ quan lớn nhất cơ thể</h2>
+  <p class="intro">~15.000–20.000 cm² · ~16% trọng lượng · dày 0,3 mm (mắt) → 3–4 mm (lòng bàn tay/chân)</p>
+  <div class="body">
+    <div>
+      <table>
+        <tr><th>Lớp</th><th>Vai trò chính</th><th>Độ dày</th></tr>
+        <tr><td>Biểu bì</td><td>Hàng rào bảo vệ &amp; giữ nước; nơi mỹ phẩm tác động chủ yếu</td><td>0,07–0,15 mm</td></tr>
+        <tr><td>Trung bì</td><td>Collagen, elastin, mạch máu, tuyến, nang lông — săn chắc &amp; lão hóa</td><td>1–3 mm</td></tr>
+        <tr><td>Hạ bì</td><td>Mô mỡ — cách nhiệt, dự trữ, đệm, tạo đường nét khuôn mặt</td><td>&lt;1 mm → &gt;3 cm</td></tr>
+      </table>
+      <div class="ask">Khách hỏi “kem này có làm đầy nếp nhăn sâu không?” — nếp nhăn sâu nằm ở lớp nào?</div>
+    </div>
+    <div class="fig"><img src="img/skin-anatomy.png" alt="Giải phẫu da"></div>
+  </div>
+  <div class="slide-footer"><span>Tổng quan</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 3 -->
+<section class="slide">
+  <div class="kicker">2.1 · BIỂU BÌ — LỚP ĐÁY</div>
+  <h2>Lớp đáy — “nhà máy” sinh tế bào</h2>
+  <p class="intro">Biểu bì gồm 4 lớp: đáy → gai → hạt → sừng (thêm lớp bóng ở da dày). Lớp đáy chỉ một hàng tế bào.</p>
+  <div class="body">
+    <div>
+      <table>
+        <tr><th>Tế bào</th><th>Tỷ lệ</th><th>Công dụng</th></tr>
+        <tr><td>Tế bào biểu bì mẹ</td><td>—</td><td>Phân chia sinh tế bào mới → quyết định sự đổi mới của da</td></tr>
+        <tr><td>Melanocyte</td><td>~8%</td><td>Sản sinh Melanin → quyết định màu da</td></tr>
+        <tr><td>Merkel</td><td>~1%</td><td>Cảm nhận chạm — đầu ngón tay, môi, nang tóc</td></tr>
+      </table>
+      <p style="margin-top:1.4vh">Keratinocyte chiếm ~90%; cứ 4–10 keratinocyte có 1 melanocyte.</p>
+    </div>
+    <div class="cards">
+      <div class="card"><b>Vòng đời biểu bì ~28 ngày</b><p>(người 20–30 tuổi)</p></div>
+      <div class="card"><b>14 ngày</b><p>đi từ lớp đáy lên lớp sừng</p></div>
+      <div class="card"><b>+ 14 ngày</b><p>nằm ở lớp sừng rồi bong ra</p></div>
+      <div class="card warn"><b>Dài dần theo tuổi</b><p>xem phần cơ chế sinh học</p></div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Biểu bì · lớp đáy</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 4 -->
+<section class="slide">
+  <div class="kicker">2.2 · BIỂU BÌ — LỚP GAI</div>
+  <h2>Lớp gai — nuôi dưỡng &amp; “thành trì” miễn dịch</h2>
+  <p class="intro">Lớp dày nhất trong các lớp sống (~8–10 lớp tế bào): tế bào ngậm nước, màng lipid khóa ẩm, gian bào giàu HA + dịch bạch huyết.</p>
+  <div class="body">
+    <div>
+      <h3>Tế bào Langerhans (~2–4%) — “radar an ninh”</h3>
+      <ol>
+        <li><b>Tuần tra &amp; nhận diện</b> — đuôi gai rà soát, phát hiện vi khuẩn, virus, hóa chất, dị nguyên vượt lớp sừng</li>
+        <li><b>Thực bào &amp; xử lý</b> — nuốt tác nhân, phân hủy thành mảnh kháng nguyên</li>
+        <li><b>Di chuyển &amp; phát tín hiệu</b> — theo bạch huyết về hạch, kích hoạt lympho T, ghi nhớ cho lần sau</li>
+      </ol>
+      <div class="note">Vì vậy mỹ phẩm kém chất lượng hay chất gây dị ứng có thể khởi phát viêm/dị ứng ngay tại lớp này.</div>
+    </div>
+    <div class="fig"><img src="img/langerhans-b.png" alt="Tế bào Langerhans bắt tác nhân lạ"></div>
+  </div>
+  <div class="slide-footer"><span>Biểu bì · lớp gai</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 5 -->
+<section class="slide">
+  <div class="kicker">2.3–2.4 · BIỂU BÌ — LỚP HẠT &amp; LỚP SỪNG</div>
+  <h2>Từ sừng hóa đến bức tường “gạch &amp; vữa”</h2>
+  <p class="intro">Lớp hạt (2–5 lớp): tế bào dẹt lại, xuất hiện hạt keratohyalin (tiền chất filaggrin), tiết lipid gian bào.</p>
+  <div class="body">
+    <div>
+      <h3>Lớp sừng: 20–30 lớp tế bào dẹt — mô hình Elias (1975)</h3>
+      <ul>
+        <li><b>Gạch = corneocyte</b>: tế bào sừng chết, mất nhân, đầy keratin, nối nhau bằng corneodesmosome</li>
+        <li><b>Vữa = lipid lamellar</b>: Ceramide (~50%), Cholesterol, acid béo tự do</li>
+      </ul>
+      <div class="note warn">“Vữa” hoặc mối nối bị tổn thương (tẩy rửa mạnh, lạm dụng hoạt chất, peel/laser chưa hồi phục) → tường rạn nứt → da mỏng yếu, khô, đỏ, châm chích, dễ kích ứng và nổi mụn.</div>
+    </div>
+    <div class="fig"><img src="img/skin-barrier-b.png" alt="Hàng rào gạch và vữa"></div>
+  </div>
+  <div class="slide-footer"><span>Biểu bì · lớp sừng</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 6 -->
+<section class="slide">
+  <div class="kicker">2.4 · HÀNG RÀO GIỮ NƯỚC</div>
+  <h2>NMF, TEWL &amp; HA — ba từ khóa giữ ẩm</h2>
+  <p class="intro">Hàng rào khỏe = nước được giữ bên trong, tác nhân lạ bị chặn bên ngoài.</p>
+  <div class="body even">
+    <div class="cards">
+      <div class="card"><b>NMF — yếu tố giữ ẩm tự nhiên</b><p>Nằm <i>bên trong</i> viên gạch: axit amin (~40%), PCA, lactate, urea, ion. Sinh ra từ filaggrin (enzyme caspase-14). Ngậm nước, giữ pH acid nhẹ.</p></div>
+      <div class="card warn"><b>Lưu ý bệnh lý</b><p>Đột biến gen filaggrin (FLG) → thiếu NMF → nền tảng của viêm da cơ địa. Chỉ gợi ý đi khám.</p></div>
+    </div>
+    <div class="cards">
+      <div class="card"><b>TEWL — “chỉ số vàng”</b><p>Lượng nước bay hơi qua lớp sừng. Da khỏe: ~2–10 g/m²/h. Mắt, môi TEWL cao → dễ khô, nhanh nhăn.</p></div>
+      <div class="card"><b>HA — “vua hút ẩm”</b><p>1 g HA giữ ~1000 lần trọng lượng nước; như miếng bọt biển tạo gel, nâng đỡ và khóa ẩm.</p></div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>NMF · TEWL · HA</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 7 -->
+<section class="slide">
+  <div class="kicker">3 · MÀNG ACID</div>
+  <h2>Màng acid (Hydrolipid) — tấm khiên đầu tiên</h2>
+  <p class="intro">Bã nhờn + mồ hôi + tế bào sừng bong → màng acid yếu, <b>pH 4,5–5,5</b>; mạnh nhất ở vùng chữ T.</p>
+  <div class="body even">
+    <div>
+      <h3>Chức năng</h3>
+      <ul>
+        <li><b>Kháng khuẩn</b> — vi khuẩn mụn (C. acnes), nấm khó sinh sôi</li>
+        <li><b>Ngăn mất nước</b> — như màng bọc thực phẩm</li>
+        <li><b>Chống oxy hóa</b> — vitamin E, squalene</li>
+        <li><b>Giảm ma sát</b> — da dẻo dai</li>
+      </ul>
+      <div class="note">Chọn sản phẩm dịu, pH 4–6; xà phòng kiềm (pH 9–11) phá màng acid → khô, kích ứng, rối loạn bong sừng.</div>
+    </div>
+    <div>
+      <h3>Dầu thừa — con dao hai lưỡi</h3>
+      <ul>
+        <li>Bóng nhờn, lỗ chân lông to, trôi lớp trang điểm</li>
+        <li>Bám bẩn, bít tắc như nam châm hút bụi</li>
+        <li>Gặp UV bị oxy hóa → viêm, xỉn màu</li>
+        <li>Dầu + tế bào chết bít nang lông → mụn</li>
+      </ul>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Màng acid</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 8 -->
+<section class="slide">
+  <div class="kicker">4.1–4.2 · TRUNG BÌ</div>
+  <h2>Trung bì — “bộ khung chống đỡ”</h2>
+  <p class="intro">Lớp dày nhất (1–3 mm; mí mắt ~0,6 mm, lưng ~4 mm) — quyết định săn chắc, nếp nhăn và tốc độ lão hóa.</p>
+  <div class="body">
+    <div>
+      <div class="card" style="margin-bottom:1.4vh"><b>Fibroblast — “nhà máy” của trung bì</b><p>Sản sinh collagen, elastin, HA và dọn sợi cũ. Tái tạo chậm: vài tháng → vài năm. Lão hóa → hoạt động kém → chảy xệ, nhăn.</p></div>
+      <table>
+        <tr><th>Chất nền</th><th>Tỷ lệ</th><th>Vai trò</th></tr>
+        <tr><td>Collagen</td><td>70–80%</td><td>Sợi đan dày → độ bền, chịu lực</td></tr>
+        <tr><td>Elastin</td><td>2–4%</td><td>“Dây chun” → đàn hồi, bật lại</td></tr>
+        <tr><td>HA</td><td>0,1–0,3%</td><td>Gel giữ nước → căng mọng</td></tr>
+      </table>
+    </div>
+    <div class="fig"><img src="img/skin-anatomy.png" alt="Giải phẫu da với trung bì"></div>
+  </div>
+  <div class="slide-footer"><span>Trung bì · khung</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 9 -->
+<section class="slide">
+  <div class="kicker">4.3–4.5 · TRUNG BÌ</div>
+  <h2>Mạch máu, thần kinh, tuyến &amp; tế bào Mast</h2>
+  <p class="intro">Biểu bì không có mạch máu riêng — mọi dưỡng chất đều thấm lên từ trung bì.</p>
+  <div class="body even">
+    <ul>
+      <li><b>Mạch máu</b> — nuôi da; co khi lạnh, giãn khi nóng</li>
+      <li><b>Dây thần kinh</b> — chạm, áp lực, nóng, lạnh, đau, ngứa</li>
+      <li><b>Bạch huyết</b> — thu dịch thừa, thanh lọc, đưa tác nhân về hạch</li>
+      <li><b>Tuyến bã</b> — cạnh nang lông, bơm dầu lên bề mặt</li>
+      <li><b>Tuyến mồ hôi</b> — thường (điều nhiệt) và dầu (nách, bẹn)</li>
+      <li><b>Cơ dựng lông</b> — “nổi da gà”</li>
+    </ul>
+    <div>
+      <div class="card warn"><b>Tế bào Mast</b><p>Tế bào miễn dịch (không phải mỡ). UV / tổn thương → tiết Histamine → đỏ, ngứa → kích thích melanocyte → sạm, nám sau viêm.</p></div>
+      <div class="note">Lão hóa chủ yếu diễn ra ở trung bì: collagen &amp; elastin suy giảm → da chùng, nhăn sâu. Kem bôi ngoài khó chạm tới — cần hoạt chất chuyên sâu hoặc thiết bị.</div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Trung bì · mạch, tuyến, Mast</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 10 -->
+<section class="slide">
+  <div class="kicker">5 · HẠ BÌ</div>
+  <h2>Hạ bì — lớp đệm mỡ &amp; bí mật của sự chảy xệ</h2>
+  <p class="intro">Mô mỡ + vách liên kết, mạch máu, thần kinh. Mỏng ~1 mm (mắt) → &gt;3 cm (bụng, mông).</p>
+  <div class="body">
+    <div>
+      <ul>
+        <li><b>Đệm chống sốc</b> · <b>Cách nhiệt</b> · <b>Dự trữ năng lượng</b></li>
+        <li><b>Tạo đường nét khuôn mặt</b>; còn như một hệ nội tiết thu nhỏ</li>
+      </ul>
+      <h3 style="margin-top:1.6vh">Cơ chế “Teo và Trượt”</h3>
+      <ul>
+        <li>Mỡ mặt chia thành nhiều khoang, lão hóa độc lập</li>
+        <li>Khoang mỡ teo + dây chằng chùng nhão</li>
+        <li>Mất bệ đỡ + trọng lực → trượt xuống: rãnh lệ, rãnh mũi má, xệ viền hàm</li>
+      </ul>
+      <div class="note">Mặt già đi <b>không phải do cơ teo</b> — thể tích cơ gần như không đổi; nguyên nhân là mỡ và dây chằng.</div>
+    </div>
+    <div class="fig"><img src="img/fat-aging-b.png" alt="Túi mỡ mặt teo và trượt theo tuổi"></div>
+  </div>
+  <div class="slide-footer"><span>Hạ bì</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 11 -->
+<section class="slide">
+  <div class="kicker">6.1 · ĐỘ DÀY THEO VÙNG</div>
+  <h2>Các vùng da trọng điểm</h2>
+  <p class="intro">Da không đồng nhất — đây là chìa khóa để chỉnh lực tay và chọn sản phẩm.</p>
+  <div class="body">
+    <table>
+      <tr><th>Vùng</th><th>Đặc điểm</th><th>Lưu ý</th></tr>
+      <tr><td>Mắt</td><td>Mỏng nhất; gần như không mỡ đệm, mạch máu sát bề mặt</td><td>Kem chuyên biệt, thao tác cực nhẹ</td></tr>
+      <tr><td>Mũi</td><td>Chóp mũi dày nhất khuôn mặt</td><td>Dễ bít tắc → làm sạch sâu</td></tr>
+      <tr><td>Môi</td><td>Không tuyến bã, TEWL gấp ~3 lần má</td><td>Cấp ẩm, tẩy da chết nhẹ</td></tr>
+      <tr><td>Cổ</td><td>Mỏng, ít dầu, ít collagen</td><td>“Tố cáo” tuổi tác rõ nhất</td></tr>
+      <tr><td>Tay / chân</td><td>Lớp sừng dày nhất, không tuyến dầu</td><td>Dưỡng dạng đặc</td></tr>
+    </table>
+    <div class="fig"><img src="img/skin-thickness-b.png" alt="Bản đồ độ dày da"></div>
+  </div>
+  <div class="slide-footer"><span>Độ dày theo vùng</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 12 -->
+<section class="slide">
+  <div class="kicker">6.2–6.3 · CHĂM SÓC THEO VÙNG</div>
+  <h2>Vùng chữ T, chữ U &amp; ba nguyên tắc</h2>
+  <div class="body even" style="margin-top:1vh">
+    <div class="cards">
+      <div class="card"><b>Vùng chữ T (trán – mũi – cằm)</b><p>Tuyến bã dày đặc nhất; một lỗ chân lông có thể gắn tới 2 tuyến dầu → đổ dầu, lỗ chân lông to, dễ mụn.</p></div>
+      <div class="card"><b>Vùng chữ U (hai má – viền hàm)</b><p>Ít tuyến bã → khô hơn, dễ bong tróc, nhanh nhăn mảnh nếu thiếu ẩm.</p></div>
+    </div>
+    <ol>
+      <li><b>Mặt ngấm mạnh hơn thân</b> — lớp sừng mỏng, nhiều nang lông; cùng nồng độ acid/retinol, mặt dễ đỏ rát hơn.</li>
+      <li><b>Cổ “thiệt thòi” nhất</b> — kéo dưỡng ẩm &amp; chống nắng xuống cổ, nồng độ nhẹ hơn.</li>
+      <li><b>Mắt “kiêu kỳ” nhất</b> — vỗ nhẹ bằng ngón áp út; tránh AHA/BHA/retinol mạnh và hương liệu.</li>
+    </ol>
+  </div>
+  <div class="slide-footer"><span>Vùng T/U · 3 nguyên tắc</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 13 -->
+<section class="slide">
+  <div class="kicker">7.1–7.2 · CƠ CHẾ SINH HỌC (1–2)</div>
+  <h2>Thay mới biểu bì &amp; sửa chữa hàng rào</h2>
+  <p class="intro">6 cơ chế âm thầm diễn ra mỗi ngày dưới bề mặt da — bắt đầu với hai cơ chế của biểu bì.</p>
+  <div class="body even">
+    <div>
+      <table>
+        <tr><th>Độ tuổi</th><th>Thay mới</th></tr>
+        <tr><td>Trẻ sơ sinh</td><td>14–21 ngày</td></tr>
+        <tr><td>18–30 tuổi</td><td>28–40 ngày</td></tr>
+        <tr><td>30–50 tuổi</td><td>45–60 ngày</td></tr>
+        <tr><td>Trên 50 tuổi</td><td>60–90 ngày (hoặc hơn)</td></tr>
+      </table>
+      <p style="margin-top:1.2vh">Chậm → tế bào chết tích tụ → thô ráp, xỉn màu.</p>
+    </div>
+    <div class="cards">
+      <div class="card"><b>Bong sừng nhịp nhàng</b><p>Nhờ màng acid pH ~4–6. Bị kiềm hóa (sữa rửa mặt mạnh) → bong tróc bất thường, viêm.</p></div>
+      <div class="card"><b>Tự vá bằng Ceramide</b><p>~24 giờ bịt lỗ hổng · 1–2 tuần phục hồi tường thành.</p></div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Cơ chế 1–2</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 14 -->
+<section class="slide">
+  <div class="kicker">7.3–7.5 · CƠ CHẾ SINH HỌC (3–5)</div>
+  <h2>Melanin, Collagen &amp; tuần hoàn máu</h2>
+  <div class="body" style="margin-top:1vh">
+    <div>
+      <h3>Melanin — “nhà máy nhuộm màu”</h3>
+      <ul>
+        <li>UV → melanocyte đẩy melanin lên như “ô che nắng” bọc nhân tế bào (2–3 ngày mới sạm rõ)</li>
+        <li>Màu da = melanin + hemoglobin (đỏ) + carotene (vàng)</li>
+      </ul>
+      <h3 style="margin-top:1.2vh">Collagen — xây &amp; phá</h3>
+      <ul><li>Fibroblast xây; UV sinh enzyme như “chiếc kéo” cắt vụn collagen → lão hóa do ánh sáng</li></ul>
+      <h3 style="margin-top:1.2vh">Tuần hoàn máu</h3>
+      <ul><li>Kém → da nhợt, tái tạo chậm · Quá nhiều → đỏ, nóng rát (viêm, kích ứng)</li></ul>
+    </div>
+    <div class="fig"><img src="img/melanocyte.jpg" alt="Tế bào sắc tố melanocyte"></div>
+  </div>
+  <div class="slide-footer"><span>Cơ chế 3–5</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 15 -->
+<section class="slide">
+  <div class="kicker">7.6 · CƠ CHẾ SINH HỌC (6) — KIM CHỈ NAM</div>
+  <h2>Ngưỡng sẹo &amp; thâm sau viêm (PIH)</h2>
+  <p class="intro">Áp dụng cho mọi kỹ thuật xâm lấn tại spa: nặn mụn, lăn kim, peel, laser.</p>
+  <div class="body even">
+    <div class="cards">
+      <div class="card"><b>Chỉ ở biểu bì</b><p>Da tự lành hoàn toàn — KHÔNG để sẹo.</p></div>
+      <div class="card warn"><b>Xuyên xuống trung bì</b><p>Vượt lớp đáy → chắc chắn để sẹo. Mọi thao tác an toàn chỉ ở biểu bì.</p></div>
+    </div>
+    <div>
+      <h3>PIH — thâm sau viêm</h3>
+      <ul>
+        <li>Mọi viêm (mụn, cháy nắng, làm quá tay) → melanin bơm sắc tố ồ ạt</li>
+        <li>Da người Việt cực nhạy với cơ chế này</li>
+        <li>Thâm nâu (biểu bì): mờ sau 6–12 tháng</li>
+        <li>Thâm xanh xám (trung bì): bám nhiều năm</li>
+      </ul>
+      <div class="note">Kiểm soát viêm sớm + chống nắng tuyệt đối sau thủ thuật.</div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Sẹo &amp; PIH</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 16 -->
+<section class="slide">
+  <div class="kicker">8 · CHU KỲ LỆCH QUỸ ĐẠO</div>
+  <h2>Thay da quá chậm hay quá nhanh đều có hại</h2>
+  <div class="body even" style="margin-top:1vh">
+    <div class="card"><b>Quá chậm → dày sừng</b>
+      <p><b>Nguyên nhân:</b> lão hóa (cạn EGF), thiếu nước (enzyme cắt “keo” chỉ chạy khi đủ nước), UV, không tẩy da chết, kem nhiều sáp/dầu khoáng.</p>
+      <p style="margin-top:.8vh"><b>Hậu quả:</b> xỉn, thô ráp; mụn, bít tắc; mỹ phẩm không thấm (“tường bê tông”); nếp nhăn lộ rõ.</p>
+    </div>
+    <div class="card warn"><b>Quá nhanh → hàng rào ốm yếu</b>
+      <p><b>Nguyên nhân:</b> lạm dụng peel/laser/lột tẩy; cháy nắng cấp; vảy nến (3–7 ngày thay vì 28).</p>
+      <p style="margin-top:.8vh"><b>Hậu quả:</b> “gạch lỗi”, TEWL vọt, kích ứng, viêm, tăng sắc tố, lão hóa sớm.</p>
+    </div>
+  </div>
+  <div class="ask">Khách vừa peel ở nơi khác về, da căng rát, ửng đỏ, bong tróc — hôm nay ta tránh làm gì, và ưu tiên chăm sóc gì?</div>
+  <div class="slide-footer"><span>Chu kỳ lệch quỹ đạo</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 17 -->
+<section class="slide">
+  <div class="kicker">CÁC VẤN ĐỀ THƯỜNG GẶP</div>
+  <h2>Nối cấu tạo với các vấn đề da thường gặp</h2>
+  <div class="body one" style="margin-top:1vh">
+    <div>
+      <table>
+        <tr><th>Vấn đề</th><th>Liên quan tới</th></tr>
+        <tr><td>Nám / tăng sắc tố</td><td>Melanocyte hoạt động quá mức — UV, ánh sáng, nhiệt, nội tiết → chống nắng phổ rộng</td></tr>
+        <tr><td>Mụn</td><td>Tuyến bã + bít nang lông + vi khuẩn + viêm → không nặn mụn viêm sâu</td></tr>
+        <tr><td>Da dầu / viêm da tiết bã</td><td>Da dầu là sinh lý; viêm da tiết bã là bệnh → chuyển bác sĩ</td></tr>
+        <tr><td>Lão hóa &amp; mất nước</td><td>Collagen/elastin giảm; da khô = thiếu dầu, da mất nước = thiếu nước</td></tr>
+        <tr><td>Cháy nắng / UV</td><td>UVB hại biểu bì; UVA xuyên sâu phá collagen</td></tr>
+        <tr><td>Viêm da cơ địa</td><td>Hàng rào hỏng (thiếu filaggrin/NMF) + dị ứng → phục hồi ceramide, tránh hương liệu</td></tr>
+      </table>
+      <div class="note warn">⚠️ Chỉ để hiểu cơ chế — chuyên viên gợi ý khách đi khám bác sĩ da liễu, không chẩn đoán, không kê đơn.</div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Vấn đề thường gặp</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 18 -->
+<section class="slide">
+  <div class="kicker">9 · LÀN DA ĐẸP</div>
+  <h2>Làn da đẹp = khỏe từ gốc: 5 trụ cột &amp; S.T.E.P.S</h2>
+  <div class="body even" style="margin-top:1vh">
+    <ol>
+      <li><b>Hàng rào toàn vẹn</b> — gạch &amp; vữa vững, TEWL thấp</li>
+      <li><b>Chu kỳ tái tạo đều</b> — ~28–40 ngày, không ứ đọng</li>
+      <li><b>Sắc tố cân bằng</b> — melanin phân bố đều</li>
+      <li><b>Nền trung bì săn chắc</b> — collagen, elastin, HA dồi dào</li>
+      <li><b>Hệ vi sinh &amp; pH ổn định</b> — pH 4,5–5,5</li>
+    </ol>
+    <table>
+      <tr><th>S.T.E.P.S</th><th>Trạng thái lý tưởng</th></tr>
+      <tr><td>Smoothness</td><td>Phẳng, mịn, lỗ chân lông thông thoáng</td></tr>
+      <tr><td>Tone</td><td>Đều màu, rạng rỡ, trong trẻo</td></tr>
+      <tr><td>Elasticity</td><td>Săn chắc, có độ nảy</td></tr>
+      <tr><td>Plumpness</td><td>Căng mọng từ bên trong</td></tr>
+      <tr><td>Sensitivity</td><td>Không dễ đỏ rát, kích ứng</td></tr>
+    </table>
+  </div>
+  <div class="slide-footer"><span>Làn da đẹp</span><span class="slide-no"></span></div>
+</section>
+
+<!-- 19 -->
+<section class="slide">
+  <div class="kicker">10 · Ý NGHĨA &amp; PHẠM VI HÀNH NGHỀ</div>
+  <h2>Mang kiến thức cấu tạo da vào phòng spa</h2>
+  <div class="body even" style="margin-top:1vh">
+    <ul>
+      <li>Mỹ phẩm bôi ngoài chủ yếu ở <b>biểu bì</b> → đặt kỳ vọng đúng</li>
+      <li>Chạm tới <b>trung bì</b> cần hoạt chất chuyên sâu hoặc thiết bị</li>
+      <li>Bảo vệ <b>hàng rào &amp; pH acid nhẹ</b> là nền tảng</li>
+      <li>Hiệu quả cần <b>4–8 tuần</b> → tư vấn theo lộ trình</li>
+      <li>Thao tác ở <b>lớp nông</b>; kiểm soát viêm + chống nắng để tránh PIH</li>
+    </ul>
+    <div>
+      <div class="note warn"><b>Phạm vi hành nghề:</b> nội dung bệnh lý chỉ để hiểu cơ chế. Gặp “cờ đỏ” → gợi ý khách đi khám bác sĩ da liễu, không chẩn đoán, không kê đơn.</div>
+      <div class="ask">Chọn một sản phẩm bạn từng tư vấn: nó thực sự tác động ở lớp da nào? Bạn sẽ mô tả kỳ vọng cho khách khác đi thế nào?</div>
+    </div>
+  </div>
+  <div class="slide-footer"><span>Ý nghĩa cho chăm sóc da</span><span class="slide-no"></span></div>
+</section>
+
+<div class="controls"><button id="prev">&#8249;</button><button id="next">&#8250;</button></div>
+<div class="progress" id="progress"></div>
+<script>
+const s=[...document.querySelectorAll('.slide')];let i=0;
+function show(n){i=(n+s.length)%s.length;s.forEach((x,k)=>x.classList.toggle('active',k===i));document.querySelectorAll('.slide-footer .slide-no').forEach((x,k)=>x.textContent=String(k+1).padStart(2,'0')+' / '+String(s.length).padStart(2,'0'));progress.style.width=((i+1)/s.length*100)+'%';location.hash='slide-'+(i+1)}
+prev.onclick=()=>show(i-1);next.onclick=()=>show(i+1);
+addEventListener('keydown',e=>{if(['ArrowRight','PageDown',' '].includes(e.key))show(i+1);if(['ArrowLeft','PageUp'].includes(e.key))show(i-1);if(e.key==='Home')show(0);if(e.key==='End')show(s.length-1)});
+const m=location.hash.match(/slide-(\d+)/);if(m)i=Math.max(0,Math.min(s.length-1,+m[1]-1));show(i);
+</script>
+</body>
+</html>
