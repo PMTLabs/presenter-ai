@@ -3,5 +3,7 @@
     <ProjectReference Include="../PresenterAi.Domain/PresenterAi.Domain.csproj" />
     <ProjectReference Include="../PresenterAi.Contracts/PresenterAi.Contracts.csproj" />
     <PackageReference Include="YamlDotNet" Version="11.2.1" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
   </ItemGroup>
 </Project>
