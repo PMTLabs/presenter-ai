@@ -16,6 +16,7 @@ using PresenterAi.Infrastructure.Live;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Redis;
 using PresenterAi.Infrastructure.Sessions;
+using PresenterAi.Infrastructure.Training;
 
 namespace PresenterAi.Infrastructure;
 
@@ -172,6 +173,7 @@ public static class DependencyInjection
     public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
         services.TryAddSingleton<ToolRegistry>();
+        AddScriptReviser(services);
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
@@ -234,5 +236,22 @@ public static class DependencyInjection
                 TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000));
         });
         return services;
+    }
+
+    // Plan 010 T5: the out-of-band Responses reviser on the upstream routes. The named client has no timeout of its
+    // own (Training:ReviserTimeoutSeconds and the caller's token bound each call) and no logging handlers, so request
+    // URLs and headers never reach the logs.
+    private static void AddScriptReviser(IServiceCollection services)
+    {
+        services.AddHttpClient(ResponsesScriptReviser.HttpClientName)
+            .ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan)
+            .RemoveAllLoggers();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<IScriptReviser>(serviceProvider => new ResponsesScriptReviser(
+            serviceProvider.GetRequiredService<IHttpClientFactory>(),
+            serviceProvider.GetRequiredService<UpstreamRoutes>(),
+            serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrainingOptions>>().Value.ReviserTimeout,
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ResponsesScriptReviser>>()));
     }
 }
