@@ -17,4 +17,8 @@
   <ItemGroup>
     <Content Include="Golden/*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Plan 010: one fake revision service shared with Application.Tests. -->
+    <Compile Include="../PresenterAi.Application.Tests/Support/FakeScriptRevisionService.cs" Link="Infrastructure/FakeScriptRevisionService.cs" />
+  </ItemGroup>
 </Project>

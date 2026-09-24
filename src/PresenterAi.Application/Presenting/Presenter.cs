@@ -22,7 +22,8 @@ public sealed record LoadedPresentation(
     string Id,
     PresentationMeta Meta,
     IReadOnlyList<Slide> Slides,
-    string? Context);
+    string? Context,
+    int? Version = null);
 
 /// <summary>
 /// Ports the Node presenter state machine. All mutable state and all output events are owned by its single

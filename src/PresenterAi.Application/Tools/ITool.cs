@@ -23,5 +23,8 @@ public interface ITool
 
     string Title => Name;
 
+    /// <summary>Spoken question for a <see cref="RequiresConfirmation"/> tool; null uses the generic question.</summary>
+    string? ConfirmationQuestion => null;
+
     Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default);
 }

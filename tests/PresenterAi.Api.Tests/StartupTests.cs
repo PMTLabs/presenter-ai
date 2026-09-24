@@ -98,6 +98,44 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
             .Which.ToString().Should().Contain(expectedError);
     }
 
+    [Theory]
+    [InlineData("9")]
+    [InlineData("181")]
+    public void Out_of_range_reviser_timeout_fails_startup(string value)
+    {
+        using var localFactory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Training:ReviserTimeoutSeconds"] = value
+            }
+        };
+
+        var createClient = () => localFactory.CreateClient();
+
+        createClient.Should().Throw<Exception>()
+            .Which.ToString().Should().Contain("Training:ReviserTimeoutSeconds must be between 10 and 180");
+    }
+
+    [Theory]
+    [InlineData("10", 10)]
+    [InlineData("180", 180)]
+    public void Reviser_timeout_bounds_are_accepted_and_bound(string value, int expected)
+    {
+        using var localFactory = new ApiFactory
+        {
+            Overrides = new Dictionary<string, string?>
+            {
+                ["Training:ReviserTimeoutSeconds"] = value
+            }
+        };
+
+        var options = localFactory.Services
+            .GetRequiredService<Microsoft.Extensions.Options.IOptions<PresenterAi.Application.Scripts.Revisions.TrainingOptions>>();
+
+        options.Value.ReviserTimeoutSeconds.Should().Be(expected);
+    }
+
     [Fact]
     public void Talk_limit_settings_reach_the_presenter()
     {

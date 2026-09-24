@@ -6,6 +6,7 @@ using PresenterAi.Application.Content;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Scripts.Revisions;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Application.Tools;
 using PresenterAi.Application.Tools.External;
@@ -114,6 +115,15 @@ public static class DependencyInjection
             .Validate(options => ExternalToolsOptions.ValidRedirect(options.OAuthRedirectUri), "Tools:OAuthRedirectUri must be absolute")
             .Validate(options => options.Mcp.StartBudgetMs > 0 && options.Mcp.CallTimeoutSeconds > 0,
                 "Tools:Mcp budgets must be positive")
+            .ValidateOnStart();
+
+        // Plan 010: bounds each script reviser call; read by ScriptRevisionService.
+        services.AddOptions<TrainingOptions>()
+            .Bind(configuration.GetSection(TrainingOptions.SectionName))
+            .Validate(
+                options => options.ReviserTimeoutSeconds is >= TrainingOptions.MinReviserTimeoutSeconds
+                    and <= TrainingOptions.MaxReviserTimeoutSeconds,
+                $"Training:ReviserTimeoutSeconds must be between {TrainingOptions.MinReviserTimeoutSeconds} and {TrainingOptions.MaxReviserTimeoutSeconds}")
             .ValidateOnStart();
         services.AddSingleton<CredentialProtector>();
 
