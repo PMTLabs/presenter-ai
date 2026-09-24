@@ -2139,6 +2139,208 @@ public sealed class PresenterAskTests
         Assert.Equal(EndReasons.User, Assert.Single(h.Closed).EndReason);
     }
 
+    // ---- Review r2: confirmation attribution (#1) ---------------------------------------------------------------
+
+    [Theory]
+    [InlineData("yes")]
+    [InlineData("no")]
+    public async Task Reply_begun_before_a_tool_confirmation_neither_approves_nor_declines_it(string reply)
+    {
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.TrainerOn();
+        await h.ToAwaitingAnswer(start: false);
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+
+        // Delta → tool request → the utterance's 700 ms debounce: the reply began before the confirmation.
+        h.S.Hear(reply, 0, 100);
+        await h.Settle();
+        h.S.RaiseToolCall("d1", "c1", "revise_script", "{\"feedback\":\"Shorter.\"}");
+        await Eventually(() => h.S.Sent.Any(s => s.EventId == "c1"));
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Empty(h.Service.Enqueued);
+        Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: tool confirmation answered", StringComparison.Ordinal));
+        Assert.DoesNotContain(h.Logs, l => l.EndsWith("revise_script declined", StringComparison.Ordinal));
+        Assert.Contains("ask: open reply discarded; a tool confirmation began", h.Logs);
+        Assert.Empty(h.Offs);
+
+        // A fresh reply, after the confirmation began and after 1.5 s of transcript quiet, still answers it.
+        await h.Advance(TimeSpan.FromMilliseconds(1600));
+        await h.Reply(reply);
+        if (reply == "yes") Assert.Single(h.Service.Enqueued);
+        else Assert.Contains(h.Logs, l => l.EndsWith("revise_script declined", StringComparison.Ordinal));
+    }
+
+    // ---- Review r2: refused follow-ups (#2, #3) -----------------------------------------------------------------
+
+    [Theory]
+    [InlineData("awaiting", "mute")]
+    [InlineData("awaiting", "begin")]
+    [InlineData("awaiting", "rollback")]
+    [InlineData("answering", "mute")]
+    [InlineData("answering", "begin")]
+    [InlineData("answering", "rollback")]
+    [InlineData("check-in", "mute")]
+    [InlineData("check-in", "begin")]
+    [InlineData("check-in", "rollback")]
+    public async Task Refused_follow_up_keeps_a_live_answer_or_ends_it_once_when_the_upstream_is_reset(string phase, string failure)
+    {
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.TrainerOn();
+        await h.ToAwaitingAnswer(start: false);
+        if (phase != "awaiting") await h.Answer();
+        if (phase == "check-in") await h.Advance(TimeSpan.FromMilliseconds(701));
+        // Deferred state carried by the exchange: an edit notice and a replay due.
+        await h.TrainOn(2);
+        await h.Revert(6, (0, "Slide one, v6."));
+        var first = h.S;
+        first.CloseSeconds = 7;
+        switch (failure)
+        {
+            case "mute": first.RefuseMute = true; break;
+            case "begin": h.Transcriber.ThrowOnBegin = new InvalidOperationException("no transcriber"); break;
+            default:
+                h.Transcriber.ThrowOnBegin = new InvalidOperationException("no transcriber");
+                first.RefuseUnmute = true;
+                break;
+        }
+
+        var frames = h.AskStates.Count;
+        Assert.False(await h.Presenter.AskStartAsync());
+        await h.Settle();
+        var after = h.AskStates.Skip(frames).Select(a => $"{a.State}:{a.Reason}").ToList();
+
+        if (failure != "rollback")
+        {
+            // The answer survives on its live upstream: the refusal, then the answer re-announced.
+            Assert.Equal(["off:unavailable", "answering:sent"], after);
+            Assert.Equal("presenting", h.Presenter.Snapshot().State);
+            first.RefuseMute = false;
+            h.Transcriber.ThrowOnBegin = null;
+            Assert.True(await h.Presenter.ResumeAsync());
+            await h.Settle();
+            Assert.Equal(["unavailable", "continued"], h.Offs.Select(o => o.Reason));
+            Assert.Single(first.Sent, s => s.Content == PromptBuilder.ScriptEditPendingInstruction());
+            Assert.Single(first.Sent, s => s.EventId == "slide-1-updated-v6");
+            return;
+        }
+
+        // The rollback unmute was refused: the upstream is reset, so the answer exchange ends once, never re-announced.
+        Assert.Equal(["off:unavailable"], after);
+        await Eventually(() => first.DisposeCount == 1);
+        await h.Settle();
+        var snapshot = h.Presenter.Snapshot();
+        Assert.Equal("paused", snapshot.State);
+        Assert.True(snapshot.Suspended);
+        Assert.Contains(h.Usages, u => u.Seconds == 7);
+        Assert.DoesNotContain(first.Sent, s => s.Content == PromptBuilder.ScriptEditPendingInstruction());
+        // The old answer's timers are gone: no later off, no resume.
+        await h.Advance(TimeSpan.FromSeconds(30));
+        Assert.Single(h.Offs);
+        Assert.DoesNotContain(first.Sent, IsResumeAfterQuestion);
+        Assert.Empty(h.Closed);
+
+        // Recovery: Resume reconnects, delivers the kept notice once and replays the current slide once.
+        h.Transcriber.ThrowOnBegin = null;
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+        Assert.Equal(2, h.Sessions.Count);
+        Assert.Single(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditPendingInstruction());
+        Assert.Single(h.S.Sent, s => s.EventId == "slide-1-updated-v6");
+        Assert.Contains("Slide one, v6.", Assert.Single(h.S.Sent, s => s.EventId == "slide-1-part-1").Content);
+        Assert.Single(h.Offs);
+    }
+
+    [Fact]
+    public async Task Refused_follow_up_while_muted_keeps_the_answer_and_continue_ends_it_once()
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        await h.Answer();
+        Assert.True(await h.Presenter.MuteAsync());
+        await h.Settle();
+        var frames = h.AskStates.Count;
+
+        Assert.False(await h.Presenter.AskStartAsync());
+        Assert.True(await h.Presenter.UnmuteAsync());
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+
+        Assert.Equal(["off:refused_muted", "answering:sent", "off:continued"],
+            h.AskStates.Skip(frames).Select(a => $"{a.State}:{a.Reason}"));
+        Assert.Single(h.Offs, o => o.Reason == "continued");
+        Assert.Single(h.S.Sent, IsResumeAfterQuestion);
+    }
+
+    // ---- Review r2: nested follow-ups carry the exchange's state (#4) -------------------------------------------
+
+    [Theory]
+    [InlineData("continue")]
+    [InlineData("end")]
+    [InlineData("max")]
+    public async Task Nested_follow_ups_carry_notices_and_replay_to_the_one_exchange_end(string outcome)
+    {
+        await using var h = new Harness(settings: Settings(maxMinutes: 5));
+        await h.StartNarrating();
+        await h.TrainerOn();
+        await h.ToAwaitingAnswer(start: false);
+        await h.Answer();
+        var id = await h.TrainOn(0);
+        await h.Apply(id, 6, (0, "Slide one, v6."));
+        var before = h.S.Sent.Count;
+
+        await h.AskStart();
+        await h.MicSpeech();
+        await h.AskDone();
+        await h.Answer();
+        await h.AskStart();
+        await h.MicSpeech();
+        Assert.Empty(h.Offs);
+        Assert.DoesNotContain(h.S.Sent.Skip(before), s => s.Content == PromptBuilder.ScriptEditPendingInstruction() ||
+            s.EventId == "slide-1-updated-v6" || s.EventId == "slide-1-part-1" || IsResumeAfterQuestion(s));
+
+        switch (outcome)
+        {
+            case "end":
+                Assert.True(await h.Presenter.EndAsync());
+                await h.Settle();
+                break;
+            case "max":
+                await h.Listen(TimeSpan.FromMinutes(5));
+                Assert.Equal(EndReasons.MaxLength, Assert.Single(h.Closed).EndReason);
+                break;
+            default:
+                await h.AskDone();
+                await h.Answer();
+                await h.Advance(TimeSpan.FromMilliseconds(701));
+                Assert.DoesNotContain(h.S.Sent.Skip(before), s => s.EventId == "slide-1-updated-v6");
+                await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs));
+                break;
+        }
+
+        var sent = h.S.Sent.Skip(before).ToList();
+        if (outcome == "continue")
+        {
+            Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+            Assert.Single(sent, s => s.Content == PromptBuilder.ScriptEditPendingInstruction());
+            Assert.Single(sent, s => s.EventId == "slide-1-updated-v6");
+            Assert.Contains("Slide one, v6.", Assert.Single(sent, s => s.EventId == "slide-1-part-1").Content);
+            Assert.DoesNotContain(sent, IsResumeAfterQuestion);
+            return;
+        }
+
+        Assert.Equal("ended", Assert.Single(h.Offs).Reason);
+        Assert.DoesNotContain(sent, s => s.Content == PromptBuilder.ScriptEditPendingInstruction() ||
+            s.EventId == "slide-1-updated-v6" || s.EventId == "slide-1-part-1" || IsResumeAfterQuestion(s));
+        await h.Advance(TimeSpan.FromSeconds(30));
+        Assert.Equal(sent.Count, h.S.Sent.Skip(before).Count());
+    }
+
     // ---- Harness --------------------------------------------------------------------------------------------------
 
     private static bool IsResumeAfterQuestion((string Type, string? Content, string? EventId, string? DelegationId) item) =>

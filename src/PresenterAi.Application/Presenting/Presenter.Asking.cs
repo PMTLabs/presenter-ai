@@ -41,6 +41,7 @@ public sealed partial class Presenter
     // still the old question's trail and stay UI-only.
     private long? _askTrailingDeltaAt;
     private long _resetGeneration;
+    private long _confirmationGeneration;
     private PendingReset? _pendingReset;
     // Review r1 #1: every presenter unmute and every ack of the current session is counted, so an ack without an
     // echoed id is attributed FIFO; an ack with one must match the ask's own unmute id.
@@ -165,22 +166,25 @@ public sealed partial class Presenter
             return true;
         }
 
+        // Owner decision (review r1 #4): Ask during the answer is a follow-up question in the same exchange; it keeps
+        // the resume point of the first ask. It is known before every refusal check, so each refusal goes through
+        // RefuseStart, which keeps a surviving answer announced or ends it when its upstream is gone (review r2 #3).
+        var followUp = _exchange is { Phase: AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn } ? _exchange : null;
+
         if (_state is not (PresenterState.Presenting or PresenterState.Paused))
         {
-            EmitAskOff(null, "refused_not_live");
+            RefuseStart(followUp, "refused_not_live");
             return false;
         }
 
         if (_muted)
         {
             LogMessage("info", "ask: refused while muted");
-            EmitAskOff(null, "refused_muted");
+            RefuseStart(followUp, "refused_muted");
             return false;
         }
 
-        // Owner decision (review r1 #4): Ask during the answer is a follow-up question in the same exchange; it keeps
-        // the resume point of the first ask. Only an Ask during the unmute-ack wait ends that exchange first (Stay).
-        var followUp = _exchange is { Phase: AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn } ? _exchange : null;
+        // Only an Ask during the unmute-ack wait ends that exchange first (Stay).
         if (_exchange is not null && followUp is null) EndExchange(AskOutcome.Stay, "paused");
 
         if (_suspended)
@@ -189,14 +193,14 @@ public sealed partial class Presenter
             // A failed reconnect has already ended the talk.
             if (_state is not (PresenterState.Presenting or PresenterState.Paused) || _session is null || _suspended)
             {
-                EmitAskOff(null, "refused_not_live");
+                RefuseStart(followUp, "refused_not_live");
                 return false;
             }
         }
 
         if (_session is not { } session)
         {
-            EmitAskOff(null, "refused_not_live");
+            RefuseStart(followUp, "refused_not_live");
             return false;
         }
 
@@ -277,11 +281,29 @@ public sealed partial class Presenter
         return true;
     }
 
-    /// <summary>A refused start reports <c>off</c>; a refused follow-up keeps its answer running and re-announces it.</summary>
+    /// <summary>
+    /// The one refusal path of Ask start. A plain refused start reports <c>off</c>. A refused follow-up keeps its answer
+    /// running and re-announces <c>answering</c> while its upstream is live; when the upstream is gone (a refused
+    /// rollback unmute reset it, or the talk ended) the answer exchange is ended once instead, with its deferred
+    /// notices kept for the reconnect and its replay due kept for the next resume (review r2 #2, #3).
+    /// </summary>
     private void RefuseStart(AskExchange? followUp, string reason)
     {
+        if (followUp is null || !ReferenceEquals(_exchange, followUp))
+        {
+            EmitAskOff(null, reason);
+            return;
+        }
+
+        if (_session is null || _suspended || _state is not (PresenterState.Presenting or PresenterState.Paused))
+        {
+            LogMessage("warn", $"ask: follow-up refused ({reason}) with the upstream gone; the answer ends");
+            EndExchange(_state is PresenterState.Presenting or PresenterState.Paused ? AskOutcome.Stay : AskOutcome.Ended, reason);
+            return;
+        }
+
         EmitAskOff(null, reason);
-        if (followUp is not null) EmitAnswering(followUp);
+        EmitAnswering(followUp);
     }
 
     private bool AskDoneCore(string reason)
@@ -591,8 +613,25 @@ public sealed partial class Presenter
         {
             ResetUtterance();
             exchange.UtteranceOpen = true;
+            // Review r2 #1: the purpose is fixed when the utterance's first delta arrives, never at its completion.
+            exchange.UtteranceConfirmation = confirming ? _confirmationGeneration : null;
             AppendUtterance(transcript);
         }
+    }
+
+    /// <summary>
+    /// A tool confirmation began (review r2 #1). An exchange utterance already open began before it, so it can neither
+    /// approve nor decline it: it is discarded, and its remaining deltas fall inside the 1.5 s quiet window, so only a
+    /// fresh utterance whose first delta follows the confirmation's start after transcript quiet can answer it.
+    /// </summary>
+    private void OnToolConfirmationStarted()
+    {
+        _confirmationGeneration++;
+        if (_exchange is not { UtteranceOpen: true } exchange) return;
+        ResetUtterance();
+        exchange.UtteranceOpen = false;
+        exchange.UtteranceConfirmation = null;
+        LogMessage("info", "ask: open reply discarded; a tool confirmation began");
     }
 
     /// <summary>True when a user delta after an exchange is still the old question's trail (P-13); it stays UI-only.</summary>
@@ -621,8 +660,25 @@ public sealed partial class Presenter
         var tooLong = _utteranceTooLong || _timeProvider.GetElapsedTime(_utteranceOpenedAt).TotalMilliseconds > 6000;
         ResetUtterance();
         exchange.UtteranceOpen = false;
+        var confirmationReply = exchange.UtteranceConfirmation;
+        exchange.UtteranceConfirmation = null;
         var command = tooLong ? null : VoiceCommandMatcher.Match(phrase);
-        if (_pendingTool is not null && _interaction is Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer)
+        var confirmationPending = _pendingTool is not null &&
+            _interaction is Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer;
+        if (confirmationReply is not null && (!confirmationPending || confirmationReply != _confirmationGeneration))
+        {
+            LogMessage("info", "ask: reply to a settled confirmation ignored");
+            return;
+        }
+
+        if (confirmationPending && confirmationReply is null)
+        {
+            // Began as a check-in reply, not as an answer to this confirmation (review r2 #1).
+            LogMessage("info", "ask: check-in reply ignored while a tool confirmation is pending");
+            return;
+        }
+
+        if (confirmationPending)
         {
             // Review r1 #3: only yes or no settle the confirmation; nothing else (navigation included) acts.
             switch (command?.Intent)
@@ -1059,6 +1115,8 @@ public sealed partial class Presenter
         public bool ReplayChanged { get; set; }
         public long? LastUserDeltaAt { get; set; }
         public bool UtteranceOpen { get; set; }
+        /// <summary>The confirmation generation an open utterance answers, fixed at its first delta; null for a check-in reply.</summary>
+        public long? UtteranceConfirmation { get; set; }
         public bool FollowUpUsed { get; set; }
         public long LastRevision { get; set; }
         public string? LatestText { get; set; }
@@ -1085,6 +1143,7 @@ public sealed partial class Presenter
             UnmuteEventId = null;
             UnmuteOrdinal = 0;
             UtteranceOpen = false;
+            UtteranceConfirmation = null;
             FollowUpUsed = false;
             LastRevision = 0;
             LatestText = null;
