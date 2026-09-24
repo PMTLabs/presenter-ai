@@ -32,6 +32,13 @@ public sealed class PresenterVoiceCommandTests
         await presenter.WaitUntilIdleAsync();
     }
 
+    // Polled while the loop may still append to Sent; a torn read counts as "not yet".
+    private static bool SentClose(FakeSession session)
+    {
+        try { return session.Sent.Any(item => item.Type == "close"); }
+        catch (InvalidOperationException) { return false; }
+    }
+
     [Theory]
     [InlineData(699, "paused")]
     [InlineData(700, "presenting")]
@@ -486,10 +493,20 @@ public sealed class PresenterVoiceCommandTests
             session.CloseGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             session.DeferCloseEvent = true;
             var end = presenter.EndAsync();
-            for (var i = 0; i < 100 && presenter.Snapshot().State != "ending"; i++) await Task.Delay(10);
-            Assert.Equal("ending", presenter.Snapshot().State);
-            Assert.Equal(1, flushes);
-            session.CloseGate.SetResult();
+            try
+            {
+                // "ending" is published just before the flush, and the close follows it: wait for the close, which
+                // holds the loop, so both are settled before they are asserted.
+                for (var i = 0; i < 300 && !SentClose(session); i++) await Task.Delay(10);
+                Assert.True(SentClose(session));
+                Assert.Equal("ending", presenter.Snapshot().State);
+                Assert.Equal(1, flushes);
+            }
+            finally
+            {
+                // Released even when an assertion fails: a close left gated would wedge the loop and hang disposal.
+                session.CloseGate.TrySetResult();
+            }
             await end;
             session.Speak();
             await presenter.WaitUntilIdleAsync();
