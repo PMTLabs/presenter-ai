@@ -11,6 +11,7 @@ import { Transcript } from "../components/Transcript";
 import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
 import { LogPanel } from "../components/LogPanel";
+import { TrainerControls } from "../components/TrainerControls";
 import { formatEndReason } from "../utils/endReasons";
 type Detail = components["schemas"]["PresentationDetail"];
 
@@ -95,6 +96,7 @@ export function Present() {
   const upstreamStatus = usePresenterStore((state) => state.upstreamStatus);
   const suspended = usePresenterStore((state) => state.suspended);
   const endReason = usePresenterStore((state) => state.endReason);
+  const trainerMode = usePresenterStore((state) => state.trainerMode);
   const applySnapshot = usePresenterStore((state) => state.applySnapshot);
   const message = usePresenterStore((state) => state.message);
   const log = usePresenterStore((state) => state.log);
@@ -141,6 +143,8 @@ export function Present() {
       "closed",
       "limit_warning",
       "upstream",
+      "script_edit",
+      "script_version",
     ] as const)
       bridge.on(event, (eventMessage) => {
         message(eventMessage);
@@ -402,6 +406,7 @@ export function Present() {
         <span className="rounded-full bg-gray-200 px-3 py-1 text-xs text-gray-900 dark:bg-gray-800 dark:text-gray-100">
           buf {bufferedMs} ms
         </span>
+        <TrainerControls onToggle={() => client.current?.setTrainerMode(!trainerMode)} />
       </div>
       <Group
         orientation={isDesktop ? "horizontal" : "vertical"}
@@ -547,7 +552,11 @@ export function Present() {
               "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
             ].join(" ")}
           >
-            <Transcript />
+            <Transcript
+              onTrainOnThis={(question, answer, slideIndex) =>
+                client.current?.trainTurn(question, answer, slideIndex)
+              }
+            />
             <LogPanel />
           </aside>
         </Panel>

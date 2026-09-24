@@ -330,6 +330,55 @@ describe("BridgeClient", () => {
     expect(ws.sent[4]).toBe('{"type":"start","presentation":"sample","fromIndex":2,"maxMinutes":30}');
   });
 
+  it("sends trainer_mode and train_turn", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.fire("open", {});
+    c.setTrainerMode(true);
+    c.setTrainerMode(false);
+    c.trainTurn("What about 2025?", "The 2025 figures show growth.", 3);
+    expect(ws.sent[1]).toBe('{"type":"trainer_mode","on":true}');
+    expect(ws.sent[2]).toBe('{"type":"trainer_mode","on":false}');
+    expect(ws.sent[3]).toBe(
+      '{"type":"train_turn","question":"What about 2025?","answer":"The 2025 figures show growth.","slideIndex":3}',
+    );
+  });
+
+  it("emits script_edit and script_version", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    const edits: BridgeMessage[] = [];
+    const versions: BridgeMessage[] = [];
+    c.on("script_edit", (message) => edits.push(message));
+    c.on("script_version", (message) => versions.push(message));
+    const editMessage = {
+      type: "script_edit",
+      id: "edit_4",
+      status: "applied",
+      slideIndexes: [3],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    };
+    const versionMessage = {
+      type: "script_version",
+      presentationId: "prs_1",
+      version: 7,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    };
+    ws.fire("message", { data: JSON.stringify(editMessage) });
+    ws.fire("message", { data: JSON.stringify(versionMessage) });
+    // Frames this client does not yet know stay ignored (no throw, no emit).
+    ws.fire("message", { data: JSON.stringify({ type: "future_frame", value: 1 }) });
+
+    expect(edits).toEqual([editMessage]);
+    expect(versions).toEqual([versionMessage]);
+  });
+
   it("emits limit_warning and upstream", () => {
     const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();
