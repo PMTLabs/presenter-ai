@@ -31,6 +31,7 @@ export type BridgeEventMap = {
   script_version: [BridgeMessage];
   /** Server-authoritative Trainer mode, in or out of a talk (on connect, idle requests, refusals, talk end). */
   trainer_state: [BridgeMessage];
+  ask_state: [BridgeMessage];
 };
 export type BridgeMessage = { type: string; [key: string]: unknown };
 type Handler<T extends keyof BridgeEventMap> = (
@@ -194,6 +195,18 @@ export class BridgeClient {
   end() {
     this.send({ type: "end" });
   }
+  askStart() {
+    this.send({ type: "ask_start" });
+  }
+  askDone() {
+    this.send({ type: "ask_done" });
+  }
+  askExtend() {
+    this.send({ type: "ask_extend" });
+  }
+  askCancel() {
+    this.send({ type: "ask_cancel" });
+  }
   setTrainerMode(on: boolean) {
     this.send({ type: "trainer_mode", on });
   }
@@ -280,6 +293,9 @@ export class BridgeClient {
         break;
       case "trainer_state":
         this.emit("trainer_state", message);
+        break;
+      case "ask_state":
+        this.emit("ask_state", message);
         break;
     }
   }
