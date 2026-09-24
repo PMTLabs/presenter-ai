@@ -86,6 +86,9 @@ public sealed class PresenterTests
         Assert.DoesNotContain(harness.Session().Sent, IsResume);
         await harness.EndFollowUp(701);
         Assert.Equal([0], harness.Slides);
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
         Assert.Equal([0, 1], harness.Slides);
@@ -592,6 +595,9 @@ public sealed class PresenterTests
         await harness.Flush();
         await harness.EndFollowUp();
         Assert.Equal(0, harness.Presenter.Snapshot().SlideIndex);
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
         Assert.Equal(1, harness.Presenter.Snapshot().SlideIndex);
@@ -620,6 +626,9 @@ public sealed class PresenterTests
         Assert.Contains(new PresenterLog("info", $"question: no follow-up after {Presenter.DefaultFollowUpWaitMs} ms; resuming"), harness.Logs);
         Assert.Equal([0], harness.Slides);
 
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
         Assert.Equal([0, 1], harness.Slides);
@@ -711,6 +720,9 @@ public sealed class PresenterTests
         await harness.Flush();
         await harness.EndFollowUp();
         Assert.DoesNotContain(harness.Session().Sent, item => item.EventId == "slide-1-part-2");
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(Presenter.PartGapFor(2000) + 1));
         await harness.Flush();
         Assert.Contains(harness.Session().Sent, item => item.EventId == "slide-1-part-2");
@@ -749,6 +761,9 @@ public sealed class PresenterTests
 
         Assert.Equal([0], harness.Slides);
         Assert.Contains(new PresenterLog("info", "question: released after 15 s without an answer"), harness.Logs);
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
         Assert.Equal([0, 1], harness.Slides);
@@ -895,6 +910,9 @@ public sealed class PresenterTests
         harness.Session().Speak();
         await harness.Flush();
         await harness.EndFollowUp();
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
 
@@ -915,6 +933,9 @@ public sealed class PresenterTests
         harness.Session().Speak();
         await harness.Flush();
         await harness.EndFollowUp();
+        // Resumed narration audio: the advance waits for it after a resume instruction (T8 live-run defect).
+        harness.Session().Speak();
+        await harness.Flush();
         harness.Clock.Advance(TimeSpan.FromMilliseconds(2001));
         await harness.Flush();
 

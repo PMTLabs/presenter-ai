@@ -578,6 +578,22 @@ public sealed partial class Presenter
         ArmInteraction(700);
     }
 
+    /// <summary>
+    /// The speech taken as the answer was filler (a delegation followed it): back to AwaitingAnswer. The budget keeps
+    /// its original start, so the ceiling still bounds the wait; a check-in reply already open is dropped.
+    /// </summary>
+    private void ReturnExchangeToAwaitingAnswer()
+    {
+        if (_exchange is not { Phase: AskPhase.Answering or AskPhase.CheckIn } exchange) return;
+        exchange.Phase = AskPhase.AwaitingAnswer;
+        if (exchange.UtteranceOpen)
+        {
+            ResetUtterance();
+            exchange.UtteranceOpen = false;
+            exchange.UtteranceConfirmation = null;
+        }
+    }
+
     /// <summary>The existing 700 ms quiet after the answer moved to AwaitingCarryOn: the check-in begins (loop time).</summary>
     private void MarkExchangeCheckIn()
     {
@@ -876,6 +892,11 @@ public sealed partial class Presenter
         LogMessage("info", message);
         ClearQuestionHold();
         SetInteraction(Interaction.None);
+        // As ResumeCore does: answer audio is not narration, so the advance (and the wrap-up end) waits for the
+        // resumed audio, and the nudge or wrap-up fallback covers a silent model (T8 live-run defect class).
+        _heardOutput = false;
+        _nudgeCount = 0;
+        ClearSilenceTimer();
         if (_wrappingUp)
         {
             _session?.AppendInstructions(PromptBuilder.WrapUpInstruction(), "wrap-up-resume");
