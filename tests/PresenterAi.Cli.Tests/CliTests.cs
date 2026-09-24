@@ -104,6 +104,34 @@ public sealed class CliTests
     }
 
     [Fact]
+    public async Task Owner_and_file_mode_build_the_presenter_with_the_disabled_ask_transcriber()
+    {
+        // Plan 011 (G1-5): both CLI containers (ValidateOnBuild) register the disabled ask transcriber and hand that
+        // instance to the presenter.
+        await using var fake = await FakeLiveServer.StartAsync();
+        var configuration = Configuration(fake, new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:Postgres"] = "Host=localhost;Port=1;Database=unused;Username=unused"
+        });
+
+        await using (var ownerServices = Program.BuildRunServices(configuration))
+        {
+            AssertDisabledAskTranscriber(ownerServices);
+        }
+
+        await using var fileServices = Program.BuildServices(configuration, FindRepositoryRoot());
+        AssertDisabledAskTranscriber(fileServices);
+
+        static void AssertDisabledAskTranscriber(IServiceProvider services)
+        {
+            var transcriber = services.GetRequiredService<PresenterAi.Application.Presenting.Asking.IAskTranscriber>();
+            transcriber.Should().BeOfType<PresenterAi.Application.Presenting.Asking.DisabledAskTranscriber>();
+            services.GetRequiredService<IPresenter>().Should().BeOfType<Presenter>()
+                .Which.AskTranscriber.Should().BeSameAs(transcriber);
+        }
+    }
+
+    [Fact]
     public async Task Run_sample_against_fake_server_stops_after_slide_2()
     {
         await using var fake = await FakeLiveServer.StartAsync();

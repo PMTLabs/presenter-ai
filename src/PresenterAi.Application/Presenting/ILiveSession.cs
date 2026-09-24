@@ -28,6 +28,16 @@ public interface ILiveSession : IAsyncDisposable
         remove { }
     }
 
+    /// <summary>
+    /// Plan 011 (P-18): raised when the upstream acknowledges <see cref="Unmute"/> with
+    /// <c>session.input_audio.unmuted</c>. Implementations without an ack never raise it.
+    /// </summary>
+    event Action? InputAudioUnmuted
+    {
+        add { }
+        remove { }
+    }
+
     LiveSessionState State { get; }
 
     string? Id { get; }

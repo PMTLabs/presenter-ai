@@ -22,6 +22,24 @@ internal sealed class FakeSession : ILiveSession
 
     public string? WarnOnConnect { get; set; }
 
+    /// <summary>Plan 011: the bytes of every accepted <see cref="SendAudio"/>, in the order of its <c>audio</c> entry in <see cref="Sent"/>.</summary>
+    public List<byte[]> SentAudio { get; } = [];
+
+    /// <summary>
+    /// Plan 011 (P-12): the 0-based index of the first <see cref="SendAudio"/> call that is refused (returns false and
+    /// records nothing); every later call is refused too. Null accepts every call.
+    /// </summary>
+    public int? RefuseAudioFromChunk { get; set; }
+
+    public int SendAudioCalls { get; private set; }
+
+    /// <summary>Plan 011 (P-18): when true, <see cref="Unmute"/> raises <see cref="InputAudioUnmuted"/> at once, as the upstream acks.</summary>
+    public bool AutoAckUnmute { get; set; } = true;
+
+    public bool RefuseUnmute { get; set; }
+
+    public bool RefuseMute { get; set; }
+
     public SessionRequest? Request { get; set; }
 
     public int DisposeCount { get; private set; }
@@ -48,6 +66,14 @@ internal sealed class FakeSession : ILiveSession
 
     public void RaiseHostedActivity(string delegationId, string status) => HostedToolActivity?.Invoke(delegationId, "web_search", status);
     public event Action<string, double?>? Closed;
+    public event Action? InputAudioUnmuted;
+    public event Action<string, long>? InputPositionMarked;
+
+    /// <summary>Raises the upstream's <c>session.input_audio.unmuted</c> ack (P-18), e.g. late or after a timeout.</summary>
+    public void RaiseInputAudioUnmuted() => InputAudioUnmuted?.Invoke();
+
+    /// <summary>Reports a mark queued by <see cref="MarkInputPosition"/> at <paramref name="sentMs"/> of the input clock.</summary>
+    public void RaiseInputPositionMarked(string id, long sentMs) => InputPositionMarked?.Invoke(id, sentMs);
 
     public async Task<LiveSessionInfo> ConnectAsync(CancellationToken cancellationToken = default)
     {
@@ -90,20 +116,35 @@ internal sealed class FakeSession : ILiveSession
 
     public bool Mute()
     {
+        if (RefuseMute) return false;
         Sent.Add(("mute", null, null, null));
         return true;
     }
 
     public bool Unmute()
     {
+        if (RefuseUnmute) return false;
         Sent.Add(("unmute", null, null, null));
+        if (AutoAckUnmute) InputAudioUnmuted?.Invoke();
         return true;
     }
 
     public bool SendAudio(ReadOnlyMemory<byte> pcm16)
     {
+        var call = SendAudioCalls++;
+        if (RefuseAudioFromChunk is { } refuseFrom && call >= refuseFrom) return false;
         Sent.Add(("audio", null, null, null));
+        SentAudio.Add(pcm16.ToArray());
         return true;
+    }
+
+    private int _marks;
+
+    public string? MarkInputPosition()
+    {
+        var id = $"mark_{++_marks}";
+        Sent.Add(("mark", null, id, null));
+        return id;
     }
 
     public async Task<LiveCloseResult> CloseAsync()

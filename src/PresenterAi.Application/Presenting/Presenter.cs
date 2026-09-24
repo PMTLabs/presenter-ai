@@ -6,6 +6,7 @@ using PresenterAi.Application.Tools;
 using PresenterAi.Application.Tools.External;
 using System.Text.Json.Nodes;
 using System.Diagnostics;
+using PresenterAi.Application.Presenting.Asking;
 using PresenterAi.Application.Presenting.VoiceCommands;
 using PresenterToolsRegistration = PresenterAi.Application.Presenting.Tools.PresenterToolsRegistration;
 
@@ -154,7 +155,8 @@ public sealed partial class Presenter : IPresenter
         Func<int, bool>? hasDelegationModel = null,
         Func<string, CancellationToken, Task<SessionToolSet>>? loadSessionTools = null,
         TimeSpan? startToolBudget = null,
-        IScriptRevisionService? scriptRevisions = null)
+        IScriptRevisionService? scriptRevisions = null,
+        IAskTranscriber? askTranscriber = null)
     {
         _createSession = createSession ?? throw new ArgumentNullException(nameof(createSession));
         _loadPresentation = loadPresentation ?? throw new ArgumentNullException(nameof(loadPresentation));
@@ -165,6 +167,7 @@ public sealed partial class Presenter : IPresenter
         _loadSessionTools = loadSessionTools;
         _startToolBudget = startToolBudget ?? TimeSpan.FromSeconds(4);
         _scriptRevisions = scriptRevisions;
+        _askTranscriber = askTranscriber ?? new DisabledAskTranscriber();
         if (_scriptRevisions is not null) _scriptRevisions.Changed += OnScriptRevisionsChanged;
         PresenterToolsRegistration.RegisterAll(_toolRegistry, this);
         _snapshot = BuildSnapshot();
@@ -635,7 +638,8 @@ public sealed partial class Presenter : IPresenter
     {
         try
         {
-            if (command is not (SendAudioCommand or EndCommand)) RecordActivity();
+            // Plan 011 T2: ask commands are inert until T4 gives them behaviour, so they record no activity yet.
+            if (command is not (SendAudioCommand or EndCommand or AskCommand)) RecordActivity();
             if (command is NextCommand or PrevCommand or GotoCommand or PauseCommand or ResumeCommand or EndCommand)
                 CancelToolConfirmation();
             var result = command switch
@@ -652,6 +656,7 @@ public sealed partial class Presenter : IPresenter
                 EndCommand end => await EndAsyncCore(end.Resumable, end.EndReason).ConfigureAwait(false),
                 TrainerModeCommand trainer => SetTrainerModeCore(trainer.OwnerId, trainer.On),
                 TrainOnTurnCommand turn => TrainOnTurnCore(turn.OwnerId, turn.Question, turn.Answer, turn.SlideIndex),
+                AskCommand => false,
                 _ => false
             };
             command.Completion.TrySetResult(result);

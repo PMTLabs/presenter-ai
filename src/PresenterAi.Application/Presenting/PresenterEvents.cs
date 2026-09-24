@@ -56,3 +56,17 @@ public sealed record PresenterTrainerState(
     bool TrainerMode,
     bool TrainerAvailable,
     bool VoiceTraining);
+
+/// <summary>
+/// One press-to-ask state for the <c>ask_state</c> frame (plan 011 §4.3). <paramref name="State"/> is
+/// <c>listening</c>, <c>answering</c> or <c>off</c>; <paramref name="Reason"/> is null while listening, the send reason
+/// on <c>answering</c> and the outcome on <c>off</c>. The remaining times are null outside <c>listening</c>.
+/// </summary>
+public sealed record PresenterAskState(
+    string State,
+    long ElapsedMs,
+    long? QuietRemainingMs,
+    long? SpeechRemainingMs,
+    bool Heard,
+    bool Transcribing,
+    string? Reason);

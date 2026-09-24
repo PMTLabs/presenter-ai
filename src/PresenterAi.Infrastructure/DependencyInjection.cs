@@ -6,6 +6,7 @@ using PresenterAi.Application.Content;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Presenting.Asking;
 using PresenterAi.Application.Scripts.Revisions;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Application.Tools;
@@ -176,6 +177,8 @@ public static class DependencyInjection
     public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
         services.TryAddSingleton<ToolRegistry>();
+        // Plan 011 (G1-5): the ask transcriber port is built but not enabled; a host may register a real one first.
+        services.TryAddSingleton<IAskTranscriber, DisabledAskTranscriber>();
         AddScriptTraining(services);
 
         if (fileBacked)
@@ -262,7 +265,8 @@ public static class DependencyInjection
                 TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000),
                 // Plan 010: optional so hosts without the revision service still build; the presenter subscribes to its
                 // Changed signal itself (a reconcile request only).
-                serviceProvider.GetService<IScriptRevisionService>());
+                serviceProvider.GetService<IScriptRevisionService>(),
+                serviceProvider.GetRequiredService<IAskTranscriber>());
         });
         return services;
     }

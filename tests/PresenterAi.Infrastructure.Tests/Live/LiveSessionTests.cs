@@ -481,6 +481,29 @@ public sealed class LiveSessionTests
     }
 
     [Fact]
+    public async Task Unmuted_server_event_raises_InputAudioUnmuted()
+    {
+        // Plan 011 (P-18): Ask done waits for this ack before the burst, so the receive switch must raise it.
+        await using var server = await FakeLiveServer.StartAsync();
+        await using var session = Create(server, new FakeTimeProvider());
+        var acks = 0;
+        session.InputAudioUnmuted += () => Interlocked.Increment(ref acks);
+        ILiveSession port = session;
+        var viaPort = 0;
+        port.InputAudioUnmuted += () => Interlocked.Increment(ref viaPort);
+        await session.ConnectAsync();
+
+        session.Mute().Should().BeTrue();
+        await EventuallyAsync(() => server.ReceivedSnapshot().Any(EventTypeIs("session.input_audio.mute")));
+        Volatile.Read(ref acks).Should().Be(0, "a mute is not acknowledged as unmuted");
+
+        session.Unmute().Should().BeTrue();
+
+        (await EventuallyAsync(() => Volatile.Read(ref acks) == 1)).Should().BeTrue();
+        Volatile.Read(ref viaPort).Should().Be(1, "the ILiveSession event is the one the presenter subscribes to");
+    }
+
+    [Fact]
     public async Task Close_returns_usage_and_reason()
     {
         await using var server = await FakeLiveServer.StartAsync();

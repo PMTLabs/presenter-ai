@@ -72,6 +72,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<string, string, string>? HostedToolActivity;
     public event Action<string, double?>? Closed;
     public event Action<string, long>? InputPositionMarked;
+    public event Action? InputAudioUnmuted;
 
     /// <summary>
     /// Every parsed upstream text event except <c>session.output_audio.delta</c> (audio is raised through
@@ -562,6 +563,9 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 break;
             case "session.delegation.created":
                 Delegation?.Invoke(message);
+                break;
+            case "session.input_audio.unmuted":
+                InputAudioUnmuted?.Invoke();
                 break;
             case "response.event":
                 HandleResponseEvent(message);

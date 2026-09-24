@@ -68,6 +68,19 @@ public sealed class StartupTests(ApiFactory factory) : IClassFixture<ApiFactory>
             .Which.Settings.FollowUpWaitMs.Should().Be(9000);
     }
 
+    [Fact]
+    public void Production_container_uses_the_disabled_ask_transcriber()
+    {
+        // Plan 011 (G1-5): the ask transcriber port is registered disabled and is the one the presenter holds.
+        var transcriber = factory.Services.GetRequiredService<PresenterAi.Application.Presenting.Asking.IAskTranscriber>();
+        var presenter = factory.Services.GetRequiredService<PresenterAi.Application.Presenting.IPresenter>();
+
+        transcriber.Should().BeOfType<PresenterAi.Application.Presenting.Asking.DisabledAskTranscriber>();
+        transcriber.Begin("ask_1").Should().BeNull();
+        presenter.Should().BeOfType<PresenterAi.Application.Presenting.Presenter>()
+            .Which.AskTranscriber.Should().BeSameAs(transcriber);
+    }
+
     [Theory]
     [InlineData("Presenter:MaxTalkMinutes", "4", "Presenter:MaxTalkMinutes")]
     [InlineData("Presenter:MaxTalkMinutes", "121", "Presenter:MaxTalkMinutes")]
