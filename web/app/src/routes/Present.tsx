@@ -356,8 +356,8 @@ export function Present() {
   const isReconnecting = upstreamStatus === "reconnecting";
   const endReasonText = formatEndReason(endReason);
   const LENGTH_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 90] as const;
-  const defaultMinutes =
-    (presentation?.meta as { maxMinutes?: number } | undefined)?.maxMinutes ?? 60;
+  const scriptMinutes =
+    (presentation?.meta as { maxMinutes?: number } | undefined)?.maxMinutes;
   return (
     <section
       className={[
@@ -472,13 +472,14 @@ export function Present() {
                     value={selectedLength ?? ""}
                     onChange={(e) => setSelectedLength(e.target.value ? Number(e.target.value) : undefined)}
                   >
-                    <option value="">Default ({defaultMinutes} min)</option>
+                    <option value="">{scriptMinutes ? `Default (script ${scriptMinutes} min)` : "Default (server limit)"}</option>
                     {LENGTH_OPTIONS.map((m) => (
                       <option key={m} value={m}>
                         {m} min
                       </option>
                     ))}
                   </select>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Server ceiling always applies.</span>
                 </label>
               )}
               <button

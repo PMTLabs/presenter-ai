@@ -435,7 +435,8 @@ describe("Present", () => {
     renderPresent();
     const select = await screen.findByRole("combobox", { name: "Length" });
     expect(select).toBeTruthy();
-    expect(screen.getByRole("option", { name: "Default (60 min)" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Default (server limit)" })).toBeTruthy();
+    expect(screen.getByText("Server ceiling always applies.")).toBeTruthy();
 
     fireEvent.change(select, { target: { value: "15" } });
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
@@ -451,7 +452,7 @@ describe("Present", () => {
     renderPresent();
     const select = await screen.findByRole("combobox", { name: "Length" });
     expect(select).toBeTruthy();
-    expect(screen.getByRole("option", { name: "Default (45 min)" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Default (script 45 min)" })).toBeTruthy();
   });
 
   it("hides length picker while presenting", async () => {

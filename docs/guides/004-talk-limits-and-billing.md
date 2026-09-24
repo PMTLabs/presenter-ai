@@ -10,7 +10,8 @@ turns off the server ceiling.
   any state.
 - **Effective cap:** `min(script maxMinutes or configured default, web override when lower, configured ceiling)`.
   For example, a script limit of 90 minutes, web selection of 45, and a 120-minute ceiling gives 45 minutes. A
-  script or override above the ceiling is clamped; the server logs a warning. A web override can only lower the cap.
+  script or override above the ceiling is clamped; the server logs a warning for each excessive value, even when
+  another limit is lower. A web override can only lower the cap.
 - **Script limit:** add a positive whole number to presentation frontmatter:
 
   ```yaml
@@ -24,8 +25,9 @@ turns off the server ceiling.
   `maxMinutes must be a positive whole number of minutes`. A value above the ceiling imports and is clamped when the
   talk starts.
 - **Web Length picker:** while idle, choose Default or 5, 10, 15, 20, 30, 45, 60, or 90 minutes. Default uses the
-  script limit when present, otherwise the server default. The choice is per talk and is not saved to the
-  presentation.
+  script limit when present, otherwise the server default. The picker says “Default (script N min)” when a script
+  limit exists and “Default (server limit)” otherwise; the configured server ceiling always applies, including to
+  script limits. The choice is per talk and is not saved to the presentation.
 - **Pause grace:** pausing starts a grace period (120 seconds by default). Resuming within it keeps the same upstream.
   After it expires, the server closes and disposes the upstream but leaves the talk paused. Resume reconnects (usually
   1–3 seconds), sends the current slide context again, and narrates that slide from its beginning because the new
