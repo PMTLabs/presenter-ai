@@ -171,6 +171,31 @@ public sealed class BridgeBillingGuardTests
     }
 
     [Fact]
+    public async Task Writer_cancellation_not_caused_by_the_connection_ends_with_writer_failed()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        var fail = 0;
+        factory.Services.GetRequiredService<PresenterBridge>().ConfigureOutboundForTest(500, () =>
+        {
+            if (Interlocked.CompareExchange(ref fail, 0, 1) == 1)
+                throw new OperationCanceledException("simulated foreign cancellation");
+            return Task.CompletedTask;
+        });
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        var presenter = factory.Services.GetRequiredService<IPresenter>();
+        PresenterClosed? closed = null;
+        presenter.Closed += value => closed = value;
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await BridgeTestSupport.ReceiveUntilAsync(socket, frame => frame["state"]?.GetValue<string>() == "presenting");
+        Interlocked.Exchange(ref fail, 1);
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"ping\"}");
+        await BridgeTestSupport.WaitForAsync(() => closed is not null);
+        closed!.EndReason.Should().Be(EndReasons.WriterFailed);
+        await BridgeTestSupport.WaitForAsync(() => fake.ConnectionCount == 0);
+    }
+
+    [Fact]
     public async Task Take_over_produces_takeover_with_provider_reason()
     {
         await using var fake = await FakeLiveServer.StartAsync();
@@ -258,6 +283,42 @@ public sealed class BridgeBillingGuardTests
         queued.StartGate.TrySetResult();
         await Task.Yield();
         fake.ConnectionCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Disconnect_during_a_start_stuck_in_its_loader_frees_the_slot_without_an_upstream()
+    {
+        await using var fake = await FakeLiveServer.StartAsync();
+        using var factory = BridgeTestSupport.Factory(fake);
+        var clock = factory.UseFakeClock();
+        var load = factory.Services.GetRequiredService<TestLoadGate>();
+        load.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var socket = await BridgeTestSupport.ConnectAsync(factory);
+        var presenter = (Presenter)factory.Services.GetRequiredService<IPresenter>();
+        var closed = new List<PresenterClosed>();
+        presenter.Closed += value => { lock (closed) closed.Add(value); };
+        await BridgeTestSupport.SendAsync(socket, "{\"type\":\"start\",\"presentation\":\"sample\"}");
+        await load.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var released = factory.Services.GetRequiredService<PresenterBridge>().CurrentReleasedForTestAsync();
+        await socket.CloseOutputAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,
+            "disconnect", CancellationToken.None);
+        // The real presenter queues End behind the stuck Start, so only bounded cleanup can free the slot. Every
+        // bound runs on the fake clock (90 s observation, 5 s End, 15 s observer, 5 s End); step it until released.
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
+        while (!released.IsCompleted && DateTimeOffset.UtcNow < deadline)
+        {
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await Task.Delay(10);
+        }
+        released.IsCompleted.Should().BeTrue("cleanup must release the slot after its bounds");
+        presenter.Snapshot().State.Should().Be("connecting", "the Start is still stuck in its loader");
+        using var next = await BridgeTestSupport.ConnectWhenFreeAsync(factory);
+
+        load.Gate.SetResult();
+        await BridgeTestSupport.WaitForAsync(() => presenter.Snapshot().State == "idle");
+        await presenter.WaitUntilIdleAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        fake.ConnectionCount.Should().Be(0);
+        lock (closed) closed.Should().ContainSingle().Which.EndReason.Should().NotBe(EndReasons.MaxLength);
     }
 
     [Fact]

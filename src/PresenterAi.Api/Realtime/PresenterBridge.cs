@@ -487,20 +487,31 @@ public sealed class PresenterBridge : IAsyncDisposable
         }
 
         _presenter.State += OnState;
+        // The whole End-to-idle observation is bounded, including EndAsync itself: its command waits behind whatever
+        // the presenter loop is running, e.g. a Start stuck in a loader that ignores cancellation. EndAsync cancels
+        // every queued or running Start before it enqueues (Presenter.EndWithReasonAsync → CancelConnect), so after
+        // the bound that Start can no longer create an upstream and releasing the slot is safe.
+        var ending = EndAndWaitForIdleAsync(endReason, idle.Task);
         try
         {
-            await _presenter.EndAsync(endReason, endReason == EndReasons.Takeover).ConfigureAwait(false);
-            if (_presenter.Snapshot().State != "idle")
-            {
-                await idle.Task.WaitAsync(EndToIdleBound).ConfigureAwait(false);
-            }
+            await ending.WaitAsync(EndToIdleBound, _clock).ConfigureAwait(false);
         }
         catch (TimeoutException)
         {
-            _logger.LogWarning("Presenter was not idle {Bound} after browser disconnect; releasing the slot anyway", EndToIdleBound);
+            _logger.LogWarning("Presenter was not idle {Bound} after ending ({EndReason}); releasing the slot anyway",
+                EndToIdleBound, endReason);
+            _ = ending.ContinueWith(
+                task => _logger.LogError(task.Exception, "Presenter end after browser disconnect failed"),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         }
         catch (Exception exception) { _logger.LogError(exception, "Presenter end after browser disconnect failed"); }
         finally { _presenter.State -= OnState; }
+    }
+
+    private async Task EndAndWaitForIdleAsync(string endReason, Task idle)
+    {
+        await _presenter.EndAsync(endReason, endReason == EndReasons.Takeover).ConfigureAwait(false);
+        if (_presenter.Snapshot().State != "idle") await idle.ConfigureAwait(false);
     }
 
     internal void ConfigureOutboundForTest(int capacity, Func<Task>? beforeSocketSendAsync)
@@ -669,11 +680,13 @@ public sealed class PresenterBridge : IAsyncDisposable
                     }
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
             {
             }
             catch (Exception exception)
             {
+                // Includes a cancellation that is not ours (the send hook or the socket): the writer stopped, so the
+                // connection must end rather than keep receiving with no one sending.
                 _logger.LogError(exception, "Browser WebSocket writer failed");
                 Abort(EndReasons.WriterFailed);
             }

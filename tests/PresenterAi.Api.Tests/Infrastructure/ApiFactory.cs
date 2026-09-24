@@ -135,6 +135,7 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<ITicketStore>();
             services.RemoveAll<IPresentationRepository>();
             services.AddScoped<IPresentationRepository, TestPresentationRepository>();
+            services.AddSingleton<TestLoadGate>();
             services.AddSingleton<TestTicketStore>();
             services.AddSingleton<ITicketStore>(serviceProvider => serviceProvider.GetRequiredService<TestTicketStore>());
             services.RemoveAll<ISessionRecorderFactory>();
@@ -226,13 +227,23 @@ internal sealed class TestQueuedPresenter : IPresenter
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
+/// <summary>When <see cref="Gate"/> is set, presentation loads wait on it and ignore cancellation.</summary>
+internal sealed class TestLoadGate
+{
+    public TaskCompletionSource? Gate { get; set; }
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+}
+
 internal sealed class TestPresentationRepository : IPresentationRepository
 {
     private readonly FilePresentationRepository _source;
+    private readonly TestLoadGate _loadGate;
 
-    public TestPresentationRepository(IOptions<ContentOptions> options, IWebHostEnvironment environment)
+    public TestPresentationRepository(IOptions<ContentOptions> options, IWebHostEnvironment environment,
+        TestLoadGate loadGate)
     {
         _source = new FilePresentationRepository(Path.GetFullPath(options.Value.RootDir, environment.ContentRootPath));
+        _loadGate = loadGate;
     }
 
     public async Task<PresentationListResult> ListAsync(
@@ -248,10 +259,15 @@ internal sealed class TestPresentationRepository : IPresentationRepository
         return new PresentationListResult(rows.Skip(skip).Take(pageSize).ToArray(), rows.Count);
     }
 
-    public Task<LoadedPresentation> LoadAsync(string ownerId, string id, CancellationToken cancellationToken = default)
+    public async Task<LoadedPresentation> LoadAsync(string ownerId, string id, CancellationToken cancellationToken = default)
     {
         EnsureOwner(ownerId);
-        return _source.ReadAsync(id, cancellationToken);
+        if (_loadGate.Gate is { } gate)
+        {
+            _loadGate.Entered.TrySetResult();
+            await gate.Task.ConfigureAwait(false); // deliberately ignores cancellation
+        }
+        return await _source.ReadAsync(id, cancellationToken).ConfigureAwait(false);
     }
 
     public Task<string?> FindIdBySlugAsync(string ownerId, string slug, CancellationToken cancellationToken = default)
