@@ -39,6 +39,11 @@ public interface IPresenter : IAsyncDisposable
     Task<bool> SetTrainerModeAsync(string ownerId, bool on, CancellationToken cancellationToken = default) =>
         Task.FromResult(false);
 
+    /// <summary>
+    /// The running talk's last <c>script_version</c> (plan 010), for a bridge that connects mid-talk; null when no talk runs.
+    /// </summary>
+    PresenterScriptVersion? CurrentScriptVersion() => null;
+
     /// <summary>"Train on this": queues an edit of <paramref name="slideIndex"/> from a transcript exchange.</summary>
     Task<bool> TrainOnTurnAsync(
         string ownerId,

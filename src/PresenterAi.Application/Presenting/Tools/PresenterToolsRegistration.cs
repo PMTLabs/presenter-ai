@@ -38,5 +38,10 @@ public static class PresenterToolsRegistration
         {
             registry.Register(new EndPresentationTool(presenter));
         }
+
+        if (!registry.Contains(ReviseScriptTool.ToolName))
+        {
+            registry.Register(new ReviseScriptTool());
+        }
     }
 }

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Threading.Channels;
 using PresenterAi.Application.Scripts;
+using PresenterAi.Application.Scripts.Revisions;
 using PresenterAi.Application.Tools;
 using PresenterAi.Application.Tools.External;
 using System.Text.Json.Nodes;
@@ -29,7 +30,7 @@ public sealed record LoadedPresentation(
 /// Ports the Node presenter state machine. All mutable state and all output events are owned by its single
 /// channel consumer; subscribers must not assume that notifications arrive on a caller's thread.
 /// </summary>
-public sealed class Presenter : IPresenter
+public sealed partial class Presenter : IPresenter
 {
     public const int NudgeMs = 15_000;
     public const int WrapUpFallbackMs = 15_000;
@@ -152,7 +153,8 @@ public sealed class Presenter : IPresenter
         ToolRegistry? toolRegistry = null,
         Func<int, bool>? hasDelegationModel = null,
         Func<string, CancellationToken, Task<SessionToolSet>>? loadSessionTools = null,
-        TimeSpan? startToolBudget = null)
+        TimeSpan? startToolBudget = null,
+        IScriptRevisionService? scriptRevisions = null)
     {
         _createSession = createSession ?? throw new ArgumentNullException(nameof(createSession));
         _loadPresentation = loadPresentation ?? throw new ArgumentNullException(nameof(loadPresentation));
@@ -162,6 +164,8 @@ public sealed class Presenter : IPresenter
         _hasDelegationModel = hasDelegationModel;
         _loadSessionTools = loadSessionTools;
         _startToolBudget = startToolBudget ?? TimeSpan.FromSeconds(4);
+        _scriptRevisions = scriptRevisions;
+        if (_scriptRevisions is not null) _scriptRevisions.Changed += OnScriptRevisionsChanged;
         PresenterToolsRegistration.RegisterAll(_toolRegistry, this);
         _snapshot = BuildSnapshot();
         _loop = Task.Run(RunLoopAsync);
@@ -309,6 +313,7 @@ public sealed class Presenter : IPresenter
         // candidate, so abandoning a loop wedged in a loader that ignores cancellation is safe.
         CancelConnect(EndReasons.Shutdown);
         CancelRun();
+        if (_scriptRevisions is not null) _scriptRevisions.Changed -= OnScriptRevisionsChanged;
 
         var stopping = StopLoopAsync();
         try
@@ -511,6 +516,9 @@ public sealed class Presenter : IPresenter
                     case BackgroundFailure failure:
                         LogMessage("error", $"{failure.Operation} failed: {failure.Message}");
                         break;
+                    case TrainingEvent training:
+                        OnTrainingEvent(training);
+                        break;
                     case Barrier barrier:
                         barrier.Completion.TrySetResult();
                         break;
@@ -642,6 +650,8 @@ public sealed class Presenter : IPresenter
                 UnmuteCommand => UnmuteCore(),
                 SendAudioCommand audio => SendAudioCore(audio.Pcm16),
                 EndCommand end => await EndAsyncCore(end.Resumable, end.EndReason).ConfigureAwait(false),
+                TrainerModeCommand trainer => SetTrainerModeCore(trainer.OwnerId, trainer.On),
+                TrainOnTurnCommand turn => TrainOnTurnCore(turn.OwnerId, turn.Question, turn.Answer, turn.SlideIndex),
                 _ => false
             };
             command.Completion.TrySetResult(result);
@@ -694,6 +704,7 @@ public sealed class Presenter : IPresenter
         _talkStartedAt = guard.StartedAt;
         _suspended = false;
         _endDiagnostic = null;
+        ResetTrainingForStart(ownerId);
         SetState(PresenterState.Connecting);
         // The ticket was cancellable since StartAsync enqueued it, so there is no check-then-publish gap: an End or
         // abort before, during or after acceptance is already visible here.
@@ -799,6 +810,7 @@ public sealed class Presenter : IPresenter
         try
         {
             _connectedAt = _timeProvider.GetUtcNow();
+            OnTrainingTalkConnected(ownerId, ticket);
             if (sessionInfo.DelegationMode == "client")
             {
                 if (_sessionTools is not null)
@@ -819,6 +831,7 @@ public sealed class Presenter : IPresenter
             SetState(PresenterState.Presenting);
             _guard?.StartPresenting();
             PresentSlide(startAt, interrupt: false);
+            OnTrainingSessionReady(reconnected: false);
             return new PresenterStartResult(true, id, connection.Label, sessionInfo.Id, sessionInfo.Model,
                 _connectedAt);
         }
@@ -923,10 +936,16 @@ public sealed class Presenter : IPresenter
         _nudgeCount = 0;
         _wrappingUp = false;
         StartSlideDiagnostics();
+        _replayOnResume = false;
         var slide = _presentation.Slides[index];
         LogMessage("info", $"slide {index + 1}/{SlideCount}{(slide.Title.Length > 0 ? $" — {slide.Title}" : string.Empty)}");
         Slide?.Invoke(index);
         PublishSnapshot();
+        if (NarrationHeld)
+        {
+            PresentHeldSlide(index);
+            return;
+        }
 
         if (!string.IsNullOrEmpty(slide.Notes))
         {
@@ -1081,6 +1100,7 @@ public sealed class Presenter : IPresenter
         }
 
         Transcript?.Invoke(new PresenterTranscript(transcript.Role, transcript.Delta, transcript.StartMs, transcript.EndMs));
+        RecordRecentTurn(transcript.Role, transcript.Delta);
         if (transcript.Role == "user" && !string.IsNullOrWhiteSpace(transcript.Delta)) RecordActivity();
         if (transcript.Role == "user" && _slideDiagnosticsActive)
         {
@@ -1551,6 +1571,13 @@ public sealed class Presenter : IPresenter
             resolution = _catalogue?.Resolve(call.Name, doc.RootElement);
         }
         catch (JsonException) { }
+        EditIntent? intent = null;
+        if (resolution?.Tool is { } resolved && IsReviseScript(resolved) &&
+            (intent = GateReviseScript(call, resolution.Arguments)) is null)
+        {
+            return;
+        }
+
         if (resolution?.Tool is { RequiresConfirmation: true } tool)
         {
             var key = tool.Name + ":" + Canonicalize(resolution.Arguments).ToJsonString();
@@ -1564,11 +1591,11 @@ public sealed class Presenter : IPresenter
                 CompleteImmediateCall(call, ToolResult.Failure(pending.Key == key ? "confirmation_pending" : "another action is waiting for confirmation") with { Outcome = pending.Key == key ? "confirmation_pending" : "error" });
                 return;
             }
-            _pendingTool = new PendingToolConfirmation(key, tool, resolution.Arguments, call.Session, _runGeneration);
+            _pendingTool = new PendingToolConfirmation(key, tool, resolution.Arguments, call.Session, _runGeneration, intent);
             _endQuestionVoiced = false;
             SetInteraction(Interaction.AwaitingConfirmQuestion);
             OpenPermit(null);
-            var question = $"Shall I use {tool.Title} on {tool.Source}?";
+            var question = tool.ConfirmationQuestion ?? $"Shall I use {tool.Title} on {tool.Source}?";
             CompleteImmediateCall(call, ToolResult.Failure(question) with { Outcome = "confirmation_required", Data = new JsonObject { ["status"] = "confirmation_required", ["question"] = question } });
             LogMessage("info", $"tool: {tool.Source}.{tool.Name} waiting for yes");
             ArmInteraction(8000);
@@ -1729,6 +1756,7 @@ public sealed class Presenter : IPresenter
         SetInteraction(Interaction.None);
         ClosePermit();
         if (reason is not null) LogMessage("info", $"tool: {pending.Tool.Source}.{pending.Tool.Name} {reason}");
+        if (reason is not null && pending.Intent is not null) OnScriptEditDeclined();
     }
 
     private void ApproveToolConfirmation()
@@ -1738,6 +1766,9 @@ public sealed class Presenter : IPresenter
         SetInteraction(Interaction.None);
         ClosePermit();
         var startedAt = _timeProvider.GetTimestamp();
+        // A script edit is enqueued here, on the loop, from the intent captured with the question; the tool run below
+        // only produces the acknowledgement.
+        if (pending.Intent is { } intent && !ApproveScriptEdit(intent)) return;
         var runToken = _runCts?.Token ?? CancellationToken.None;
         _approvedTools[pending.Key] = new ApprovedToolCall(startedAt, null);
         _ = Task.Run(async () =>
@@ -1755,8 +1786,12 @@ public sealed class Presenter : IPresenter
         if (ReferenceEquals(pending.Session, _session) && pending.Generation == _runGeneration)
         {
             _approvedTools[pending.Key] = new ApprovedToolCall(_timeProvider.GetTimestamp(), completed.Result);
-            _session?.AppendCommentary($"Tool {pending.Tool.Name} {(completed.Result.Ok ? "succeeded" : "failed")}. External data: {completed.Result.Message[..Math.Min(300, completed.Result.Message.Length)]}");
-            _session?.AppendThinking($"Untrusted external data: {completed.Result.ToJsonString()[..Math.Min(1200, completed.Result.ToJsonString().Length)]}");
+            // A script edit was acknowledged when it was enqueued; its tool result is not external data.
+            if (pending.Intent is null)
+            {
+                _session?.AppendCommentary($"Tool {pending.Tool.Name} {(completed.Result.Ok ? "succeeded" : "failed")}. External data: {completed.Result.Message[..Math.Min(300, completed.Result.Message.Length)]}");
+                _session?.AppendThinking($"Untrusted external data: {completed.Result.ToJsonString()[..Math.Min(1200, completed.Result.ToJsonString().Length)]}");
+            }
             LogMessage("info", $"tool: {pending.Tool.Source}.{pending.Tool.Name} {completed.Result.Outcome} {(int)_timeProvider.GetElapsedTime(completed.StartedAt).TotalMilliseconds} ms");
         }
         else
@@ -1799,7 +1834,8 @@ public sealed class Presenter : IPresenter
         });
     }
 
-    private sealed record PendingToolConfirmation(string Key, ITool Tool, JsonElement Arguments, ILiveSession Session, long Generation);
+    private sealed record PendingToolConfirmation(string Key, ITool Tool, JsonElement Arguments, ILiveSession Session, long Generation,
+        EditIntent? Intent = null);
     private sealed record ApprovedToolCall(long At, ToolResult? Result);
     private sealed record ApprovedToolCompleted(PendingToolConfirmation Pending, ToolResult Result, long StartedAt) : PresenterEvent;
     private sealed record HostedActivityReceived(ILiveSession Session, string DelegationId, string Type, string Status) : PresenterEvent;
@@ -1849,7 +1885,7 @@ public sealed class Presenter : IPresenter
 
     private void OnNudge()
     {
-        if (_state != PresenterState.Presenting || _heardOutput || _presentation is null)
+        if (_state != PresenterState.Presenting || _heardOutput || _presentation is null || NarrationHeld)
         {
             return;
         }
@@ -2047,6 +2083,7 @@ public sealed class Presenter : IPresenter
         _connectedAt = _timeProvider.GetUtcNow();
         _suspended = false;
         if (_muted) _session.Mute();
+        OnTrainingSessionReady(reconnected: true);
         LogMessage("info", $"resume: reconnected via {connection.Label}");
         UpstreamStatus?.Invoke(new PresenterUpstreamStatus("live"));
         PublishSnapshot();
@@ -2057,8 +2094,10 @@ public sealed class Presenter : IPresenter
     {
         var reconnected = _suspended;
         if (reconnected && !await ReconnectAsync().ConfigureAwait(false)) return false;
+        // A held slide is replayed by the reconcile that settles its edit; a due replay is performed by ResumeCore.
+        var presentedByTraining = NarrationHeld || _replayOnResume;
         var resumed = ResumeCore();
-        if (resumed && reconnected) PresentSlide(_slideIndex, interrupt: false);
+        if (resumed && reconnected && !presentedByTraining) PresentSlide(_slideIndex, interrupt: false);
         return resumed;
     }
 
@@ -2096,6 +2135,11 @@ public sealed class Presenter : IPresenter
         ClearQuestionHold();
         SetState(PresenterState.Presenting);
         _guard?.StartPresenting();
+        if (TrainingOverridesResume())
+        {
+            return true;
+        }
+
         if (_wrappingUp)
         {
             _session?.AppendInstructions(PromptBuilder.WrapUpInstruction(), "wrap-up-resume");
@@ -2167,6 +2211,7 @@ public sealed class Presenter : IPresenter
         var session = _session;
         SetState(PresenterState.Ending);
         Flush?.Invoke();
+        await CloseTrainingTalkAsync().ConfigureAwait(false);
         if (session is null)
         {
             var reason = endReason switch
@@ -2228,6 +2273,7 @@ public sealed class Presenter : IPresenter
         _runGeneration++;
         _toolRoundTracker.Clear();
         ReleaseSessionTools();
+        ResetTrainingOnClosed();
         var endedNormally = IsNormalClose(reason) && !_endResumable;
         if (_presentation is not null)
         {
@@ -2289,7 +2335,7 @@ public sealed class Presenter : IPresenter
     // model is told to resume the slide; the ordinary timers take over from there.
     private bool HoldBlocksProgress()
     {
-        if (_pendingTool is not null) return true;
+        if (_pendingTool is not null || NarrationHeld) return true;
         if (!_questionHoldOpen)
         {
             return false;
@@ -2307,6 +2353,7 @@ public sealed class Presenter : IPresenter
     {
         LogMessage("info", message);
         ClearQuestionHold();
+        if (NarrationHeld) return;
         if (_heardOutput)
         {
             _session?.AppendInstructions(
@@ -2322,6 +2369,8 @@ public sealed class Presenter : IPresenter
 
     private void ArmAfterVoice()
     {
+        // Late audio of a held slide must not schedule its next part or an advance.
+        if (NarrationHeld) return;
         if (PartsPending)
         {
             SetSilenceTimer(PartGapFor(AdvanceSilenceMs), partGap: true);

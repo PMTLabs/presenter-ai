@@ -93,4 +93,44 @@ public class VoiceCommandMatcherTests
     [InlineData("could you perhaps pause now")]
     [InlineData("slide 0")]
     public void Extra_words_are_not_commands(string question) => Assert.Null(VoiceCommandMatcher.Match(question));
+
+    [Theory]
+    [InlineData("có", VoiceCommandIntent.Yes)]
+    [InlineData("Có.", VoiceCommandIntent.Yes)]
+    [InlineData("vâng ạ", VoiceCommandIntent.Yes)]
+    [InlineData("ừ", VoiceCommandIntent.Yes)]
+    [InlineData("Đúng rồi!", VoiceCommandIntent.Yes)]
+    [InlineData("được", VoiceCommandIntent.Yes)]
+    [InlineData("không", VoiceCommandIntent.No)]
+    [InlineData("Không ạ.", VoiceCommandIntent.No)]
+    [InlineData("thôi", VoiceCommandIntent.No)]
+    [InlineData("chưa", VoiceCommandIntent.No)]
+    public void Vietnamese_yes_no_match_whole_utterance_only(string phrase, VoiceCommandIntent intent)
+    {
+        Assert.Equal(intent, VoiceCommandMatcher.Match(phrase)?.Intent);
+        // Decomposed diacritics (as some recognisers emit them) match the same way.
+        Assert.Equal(intent, VoiceCommandMatcher.Match(phrase.Normalize(System.Text.NormalizationForm.FormD))?.Intent);
+    }
+
+    [Theory]
+    [InlineData("Bạn có biết không?")]
+    [InlineData("Slide này có số liệu không?")]
+    [InlineData("không biết")]
+    [InlineData("có lẽ")]
+    public void Vietnamese_question_particles_inside_a_sentence_are_not_answers(string question) =>
+        Assert.Null(VoiceCommandMatcher.Match(question));
+
+    [Fact]
+    public void Every_lexicon_language_has_yes_and_no()
+    {
+        Assert.Contains(ConfirmationLexicon.Languages, language => language.Code == "en");
+        Assert.Contains(ConfirmationLexicon.Languages, language => language.Code == "vi");
+        foreach (var language in ConfirmationLexicon.Languages)
+        {
+            Assert.NotEmpty(language.Yes);
+            Assert.NotEmpty(language.No);
+            foreach (var phrase in language.Yes) Assert.Equal(VoiceCommandIntent.Yes, VoiceCommandMatcher.Match(phrase)?.Intent);
+            foreach (var phrase in language.No) Assert.Equal(VoiceCommandIntent.No, VoiceCommandMatcher.Match(phrase)?.Intent);
+        }
+    }
 }

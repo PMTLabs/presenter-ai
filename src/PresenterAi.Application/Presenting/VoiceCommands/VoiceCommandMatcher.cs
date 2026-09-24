@@ -20,10 +20,10 @@ public sealed record VoiceCommand(VoiceCommandIntent Intent, int? SlideNumber = 
 /// <summary>Matches complete, assembled utterances only; it does not decide whether a match is eligible.</summary>
 public static class VoiceCommandMatcher
 {
-    private static readonly HashSet<string> Fillers = new(StringComparer.Ordinal)
-    {
-        "please", "just", "now", "okay", "ok", "hey", "the", "a"
-    };
+    private static readonly HashSet<string> Fillers = new(
+        new[] { "please", "just", "now", "okay", "ok", "hey", "the", "a" }
+            .Concat(ConfirmationLexicon.Languages.SelectMany(language => language.Fillers)),
+        StringComparer.Ordinal);
 
     private static readonly string[] NumberWords =
     {
@@ -32,16 +32,18 @@ public static class VoiceCommandMatcher
         "eighteen", "nineteen", "twenty"
     };
 
-    private static readonly (VoiceCommandIntent Intent, string[] Phrases)[] Phrases =
+    private static readonly (VoiceCommandIntent Intent, string[] Phrases)[] Phrases = new (VoiceCommandIntent Intent, string[] Phrases)[]
     {
         (VoiceCommandIntent.Pause, ["stop", "pause", "wait", "hold on", "stop talking", "stop there", "pause there"]),
         (VoiceCommandIntent.Resume, ["continue", "carry on", "keep going", "go on", "go ahead", "resume", "keep continue"]),
         (VoiceCommandIntent.Next, ["next", "next slide", "go next", "move on"]),
         (VoiceCommandIntent.Previous, ["back", "go back", "previous", "previous slide", "last slide"]),
-        (VoiceCommandIntent.End, ["end", "end meeting", "end presentation", "end talk", "finish", "stop presentation"]),
-        (VoiceCommandIntent.Yes, ["yes", "yeah", "yep", "sure", "do it"]),
-        (VoiceCommandIntent.No, ["no", "nope", "not yet", "dont"])
-    };
+        (VoiceCommandIntent.End, ["end", "end meeting", "end presentation", "end talk", "finish", "stop presentation"])
+    }.Concat(ConfirmationLexicon.Languages.SelectMany(language => new[]
+    {
+        (VoiceCommandIntent.Yes, language.Yes.ToArray()),
+        (VoiceCommandIntent.No, language.No.ToArray())
+    })).ToArray();
 
     public static VoiceCommand? Match(string utterance)
     {
@@ -74,7 +76,8 @@ public static class VoiceCommandMatcher
     private static List<string> Normalize(string utterance)
     {
         var cleaned = new StringBuilder(utterance.Length);
-        foreach (var ch in utterance.ToLowerInvariant())
+        // ASR may deliver decomposed diacritics; compose them so "có" matches however it was encoded.
+        foreach (var ch in utterance.Normalize(NormalizationForm.FormC).ToLowerInvariant())
         {
             if (char.IsLetterOrDigit(ch)) cleaned.Append(ch);
             else if (ch != '\'') cleaned.Append(' '); // don't → dont; punctuation otherwise separates words
