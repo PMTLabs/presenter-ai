@@ -177,11 +177,11 @@ describe("AskControls", () => {
     expect(screen.getByRole("button", { name: "Ask done" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
 
-    // 3. answering
+    // 3. answering: Ask stays available for a follow-up question (owner decision, review r1)
     act(() => {
       usePresenterStore.setState({ ask: answering });
     });
-    expect(screen.queryByRole("button", { name: "Ask" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Ask" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Ask done" })).toBeNull();
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
 
@@ -204,6 +204,31 @@ describe("AskControls", () => {
     });
     expect(screen.getByRole("button", { name: "Ask" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Ask done" })).toBeNull();
+  });
+
+  it("shows Ask during answering for a follow-up question, and it sends ask_start", () => {
+    const onAsk = vi.fn();
+    const answering: PresenterAskState = {
+      state: "answering",
+      elapsedMs: 20000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "sent",
+    };
+    const { rerender } = render(<AskControls onAsk={onAsk} ask={answering} muted={false} />);
+
+    const askBtn = screen.getByRole("button", { name: "Ask" });
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+    fireEvent.click(askBtn);
+    expect(onAsk).toHaveBeenCalledOnce();
+
+    rerender(<AskControls onAsk={onAsk} ask={answering} muted={true} />);
+    expect(screen.getByRole("button", { name: "Ask" })).toHaveProperty("disabled", true);
+    expect(screen.getByText("Unmute to ask")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    expect(onAsk).toHaveBeenCalledOnce();
   });
 
   it("Ask is disabled with the unmute hint when muted", () => {

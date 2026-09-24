@@ -72,7 +72,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<string, string, string>? HostedToolActivity;
     public event Action<string, double?>? Closed;
     public event Action<string, long>? InputPositionMarked;
-    public event Action? InputAudioUnmuted;
+    public event Action<string?>? InputAudioUnmuted;
 
     /// <summary>
     /// Every parsed upstream text event except <c>session.output_audio.delta</c> (audio is raised through
@@ -230,9 +230,14 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         return SendCommand("session.input_audio.mute", NextEventId("mute"));
     }
 
-    public bool Unmute()
+    public bool Unmute() => Unmute(out _);
+
+    public bool Unmute(out string? eventId)
     {
-        return SendCommand("session.input_audio.unmute", NextEventId("unmute"));
+        var id = NextEventId("unmute");
+        var sent = SendCommand("session.input_audio.unmute", id);
+        eventId = sent ? id : null;
+        return sent;
     }
 
     public bool SendAudio(ReadOnlyMemory<byte> pcm16)
@@ -565,7 +570,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 Delegation?.Invoke(message);
                 break;
             case "session.input_audio.unmuted":
-                InputAudioUnmuted?.Invoke();
+                InputAudioUnmuted?.Invoke(GetString(message, "client_event_id"));
                 break;
             case "response.event":
                 HandleResponseEvent(message);

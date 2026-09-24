@@ -33,8 +33,14 @@ internal sealed class FakeSession : ILiveSession
 
     public int SendAudioCalls { get; private set; }
 
-    /// <summary>Plan 011 (P-18): when true, <see cref="Unmute"/> raises <see cref="InputAudioUnmuted"/> at once, as the upstream acks.</summary>
+    /// <summary>Plan 011 (P-18): when true, <see cref="Unmute()"/> raises <see cref="InputAudioUnmuted"/> at once, as the upstream acks.</summary>
     public bool AutoAckUnmute { get; set; } = true;
+
+    /// <summary>Review r1 #1: when false, acks carry no <c>client_event_id</c> (the presenter's FIFO fallback).</summary>
+    public bool EchoUnmuteId { get; set; } = true;
+
+    /// <summary>The event id of every accepted unmute, in order.</summary>
+    public List<string> UnmuteIds { get; } = [];
 
     public bool RefuseUnmute { get; set; }
 
@@ -66,11 +72,11 @@ internal sealed class FakeSession : ILiveSession
 
     public void RaiseHostedActivity(string delegationId, string status) => HostedToolActivity?.Invoke(delegationId, "web_search", status);
     public event Action<string, double?>? Closed;
-    public event Action? InputAudioUnmuted;
+    public event Action<string?>? InputAudioUnmuted;
     public event Action<string, long>? InputPositionMarked;
 
     /// <summary>Raises the upstream's <c>session.input_audio.unmuted</c> ack (P-18), e.g. late or after a timeout.</summary>
-    public void RaiseInputAudioUnmuted() => InputAudioUnmuted?.Invoke();
+    public void RaiseInputAudioUnmuted(string? clientEventId = null) => InputAudioUnmuted?.Invoke(clientEventId);
 
     /// <summary>Reports a mark queued by <see cref="MarkInputPosition"/> at <paramref name="sentMs"/> of the input clock.</summary>
     public void RaiseInputPositionMarked(string id, long sentMs) => InputPositionMarked?.Invoke(id, sentMs);
@@ -121,11 +127,16 @@ internal sealed class FakeSession : ILiveSession
         return true;
     }
 
-    public bool Unmute()
+    public bool Unmute() => Unmute(out _);
+
+    public bool Unmute(out string? eventId)
     {
+        eventId = null;
         if (RefuseUnmute) return false;
-        Sent.Add(("unmute", null, null, null));
-        if (AutoAckUnmute) InputAudioUnmuted?.Invoke();
+        eventId = $"unmute-{UnmuteIds.Count + 1}";
+        UnmuteIds.Add(eventId);
+        Sent.Add(("unmute", null, eventId, null));
+        if (AutoAckUnmute) InputAudioUnmuted?.Invoke(EchoUnmuteId ? eventId : null);
         return true;
     }
 

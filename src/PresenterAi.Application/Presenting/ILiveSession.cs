@@ -30,9 +30,11 @@ public interface ILiveSession : IAsyncDisposable
 
     /// <summary>
     /// Plan 011 (P-18): raised when the upstream acknowledges <see cref="Unmute"/> with
-    /// <c>session.input_audio.unmuted</c>. Implementations without an ack never raise it.
+    /// <c>session.input_audio.unmuted</c>, with the <c>client_event_id</c> it echoes (the event id
+    /// <see cref="Unmute(out string?)"/> sent), or null when the ack carries none. Implementations without an ack never
+    /// raise it.
     /// </summary>
-    event Action? InputAudioUnmuted
+    event Action<string?>? InputAudioUnmuted
     {
         add { }
         remove { }
@@ -61,6 +63,16 @@ public interface ILiveSession : IAsyncDisposable
     bool Mute();
 
     bool Unmute();
+
+    /// <summary>
+    /// Plan 011 (review r1 #1): <see cref="Unmute()"/> that also reports the event id it sent, so an ack can be
+    /// attributed to it; null when the implementation sends no id.
+    /// </summary>
+    bool Unmute(out string? eventId)
+    {
+        eventId = null;
+        return Unmute();
+    }
 
     bool SendAudio(ReadOnlyMemory<byte> pcm16);
 

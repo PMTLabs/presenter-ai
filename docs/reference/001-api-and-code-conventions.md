@@ -230,7 +230,9 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
 - Press-to-ask (plan 011; additive, any talk):
   - C→S `{"type":"ask_start"}` — stops narration and listens: the upstream is muted and the mic audio is buffered on
     the server. Answered by `ask_state` `listening`, or `off` with `refused_muted`, `refused_not_live` or
-    `unavailable`. A start while already listening re-sends `listening`.
+    `unavailable`. A start while already listening re-sends `listening`. A start while `answering` is a follow-up
+    question: the answer is flushed and the same ask listens again (`listening`, no `off`); after its answer the talk
+    resumes from the sentence the first ask interrupted.
   - C→S `{"type":"ask_done"}` — while listening: `answering` (reason `sent`) or `off` (`empty`, `send_failed`);
     otherwise ignored, with no frame.
   - C→S `{"type":"ask_extend"}` — while listening: restarts the 90 s quiet timer and answers `listening` with
@@ -251,8 +253,8 @@ Codes are never removed; a retired code stays in the catalogue marked deprecated
     `refused_not_live`. After `answering` they are `continued` (yes, Continue, follow-up timeout, or no answer within
     the budget), `waiting` ("no" at the check-in), `paused`, `navigated` and `ended`. `transcribing` is false while
     the transcriber port is disabled (the default).
-  - Frame sequence: `listening` (every 1 s) → [the upstream's unmute ack, at most 2 s, no frame] → `answering` (once)
-    → `off` (once). A cancellation while listening goes straight from `listening` to `off`. On End, `off` `ended`
+  - Frame sequence: `listening` (every 1 s) → [the upstream's unmute ack, at most 2 s, no frame] → `answering` (once
+    per queued question; a follow-up goes `answering` → `listening` → `answering`) → `off` (once). A cancellation while listening goes straight from `listening` to `off`. On End, `off` `ended`
     precedes `closed` while the socket is open. `ask_state` is not sent on connect.
   - While `answering`, `resume` is **Continue**: it skips the check-in and resumes the interrupted sentence.
 - Playback flush: server may send `{"type":"flush"}` to tell the browser to discard queued audio (for example, on
