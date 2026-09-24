@@ -38,6 +38,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# presenter-cli writes UTF-8 (Vietnamese text); decode it as UTF-8 when capturing its output into the logs.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $WavDir = [System.IO.Path]::GetFullPath($WavDir)
 if (-not $LogDir) {

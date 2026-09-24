@@ -204,6 +204,44 @@ public sealed class AskProbeScoringTests
     }
 
     [Theory]
+    [InlineData("en", "The Hanoi expansion cost 4 point 2 billion dong.")]
+    [InlineData("en", "It cost four point two billion dong.")]
+    [InlineData("en", "It cost 4.2 billion dong.")]
+    [InlineData("en", "It cost 4,2 billion dong.")]
+    [InlineData("vi", "Việc mở rộng tại Hà Nội tốn 4,2 tỷ đồng.")]
+    [InlineData("vi", "Tốn bốn phẩy hai tỷ đồng.")]
+    [InlineData("vi", "Tốn 4 phẩy 2 tỷ đồng.")]
+    public void Fact_b_accepts_every_spoken_form_of_4_point_2(string lang, string answer) =>
+        AskProbeCommand.Quote(answer, ProbeDeck.For(lang).FactB).Should().NotBeNull();
+
+    [Theory]
+    [InlineData("en", "It cost 42 billion dong.")]
+    [InlineData("en", "It cost four billion dong.")]
+    [InlineData("vi", "Tốn 42 tỷ đồng.")]
+    public void Fact_b_rejects_other_amounts(string lang, string answer) =>
+        AskProbeCommand.Quote(answer, ProbeDeck.For(lang).FactB).Should().BeNull();
+
+    [Fact]
+    public void Mark_timeout_scales_with_the_audio_queued_before_the_mark()
+    {
+        AskProbeCommand.MarkTimeoutMs(0).Should().Be(10_000);
+        AskProbeCommand.MarkTimeoutMs(25_200 * 48).Should().Be(22_000, "a 25.2 s burst is 1.2 MB");
+    }
+
+    [Fact]
+    public async Task Clock_diagnostic_reports_overrun_offset_and_wire_lag()
+    {
+        var events = Run2Events();
+        events.Add(new ProbeEvent(AskDone + 2_900, EventKind.User, " cost?", 25_000, 25_200));
+
+        var output = new StringWriter();
+        await ReportAsync(Run2(), Sorted(events), output);
+
+        output.ToString().Should().Contain("clock: overrun (max user start_ms before the reply - end mark) +560 ms; " +
+            "upstream-clock offset estimate (max user end_ms - (end mark - 1000 ms zero tail)) +1760 ms; wire lag 34 ms");
+    }
+
+    [Theory]
     [InlineData("DA-NANG office, HA NOI!", true)]
     [InlineData("what changed at da nang... and hanoi?", true)]
     [InlineData("Hanoi first, then Da Nang", false)]

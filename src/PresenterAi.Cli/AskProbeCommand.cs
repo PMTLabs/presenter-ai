@@ -181,7 +181,7 @@ internal static class AskProbeCommand
                 throw new InvalidOperationException($"burst not fully queued ({refused} of {chunks.Count} appends refused)");
             }
 
-            var marks = await observer.WaitForMarksAsync([startMark, endMark], 30_000, cancellationToken).ConfigureAwait(false);
+            var marks = await observer.WaitForMarksAsync([startMark, endMark], MarkTimeoutMs(chunks.Sum(chunk => chunk.Length)), cancellationToken).ConfigureAwait(false);
             var burstStartMs = marks[startMark].SentMs;
             var burstEndMs = marks[endMark].SentMs;
             var sendDurationMs = marks[endMark].At - askDoneAt;
@@ -255,8 +255,16 @@ internal static class AskProbeCommand
                 await SendPacedAsync(session, reply, cancellationToken).ConfigureAwait(false);
                 if (replyMark is not null)
                 {
-                    var replyMarks = await observer.WaitForMarksAsync([replyMark], 5_000, cancellationToken).ConfigureAwait(false);
-                    replyMarkMs = replyMarks[replyMark].SentMs;
+                    try
+                    {
+                        var replyMarks = await observer.WaitForMarksAsync([replyMark], MarkTimeoutMs(reply.Length), cancellationToken).ConfigureAwait(false);
+                        replyMarkMs = replyMarks[replyMark].SentMs;
+                        await output.WriteLineAsync($"reply: on the wire after {replyMarks[replyMark].At - replyAt} ms").ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        await output.WriteLineAsync($"reply: its input mark did not come back within {MarkTimeoutMs(reply.Length)} ms (upload lag); the reply position is unknown").ConfigureAwait(false);
+                    }
                 }
 
                 await Task.Delay(ReplyObserveMs, cancellationToken).ConfigureAwait(false);
@@ -471,6 +479,14 @@ internal static class AskProbeCommand
         await output.WriteLineAsync(
             $"ingested: max user end_ms before the reply {Ms(maxUserEndMs)} (end mark {run.BurstEndMs}{(maxUserEndMs is { } mu ? $", {mu - run.BurstEndMs:+#;-#;0} ms" : string.Empty)}); " +
             $"reply start_ms - end mark {(replyStartMs is { } r ? $"{r - run.BurstEndMs:+#;-#;0} ms" : "n/a (no reply delta)")}").ConfigureAwait(false);
+        // Finding (T1 suite): the question's start_ms can run past the end mark by about the upload lag, so the upstream
+        // clock is not purely our appended-sample count. Diagnostic only; (iv) and provenance are unchanged.
+        var maxUserStartMs = burstDeltas.Concat(outsideDeltas).Max(e => e.StartMs);
+        var voicedEndMs = run.BurstEndMs - run.Stats.TailMs;
+        await output.WriteLineAsync(
+            $"clock: overrun (max user start_ms before the reply - end mark) {(maxUserStartMs is { } ms0 ? $"{ms0 - run.BurstEndMs:+#;-#;0} ms" : "n/a")}; " +
+            $"upstream-clock offset estimate (max user end_ms - (end mark - {run.Stats.TailMs} ms zero tail)) {(maxUserEndMs is { } me ? $"{me - voicedEndMs:+#;-#;0} ms" : "n/a")}; " +
+            $"wire lag {run.EndMarkAt - run.LastQueuedAt} ms").ConfigureAwait(false);
         await output.WriteLineAsync(truncated
             ? $"truncation: TRUNCATED (the reply starts at {replyStartMs} on the input clock, under end mark - {TruncationSlackMs} = {run.BurstEndMs - TruncationSlackMs}; about {Seconds(run.BurstEndMs - replyStartMs!.Value)} of the burst was not ingested)"
             : $"truncation: {(replyStartMs is null ? "not checked (no reply delta)" : "none detected")}").ConfigureAwait(false);
@@ -917,6 +933,9 @@ internal static class AskProbeCommand
         return bytes;
     }
 
+    /// <summary>Upload can lag (7.7 s seen for a 25 s burst): 10 s plus 1 s per 100 KB of audio queued before the mark.</summary>
+    internal static int MarkTimeoutMs(long bytes) => 10_000 + (int)(bytes / 100_000 * 1_000);
+
     private static byte[] Concat(params byte[][] parts)
     {
         var result = new byte[parts.Sum(part => part.Length)];
@@ -1332,7 +1351,7 @@ internal sealed record ProbeDeck(
         ["Da Nang", "Danang"],
         ["Hanoi", "Ha Noi"],
         ["paperless", "paper-less", "paper free"],
-        ["4.2", "4,2", "four point two"]);
+        ["4.2", "4,2", "4 point 2", "four point two", "four point 2", "4 point two"]);
 
     public static readonly ProbeDeck Vietnamese = new(
         "Đánh giá chương trình",
@@ -1343,7 +1362,7 @@ internal sealed record ProbeDeck(
         ["Đà Nẵng", "Da Nang", "Danang"],
         ["Hà Nội", "Hanoi"],
         ["không giấy", "không dùng giấy", "điện tử", "paperless"],
-        ["4,2", "4.2", "bốn phẩy hai", "bốn tỷ hai", "4 tỷ 2", "bốn điểm hai", "4200 triệu", "4.200 triệu"]);
+        ["4,2", "4.2", "4 phẩy 2", "bốn phẩy hai", "bốn phẩy 2", "4 phẩy hai", "bốn tỷ hai", "4 tỷ 2", "bốn điểm hai", "4 điểm 2", "4200 triệu", "4.200 triệu"]);
 }
 
 /// <summary>Reads the PCM payload of a RIFF/WAVE file that is 24 kHz, mono, 16-bit PCM.</summary>

@@ -13,6 +13,8 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        // Vietnamese narration and transcripts must survive a redirected console (the suite logs).
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
         var configuration = BuildConfiguration(args);
         using var cancellation = new CancellationTokenSource();
         var cancelCount = 0;

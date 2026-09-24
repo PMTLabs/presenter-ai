@@ -34,7 +34,9 @@ internal static partial class AskProbeSummary
         long? LatencyMs,
         double? UsageSeconds,
         bool? Passed,
-        bool? Provenance);
+        bool? Provenance,
+        long? WireLagMs = null,
+        long? OverrunMs = null);
 
     internal sealed record Verdict(bool Passed, IReadOnlyList<string> Reasons, long? AnswerStartBudgetMs, double TotalUsageSeconds);
 
@@ -72,7 +74,9 @@ internal static partial class AskProbeSummary
         var result = ResultPattern().Match(log) is { Success: true } r ? r.Groups["verdict"].Value == "PASS" : (bool?)null;
         var provenance = ProvenancePattern().Match(log) is { Success: true } p ? p.Groups["verdict"].Value == "CONFIRMED" : (bool?)null;
         var truncated = log.Contains("truncation: TRUNCATED", StringComparison.Ordinal);
-        return new RunResult(name, kind, criteria, truncated, latency, usage, result, provenance);
+        var wire = WirePattern().Match(log) is { Success: true } w ? long.Parse(w.Groups["ms"].Value, CultureInfo.InvariantCulture) : (long?)null;
+        var overrun = OverrunPattern().Match(log) is { Success: true } o ? long.Parse(o.Groups["ms"].Value, CultureInfo.InvariantCulture) : (long?)null;
+        return new RunResult(name, kind, criteria, truncated, latency, usage, result, provenance, wire, overrun);
     }
 
     internal static Verdict Judge(IReadOnlyList<RunResult> runs)
@@ -135,8 +139,8 @@ internal static partial class AskProbeSummary
     {
         var lines = new List<string>
         {
-            $"{"run",-18} {"i",-4} {"ii",-4} {"iii",-4} {"iv",-4} {"v",-4} {"vi",-4} {"trunc",-6} {"prov",-5} {"latency",9} {"usage s",8}  result",
-            new string('-', 92)
+            $"{"run",-18} {"i",-4} {"ii",-4} {"iii",-4} {"iv",-4} {"v",-4} {"vi",-4} {"trunc",-6} {"prov",-5} {"latency",9} {"wire lag",9} {"overrun",8} {"usage s",8}  result",
+            new string('-', 111)
         };
         foreach (var run in runs)
         {
@@ -144,11 +148,12 @@ internal static partial class AskProbeSummary
             lines.Add(
                 $"{run.Name,-18} {Cell("i"),-4} {Cell("ii"),-4} {Cell("iii"),-4} {Cell("iv"),-4} {Cell("v"),-4} {Cell("vi"),-4} " +
                 $"{(run.Truncated ? "YES" : "no"),-6} {(run.Provenance is null ? "-" : run.Provenance.Value ? "ok" : "NO"),-5} " +
-                $"{(run.LatencyMs is { } ms ? $"{ms} ms" : "-"),9} {(run.UsageSeconds is { } s ? s.ToString("0.0", CultureInfo.InvariantCulture) : "-"),8}  " +
+                $"{(run.LatencyMs is { } ms ? $"{ms} ms" : "-"),9} {(run.WireLagMs is { } wl ? $"{wl} ms" : "-"),9} " +
+                $"{(run.OverrunMs is { } ov ? $"{ov:+#;-#;0}" : "-"),8} {(run.UsageSeconds is { } s ? s.ToString("0.0", CultureInfo.InvariantCulture) : "-"),8}  " +
                 $"{(run.Passed is null ? "-" : run.Passed.Value ? "PASS" : "FAIL")}");
         }
 
-        lines.Add(new string('-', 92));
+        lines.Add(new string('-', 111));
         lines.Add($"total usage: {verdict.TotalUsageSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s over {runs.Count} runs");
         lines.Add($"AnswerStartBudgetMs: {(verdict.AnswerStartBudgetMs is { } b ? b.ToString(CultureInfo.InvariantCulture) : "n/a (no answer latency)")}");
         lines.Add($"T1 verdict: {(verdict.Passed ? "PASS" : "FAIL")}{(verdict.Reasons.Count == 0 ? string.Empty : " — " + string.Join("; ", verdict.Reasons))}");
@@ -163,6 +168,12 @@ internal static partial class AskProbeSummary
 
     [GeneratedRegex(@"latency: Ask done -> first answer audio (?<ms>\d+) ms")]
     private static partial Regex LatencyPattern();
+
+    [GeneratedRegex(@"on the wire after (?<ms>\d+) ms")]
+    private static partial Regex WirePattern();
+
+    [GeneratedRegex(@"^clock: overrun \(max user start_ms before the reply - end mark\) (?<ms>[+-]?\d+) ms", RegexOptions.Multiline)]
+    private static partial Regex OverrunPattern();
 
     [GeneratedRegex(@"^usage\.seconds=(?<s>[0-9.]+)", RegexOptions.Multiline)]
     private static partial Regex UsagePattern();

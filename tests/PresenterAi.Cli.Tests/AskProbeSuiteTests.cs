@@ -56,6 +56,14 @@ public sealed class AskProbeSuiteTests
         run.UsageSeconds.Should().Be(59.1);
         run.Provenance.Should().BeFalse();
         run.Passed.Should().BeFalse();
+
+        var withClock = AskProbeSummary.Parse("05-cap24-1",
+            "burst: 126 chunks (25.2 s of audio) at pace 0 (unpaced burst); send duration 0 ms to queue, on the wire after 7662 ms; input clock [19760, 44920] ms\n" +
+            "clock: overrun (max user start_ms before the reply - end mark) +4280 ms; upstream-clock offset estimate (...) +5480 ms; wire lag 7662 ms\n" +
+            "reply: on the wire after 900 ms\n");
+        withClock.WireLagMs.Should().Be(7_662);
+        withClock.OverrunMs.Should().Be(4_280);
+        AskProbeSummary.Table([withClock], AskProbeSummary.Judge([withClock])).Should().Contain("7662 ms").And.Contain("+4280");
     }
 
     [Fact]
