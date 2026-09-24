@@ -80,6 +80,11 @@ public sealed class PresenterBridge : IAsyncDisposable
         presenter.UpstreamError += error => Current?.EnqueueText(new { type = "error", message = error.Message, code = error.Code });
         presenter.ScriptEdit += edit => Current?.EnqueueText(ScriptEditFrame(edit));
         presenter.ScriptVersion += version => Current?.EnqueueText(ScriptVersionFrame(version));
+        presenter.TrainerState += trainer =>
+        {
+            var current = Current;
+            current?.EnqueueText(TrainerStateFrame(trainer, current.UserId));
+        };
     }
 
     private static object ScriptEditFrame(PresenterScriptEdit edit) => new
@@ -101,6 +106,15 @@ public sealed class PresenterBridge : IAsyncDisposable
         trainerMode = version.TrainerMode,
         trainerAvailable = version.TrainerAvailable,
         voiceTraining = version.VoiceTraining
+    };
+
+    /// <summary>Trainer mode is reported as on only to the user whose talk (or idle request) it is.</summary>
+    private static object TrainerStateFrame(PresenterTrainerState trainer, string userId) => new
+    {
+        type = "trainer_state",
+        trainerMode = trainer.TrainerMode && string.Equals(trainer.OwnerId, userId, StringComparison.Ordinal),
+        trainerAvailable = trainer.TrainerAvailable,
+        voiceTraining = trainer.VoiceTraining
     };
 
     private ClientConnection? Current => Volatile.Read(ref _client);
@@ -165,6 +179,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         try
         {
             connection.EnqueueText(StateFrame(_presenter.Snapshot()));
+            connection.EnqueueText(TrainerStateFrame(_presenter.CurrentTrainerState(), connection.UserId));
             if (_presenter.CurrentScriptVersion() is { } scriptVersion)
                 connection.EnqueueText(ScriptVersionFrame(scriptVersion));
             connection.StartHeartbeat();

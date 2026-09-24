@@ -7,6 +7,7 @@ import { SignIn } from './routes/SignIn';
 import { AuthCallback } from './routes/AuthCallback';
 import { Tools } from './routes/Tools';
 import { ToolsOAuthCallback } from './routes/ToolsOAuthCallback';
+import { Toaster } from './components/Toaster';
 
 function Header() {
   const user = useAuthStore((state) => state.user);
@@ -65,6 +66,7 @@ export function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
+      <Toaster />
     </div>
   );
 }

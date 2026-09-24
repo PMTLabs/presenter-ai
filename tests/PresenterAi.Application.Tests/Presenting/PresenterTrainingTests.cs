@@ -821,6 +821,70 @@ public sealed class PresenterTrainingTests
         Assert.Equal((false, false), (h.Versions[^1].TrainerMode, h.Versions[^1].TrainerAvailable));
     }
 
+    // ---- Every Trainer mode change reaches the client (the idle toggle used to be stored silently) ---------------------
+
+    [Fact]
+    public async Task Idle_toggle_is_published_and_the_reset_at_end_is_published()
+    {
+        await using var h = new Harness();
+        Assert.Equal(new PresenterTrainerState(null, false, true, true), h.Presenter.CurrentTrainerState());
+
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, true));
+        Assert.Equal(new PresenterTrainerState(Owner, true, true, true), h.TrainerStates[^1]);
+        Assert.Equal(h.TrainerStates[^1], h.Presenter.CurrentTrainerState());
+
+        await h.Start();
+        Assert.True(h.Versions[^1].TrainerMode);
+        Assert.Equal(new PresenterTrainerState(Owner, true, true, true), h.Presenter.CurrentTrainerState());
+
+        Assert.True(await h.Presenter.EndAsync());
+        await h.Settle();
+        Assert.Equal(new PresenterTrainerState(null, false, true, true), h.TrainerStates[^1]);
+        Assert.Equal(h.TrainerStates[^1], h.Presenter.CurrentTrainerState());
+
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, true));
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, false));
+        Assert.Equal(new PresenterTrainerState(Owner, false, true, true), h.TrainerStates[^1]);
+    }
+
+    [Fact]
+    public async Task Running_toggle_and_refusal_are_published()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        Assert.Equal(new PresenterTrainerState(Owner, true, true, true), h.TrainerStates[^1]);
+
+        var count = h.TrainerStates.Count;
+        Assert.False(await h.Presenter.SetTrainerModeAsync("intruder", false));
+        Assert.Equal(count + 1, h.TrainerStates.Count);
+        Assert.Equal(new PresenterTrainerState(Owner, true, true, true), h.TrainerStates[^1]);
+
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, false));
+        Assert.Equal(new PresenterTrainerState(Owner, false, true, true), h.TrainerStates[^1]);
+    }
+
+    [Fact]
+    public async Task Idle_request_without_a_reasoning_route_is_published_as_off()
+    {
+        await using var h = new Harness();
+        h.Service.IsAvailable = false;
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, true));
+        Assert.Equal(new PresenterTrainerState(Owner, false, false, true), h.TrainerStates[^1]);
+    }
+
+    [Fact]
+    public async Task Upstream_loss_publishes_trainer_mode_off()
+    {
+        await using var h = new Harness(factory: index => new FakeSession { FailConnect = index > 0 });
+        await h.Start();
+        await h.TrainerOn();
+        h.S.Drop();
+        await Eventually(() => h.Presenter.Snapshot().State == "idle");
+        await h.Settle();
+        Assert.Equal(new PresenterTrainerState(null, false, true, true), h.TrainerStates[^1]);
+    }
+
     // ---- A3: voice availability follows the connected session -------------------------------------------------------
 
     [Fact]
@@ -912,6 +976,7 @@ public sealed class PresenterTrainingTests
             Presenter.Slide += index => { SlideEvents.Add(index); Mark($"slide:{index}"); };
             Presenter.ScriptEdit += edit => { Edits.Add(edit); Mark($"edit:{edit.Id}:{edit.Status}"); };
             Presenter.ScriptVersion += version => { Versions.Add(version); Mark($"version:{version.Version}"); };
+            Presenter.TrainerState += state => TrainerStates.Add(state);
         }
 
         public FakeTimeProvider Clock { get; } = new();
@@ -922,6 +987,7 @@ public sealed class PresenterTrainingTests
         public List<PresenterClosed> Closed { get; } = [];
         public List<PresenterScriptEdit> Edits { get; } = [];
         public List<PresenterScriptVersion> Versions { get; } = [];
+        public List<PresenterTrainerState> TrainerStates { get; } = [];
         public List<int> SlideEvents { get; } = [];
         public List<(string Kind, int SentCount)> Timeline { get; } = [];
         public int Flushes { get; private set; }

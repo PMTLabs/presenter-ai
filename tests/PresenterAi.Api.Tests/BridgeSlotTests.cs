@@ -46,6 +46,9 @@ public sealed class BridgeSlotTests
         await using var fake = await FakeLiveServer.StartAsync();
         using var factory = BridgeTestSupport.Factory(fake);
         using var first = await BridgeTestSupport.ConnectAsync(factory);
+        // Let the connect handshake finish enqueueing (trainer_state follows state) before the writer is stopped; a
+        // handshake frame enqueued after the stop would be a genuine backpressure failure, not the modelled fault.
+        _ = await BridgeTestSupport.ReceiveUntilAsync(first, frame => frame["type"]?.GetValue<string>() == "trainer_state");
         // This test seam models a writer failure while the owner's receive loop remains alive. Before the CAS fix,
         // writer completion released the slot and a second socket would incorrectly receive state.
         await factory.Services.GetRequiredService<PresenterBridge>().StopCurrentWriterForTestAsync();

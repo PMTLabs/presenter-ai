@@ -29,6 +29,8 @@ export type BridgeEventMap = {
   upstream: [BridgeMessage];
   script_edit: [BridgeMessage];
   script_version: [BridgeMessage];
+  /** Server-authoritative Trainer mode, in or out of a talk (on connect, idle requests, refusals, talk end). */
+  trainer_state: [BridgeMessage];
 };
 export type BridgeMessage = { type: string; [key: string]: unknown };
 type Handler<T extends keyof BridgeEventMap> = (
@@ -275,6 +277,9 @@ export class BridgeClient {
         break;
       case "script_version":
         this.emit("script_version", message);
+        break;
+      case "trainer_state":
+        this.emit("trainer_state", message);
         break;
     }
   }

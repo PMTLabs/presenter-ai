@@ -40,6 +40,26 @@ describe("presenterStore", () => {
     expect(usePresenterStore.getState().limitWarning).toBeNull();
   });
 
+  it("trainer_state sets Trainer mode from the server in and out of a talk", () => {
+    const store = usePresenterStore.getState();
+    store.message({ type: "trainer_state", trainerMode: true, trainerAvailable: true, voiceTraining: true });
+    expect(usePresenterStore.getState()).toMatchObject({ trainerMode: true, trainerAvailable: true, voiceTraining: true });
+
+    // A talk on a client-mode connection, then End: the reset clears both the switch and the voice notice.
+    store.message({
+      type: "script_version",
+      presentationId: "demo",
+      version: 3,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: false,
+    });
+    expect(usePresenterStore.getState().voiceTraining).toBe(false);
+    store.message({ type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    expect(usePresenterStore.getState()).toMatchObject({ trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    expect(usePresenterStore.getState().scriptVersion).toBe(3);
+  });
+
   it("handles upstream status frames", () => {
     const store = usePresenterStore.getState();
     store.message({ type: "upstream", status: "suspended" });

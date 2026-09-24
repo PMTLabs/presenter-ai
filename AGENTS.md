@@ -80,7 +80,7 @@ the default socket is found without it.
   `busy` is `error{code:"busy",canTakeOver}` + close 1013; auth may request `takeOver:true`, which closes the
   same user's holder with `taken_over` + 4409; backpressure closes with 1011. The `/ws` frames and `/api` trio
   are frozen until the admin plan except for additive changes per plan 010 (`trainer_mode`, `train_turn`,
-  `script_edit`, `script_version`; text commands ≤ 16 KiB, auth ≤ 4 KiB) — see
+  `script_edit`, `script_version`, `trainer_state`; text commands ≤ 16 KiB, auth ≤ 4 KiB) — see
   `docs/reference/001-api-and-code-conventions.md` §8 and §10. The presenter may emit `{"type":"flush"}` to discard queued playback audio; clients may ignore unknown frames.
 
 ## Conventions

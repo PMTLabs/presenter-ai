@@ -413,6 +413,17 @@ describe("BridgeClient", () => {
     expect(versions).toEqual([versionMessage]);
   });
 
+  it("emits trainer_state", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    const states: BridgeMessage[] = [];
+    c.on("trainer_state", (message) => states.push(message));
+    const message = { type: "trainer_state", trainerMode: true, trainerAvailable: true, voiceTraining: true };
+    ws.fire("message", { data: JSON.stringify(message) });
+    expect(states).toEqual([message]);
+  });
+
   it("emits limit_warning and upstream", () => {
     const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
     c.connect();

@@ -36,12 +36,18 @@ public sealed partial class Presenter
     private ITimer? _editKeepAlive;
     private long _editKeepAliveGeneration;
     private PresenterScriptVersion? _scriptVersionSnapshot;
+    private PresenterTrainerState? _trainerStateSnapshot;
 
     public event Action<PresenterScriptEdit>? ScriptEdit;
     public event Action<PresenterScriptVersion>? ScriptVersion;
+    public event Action<PresenterTrainerState>? TrainerState;
 
     /// <summary>The last <c>script_version</c> of the running talk (null when no talk runs); for a bridge that connects mid-talk.</summary>
     public PresenterScriptVersion? CurrentScriptVersion() => Volatile.Read(ref _scriptVersionSnapshot);
+
+    /// <summary>The last published Trainer mode (the talk's, or the idle request for the next Start); for a bridge that connects.</summary>
+    public PresenterTrainerState CurrentTrainerState() =>
+        Volatile.Read(ref _trainerStateSnapshot) ?? new PresenterTrainerState(null, false, TrainerAvailable, true);
 
     public Task<bool> SetTrainerModeAsync(string ownerId, bool on, CancellationToken cancellationToken = default)
     {
@@ -201,6 +207,7 @@ public sealed partial class Presenter
 
         _talkId = null;
         _trainerMode = false;
+        PublishTrainerState();
         _localEdits.Clear();
         _recentTurns.Clear();
         _replayOnResume = false;
@@ -218,12 +225,15 @@ public sealed partial class Presenter
             // Stored with the owner id; honoured only by a Start of that owner, and the next accepted Start consumes it.
             _idleTrainerToggle = (ownerId, on);
             LogMessage("info", $"trainer: {(on ? "on" : "off")} requested for the next talk");
+            PublishTrainerState(always: true);
             return true;
         }
 
         if (!TalkRunning || _talkId is null || ownerId != _ownerId)
         {
             LogMessage("warn", "trainer: toggle refused (not the owner of the running talk)");
+            // The client shows only server state: re-announce it so the refused switch settles back.
+            PublishTrainerState(always: true);
             return false;
         }
 
@@ -568,6 +578,26 @@ public sealed partial class Presenter
         var version = new PresenterScriptVersion(_presentation.Id, _scriptVersion, _trainerMode, TrainerAvailable, VoiceTraining);
         Volatile.Write(ref _scriptVersionSnapshot, version);
         ScriptVersion?.Invoke(version);
+        PublishTrainerState();
+    }
+
+    /// <summary>
+    /// Publishes the server-authoritative Trainer mode (<c>trainer_state</c>): the running talk's mode, else the idle
+    /// request that the next Start of its owner will honour. Every change of <see cref="_trainerMode"/>, of
+    /// <see cref="_idleTrainerToggle"/> or of voice availability reaches the client through here, so the switch never
+    /// shows a value the server does not hold. <paramref name="always"/> re-announces an unchanged state (a refusal).
+    /// </summary>
+    private void PublishTrainerState(bool always = false)
+    {
+        var available = TrainerAvailable;
+        var state = _talkId is not null
+            ? new PresenterTrainerState(_ownerId, _trainerMode, available, VoiceTraining)
+            : _idleTrainerToggle is { } idle
+                ? new PresenterTrainerState(idle.OwnerId, idle.On && available, available, true)
+                : new PresenterTrainerState(null, false, available, true);
+        if (!always && state == CurrentTrainerState()) return;
+        Volatile.Write(ref _trainerStateSnapshot, state);
+        TrainerState?.Invoke(state);
     }
 
     private bool HasUnsettledEdits() => _localEdits.Values.Any(edit => !edit.Settled);
