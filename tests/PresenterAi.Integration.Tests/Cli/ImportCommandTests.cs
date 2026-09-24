@@ -45,6 +45,93 @@ public sealed class ImportCommandTests(PostgresFixture postgres)
     }
 
     [Fact]
+    public async Task Import_then_reimport_creates_revisions_1_and_2()
+    {
+        var owner = await SeedUserAsync();
+        var root = Path.Combine(Path.GetTempPath(), "presenter-ai-import-revisions", Guid.NewGuid().ToString("N"));
+        var presentations = Path.Combine(root, "presentations");
+        Directory.CreateDirectory(presentations);
+        var sample = await File.ReadAllTextAsync(Path.Combine(FindRepositoryRoot(), "presentations", "sample.md"));
+        var file = Path.Combine(presentations, "revised.md");
+        await File.WriteAllTextAsync(file, sample.Replace("context: presentations/sample-context.md\n", string.Empty, StringComparison.Ordinal));
+        try
+        {
+            (await ImportAsync(owner, file, root)).Exit.Should().Be(0);
+            var edited = sample
+                .Replace("context: presentations/sample-context.md\n", string.Empty, StringComparison.Ordinal)
+                .Replace("Hello everyone, and welcome.", "Hello everyone, and welcome back.", StringComparison.Ordinal);
+            await File.WriteAllTextAsync(file, edited);
+            (await ImportAsync(owner, file, root)).Exit.Should().Be(0);
+
+            await using var context = CreateContext();
+            var presentation = await context.Presentations.AsNoTracking().SingleAsync(row => row.OwnerId == owner.Id);
+            presentation.Version.Should().Be(2);
+            presentation.Script.Should().Be(edited);
+            var revisions = await context.PresentationRevisions.AsNoTracking()
+                .Where(row => row.PresentationId == presentation.Id)
+                .OrderBy(row => row.Number)
+                .ToArrayAsync();
+            revisions.Select(row => row.Number).Should().Equal(1, 2);
+            revisions.Should().OnlyContain(row => row.Source == "import"
+                && row.Summary == "Imported from revised.md"
+                && row.CreatedBy == owner.Id);
+            revisions.Select(row => row.BaseVersion).Should().Equal(null, 1);
+            revisions[0].Script.Should().NotBe(edited);
+            revisions[1].Script.Should().Be(edited);
+            revisions[0].ChangedSlides.Should().Equal(0, 1, 2);
+            revisions[1].ChangedSlides.Should().Equal(0);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Import_racing_a_revision_of_the_same_number_fails_changed_concurrently_and_writes_nothing()
+    {
+        var owner = await SeedUserAsync();
+        var root = FindRepositoryRoot();
+        var file = Path.Combine(root, "presentations", "sample.md");
+        (await ImportAsync(owner, file, root)).Exit.Should().Be(0);
+        await using (var context = CreateContext())
+        {
+            // Another writer (a live edit) has already written revision 2 while this import still read version 1.
+            var presentation = await context.Presentations.SingleAsync(row => row.OwnerId == owner.Id);
+            context.PresentationRevisions.Add(new PresentationRevision
+            {
+                PresentationId = presentation.Id,
+                Number = 2,
+                Script = presentation.Script,
+                Source = "live_edit",
+                Summary = "concurrent",
+                BaseVersion = 1,
+                CreatedAt = DateTimeOffset.UtcNow
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var (exit, output) = await ImportAsync(owner, file, root);
+
+        exit.Should().Be(1);
+        output.Should().Contain("sample.md: failed: changed concurrently").And.Contain("1 failed");
+        await using var check = CreateContext();
+        var row = await check.Presentations.AsNoTracking().SingleAsync(item => item.OwnerId == owner.Id);
+        row.Version.Should().Be(1);
+        (await check.PresentationRevisions.Where(item => item.PresentationId == row.Id).Select(item => item.Source).ToArrayAsync())
+            .Should().BeEquivalentTo(["import", "live_edit"]);
+    }
+
+    private async Task<(int Exit, string Output)> ImportAsync(User owner, string file, string root)
+    {
+        var output = new StringWriter();
+        var exit = await PresenterAi.Cli.Program.RunAsync(
+            ["import", file, "--owner", owner.Email, "--content-root", root],
+            Configuration(), output, new StringWriter(), CancellationToken.None);
+        return (exit, output.ToString());
+    }
+
+    [Fact]
     public async Task An_unknown_owner_exits_non_zero_and_writes_no_rows()
     {
         // An existing account makes the oracle catch a mutation that resolves an unknown email to another user.

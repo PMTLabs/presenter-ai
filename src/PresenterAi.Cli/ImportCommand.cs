@@ -2,7 +2,10 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Npgsql;
 using PresenterAi.Application.Content;
+using PresenterAi.Application.Scripts;
+using PresenterAi.Application.Scripts.Revisions;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Persistence.Entities;
 
@@ -77,6 +80,7 @@ public static class ImportCommand
                     cancellationToken).ConfigureAwait(false);
                 var now = timeProvider.GetUtcNow();
                 var isNew = presentation is null;
+                var previousScript = presentation?.Script;
                 presentation ??= new Presentation
                 {
                     OwnerId = owner.Id,
@@ -102,7 +106,33 @@ public static class ImportCommand
                     presentation.Version++;
                 }
 
-                await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                // Plan 010: every import is a revision, written in the same SaveChanges (one transaction). A live edit
+                // or another import that committed this number first makes the primary key clash.
+                db.PresentationRevisions.Add(new PresentationRevision
+                {
+                    PresentationId = presentation.Id,
+                    Number = presentation.Version,
+                    Script = imported.Markdown,
+                    Source = RevisionSources.Import,
+                    Summary = Truncate($"Imported from {Path.GetFileName(path)}", 300),
+                    BaseVersion = isNew ? null : presentation.Version - 1,
+                    ChangedSlides = ChangedSlides(previousScript, imported.Presentation.Slides, slug),
+                    CreatedAt = now,
+                    CreatedBy = owner.Id
+                });
+
+                try
+                {
+                    await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (DbUpdateException exception) when (IsRevisionClash(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    await output.WriteLineAsync($"{path}: failed: changed concurrently").ConfigureAwait(false);
+                    failed++;
+                    continue;
+                }
+
                 await output.WriteLineAsync($"{path}: {(isNew ? "created" : "updated")}").ConfigureAwait(false);
                 if (isNew) created++; else updated++;
             }
@@ -120,7 +150,42 @@ public static class ImportCommand
         return failed == 0 ? 0 : 1;
     }
 
-    private static JsonDocument CreateFrontmatter(PresenterAi.Application.Scripts.PresentationMeta meta) =>
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
+
+    private static bool IsRevisionClash(DbUpdateException exception) =>
+        exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: "PK_presentation_revisions"
+        };
+
+    /// <summary>0-based indexes whose narration differs from the previous import (every slide for a new one).</summary>
+    private static int[] ChangedSlides(
+        string? previousScript,
+        IReadOnlyList<Slide> slides,
+        string slug)
+    {
+        IReadOnlyList<Slide> previous = [];
+        if (previousScript is not null)
+        {
+            try
+            {
+                previous = ScriptParser.Parse(previousScript, slug).Slides;
+            }
+            catch (PresenterAi.Domain.Errors.ScriptParseException)
+            {
+                // A stored script that no longer parses counts as entirely changed.
+            }
+        }
+
+        return Enumerable.Range(0, slides.Count)
+            .Where(index => index >= previous.Count
+                || !string.Equals(previous[index].Narration, slides[index].Narration, StringComparison.Ordinal))
+            .ToArray();
+    }
+
+    private static JsonDocument CreateFrontmatter(PresentationMeta meta) =>
         JsonSerializer.SerializeToDocument(new
         {
             id = meta.Id,
