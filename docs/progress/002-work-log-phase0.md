@@ -680,3 +680,25 @@ and Cli pass with no container. `secrets-guard: clean`.
     upstream ingested about real time and discarded the rest, so the question was never heard.
 - **T1 result: FAIL** (near-cap; (iv) oracle). Plan 011 status set to "Blocked at T1"; returned to the owner.
   Total probe usage ≈ 465 s.
+
+### T1 cap sweep (2026-09-24, `285c29f`: `--pace`, timestamp-based (iv), truncation detector)
+
+| Kept speech | Pace | Ingested | (iv) | (v) | Answer audio after Ask done | usage s |
+|---|---|---|---|---|---|---|
+| 16.4 s | burst | all | P | P | 5528 ms | 73.6 |
+| 16.4 s | 2× | all | P | P | 8886 ms (185 ms after the send) | 68.2 |
+| 36.5 s | burst | ~31.6 s | F (part 2 lost) | F | 32333 ms | 76.8 |
+| 36.5 s | 2× | all | P | P, but (iii) F: 1.8 s spoken during the send | 18849 ms | 67.6 |
+| 63.6 s | burst | ~29 s, TRUNCATED | F | F ("I'll stay quiet.") | 31966 ms | 57.4 |
+| 63.6 s | 2× | all | P | cut by the probe's own reply (artifact) | 32486 ms | 86.4 |
+| 97.6 s | burst | ~31 s, TRUNCATED | F | F ("Okay, go on.") | 30644 ms | 56.0 |
+| 97.6 s | 2× | all | 1 delta just past the range | cut by the reply (artifact) | 49779 ms | 120.0 |
+| 97.6 s | 1.5× | all | P | cut by the reply (artifact) | 65920 ms | 119.6 |
+
+- An unpaced burst is ingested only up to about 30 s of audio (29–33 s across 5 runs); the rest is dropped
+  silently. Pacing avoids the drop but delays the answer by kept/pace, and at 36.5 s it let the model answer
+  during the send.
+- **Owner decision:** cap an ask at **25 s of kept speech**, sent unpaced; at the cap the ask finishes on its own
+  with a toast, and the UI shows the remaining speech time. Also: (iv) is redefined by `start_ms` inside the burst
+  range, and the probe audio is generated with `gpt-audio-1.5` TTS through an automated suite (en + vi), which
+  confirms the cap. Sweep usage ≈ 726 s.
