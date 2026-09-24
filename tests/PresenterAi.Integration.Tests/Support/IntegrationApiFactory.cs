@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 using PresenterAi.Infrastructure.Tools.Mcp;
@@ -27,6 +28,26 @@ public sealed class IntegrationApiFactory(
     public bool AllowLoopbackTools { get; set; }
     public string? ToolCredentialKey { get; set; }
     public string? ToolRedirectUri { get; set; }
+
+    /// <summary>Plan 010 T11: extra settings applied after the defaults (e.g. <c>Upstream:DelegationModel</c>).</summary>
+    public Dictionary<string, string?> Settings { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Plan 010 T11: test-only service replacements (the stub Responses handler, the commit gate).</summary>
+    public Action<IServiceCollection>? TestServices { get; set; }
+
+    /// <summary>Builds the container with <c>ValidateScopes</c> and <c>ValidateOnBuild</c> whatever the environment.</summary>
+    public bool ValidateContainer { get; set; }
+
+    protected override IHost CreateHost(IHostBuilder builder)
+    {
+        if (ValidateContainer)
+            builder.UseDefaultServiceProvider(options =>
+            {
+                options.ValidateScopes = true;
+                options.ValidateOnBuild = true;
+            });
+        return base.CreateHost(builder);
+    }
 
     public HttpClient CreateAuthenticatedClient(string userId)
     {
@@ -106,6 +127,8 @@ public sealed class IntegrationApiFactory(
         builder.UseSetting("Cors:AllowedOrigins:0", "https://app.example.test");
         builder.UseSetting("Content:RootDir", FindRepositoryRoot());
         builder.UseSetting("Content:WebRoot", Path.Combine(Path.GetTempPath(), "presenter-ai-no-web-root"));
+        foreach (var (key, value) in Settings) builder.UseSetting(key, value);
+        if (TestServices is not null) builder.ConfigureTestServices(TestServices);
     }
 
     private sealed class LoopbackToolPolicy : IOutboundAddressPolicy

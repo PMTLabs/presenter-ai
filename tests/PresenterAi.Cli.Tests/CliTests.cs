@@ -69,9 +69,9 @@ public sealed class CliTests
     [Fact]
     public async Task Run_services_build_with_training_services_in_owner_and_file_mode()
     {
-        // Plan 010 T3: both CLI containers build with ValidateOnBuild/ValidateScopes and resolve the revision store
-        // (Postgres, scoped, in owner mode; in-memory, seeded from the file, in file mode). The reviser and revision
-        // service assertions join this test when T5/T6 register them.
+        // Plan 010 T3/T11: both CLI containers build with ValidateOnBuild/ValidateScopes and resolve the presenter, the
+        // revision service (singleton), the Responses reviser and the revision store (Postgres, scoped, in owner mode;
+        // in-memory, seeded from the file, in file mode).
         await using var fake = await FakeLiveServer.StartAsync();
         var configuration = Configuration(fake, new Dictionary<string, string?>
         {
@@ -81,6 +81,9 @@ public sealed class CliTests
         await using (var ownerServices = Program.BuildRunServices(configuration))
         {
             ownerServices.GetRequiredService<IPresenter>().Should().NotBeNull();
+            ownerServices.GetRequiredService<IScriptRevisionService>().Should().BeOfType<ScriptRevisionService>();
+            ownerServices.GetRequiredService<IScriptReviser>()
+                .Should().BeOfType<PresenterAi.Infrastructure.Training.ResponsesScriptReviser>();
             await using var scope = ownerServices.CreateAsyncScope();
             scope.ServiceProvider.GetRequiredService<IPresentationRevisionStore>()
                 .Should().BeOfType<PresenterAi.Infrastructure.Content.PostgresPresentationRevisionStore>();
@@ -88,6 +91,9 @@ public sealed class CliTests
 
         await using var fileServices = Program.BuildServices(configuration, FindRepositoryRoot());
         fileServices.GetRequiredService<IPresenter>().Should().NotBeNull();
+        fileServices.GetRequiredService<IScriptRevisionService>().Should().BeOfType<ScriptRevisionService>();
+        fileServices.GetRequiredService<IScriptReviser>()
+            .Should().BeOfType<PresenterAi.Infrastructure.Training.ResponsesScriptReviser>();
         var store = fileServices.GetRequiredService<IPresentationRevisionStore>();
         store.Should().BeOfType<InMemoryPresentationRevisionStore>();
         var head = await store.GetHeadAsync("local", "sample");
