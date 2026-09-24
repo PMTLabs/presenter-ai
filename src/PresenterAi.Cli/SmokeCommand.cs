@@ -22,10 +22,7 @@ internal static class SmokeCommand
         await using var services = Program.BuildServices(configuration, Directory.GetCurrentDirectory());
         _ = services.GetRequiredService<Microsoft.Extensions.Options.IOptions<UpstreamOptions>>().Value;
         var routes = services.GetRequiredService<UpstreamRoutes>();
-        var route = arguments.Provider == "azure"
-            ? routes.Upstreams.FirstOrDefault()
-            : routes.Upstreams.FirstOrDefault(candidate => candidate.Name == "fallback"
-                || candidate.LiveUrl.Host.Equals("api.openai.com", StringComparison.OrdinalIgnoreCase));
+        var route = SelectRoute(routes, arguments.Provider);
 
         if (route is null)
         {
@@ -123,6 +120,13 @@ internal static class SmokeCommand
             }
         }
     }
+
+    /// <summary>azure = the primary route; openai = the fallback route (or any route on api.openai.com).</summary>
+    internal static UpstreamRoute? SelectRoute(UpstreamRoutes routes, string provider) =>
+        provider == "azure"
+            ? routes.Upstreams.FirstOrDefault()
+            : routes.Upstreams.FirstOrDefault(candidate => candidate.Name == "fallback"
+                || candidate.LiveUrl.Host.Equals("api.openai.com", StringComparison.OrdinalIgnoreCase));
 
     private static string Format(double? value) =>
         value?.ToString("0.###", CultureInfo.InvariantCulture) ?? "unconfirmed";

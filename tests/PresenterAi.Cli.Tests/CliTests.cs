@@ -374,6 +374,107 @@ public sealed class CliTests
         error.ToString().Should().Contain("smoke requires --provider azure|openai");
     }
 
+    [Fact]
+    public async Task Ask_probe_requires_both_parts_and_rejects_unknown_options()
+    {
+        var cases = new (string[] Args, string Message)[]
+        {
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav"], "ask-probe requires both --part1 <wav> and --part2 <wav>"),
+            (["ask-probe", "--provider", "azure", "--part2", "p2.wav"], "ask-probe requires both --part1 <wav> and --part2 <wav>"),
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--bogus"], "Unknown ask-probe option: --bogus"),
+            (["ask-probe", "--part1", "p1.wav", "--part2", "p2.wav"], "ask-probe requires --provider azure|openai"),
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--tail-ms", "3000"], "--tail-ms must be an integer from 500 to 2000"),
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--gap-keep-ms", "500"], "--gap-keep-ms must be an integer from 200 to 400"),
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--variant", "stream"], "--variant must be vad, continue or raw"),
+            (["ask-probe", "--provider", "azure", "--part1", "p1.wav", "--part2", "p2.wav", "--lang", "fr"], "--lang must be en or vi"),
+            (["ask-probe", "--provider", "azure", "--part1", "--part2", "p2.wav"], "--part1 requires a value")
+        };
+
+        foreach (var (args, message) in cases)
+        {
+            var error = new StringWriter();
+            var exit = await Program.RunAsync(args, new ConfigurationBuilder().Build(), new StringWriter(), error, CancellationToken.None);
+
+            exit.Should().Be(2, string.Join(' ', args));
+            error.ToString().Should().Contain(message);
+        }
+
+        var parsed = CliParser.Parse(["ask-probe", "--provider", "openai", "--part1", "a.wav", "--part2", "b.wav", "--reply", "yes.wav", "--observe-interrupt"], new StringWriter());
+        parsed.Should().Be(new AskProbeArguments("openai", "a.wav", "b.wav", 10, "vad", 1000, 320, true, "yes.wav", "en", null));
+    }
+
+    [Fact]
+    public async Task Ask_probe_rejects_a_wav_that_is_not_24_khz_mono_pcm16_before_connecting()
+    {
+        var directory = Directory.CreateTempSubdirectory("ask-probe-");
+        try
+        {
+            var good = Path.Combine(directory.FullName, "good.wav");
+            var bad = Path.Combine(directory.FullName, "bad.wav");
+            await File.WriteAllBytesAsync(good, Wav(24_000, 1, 4_800));
+            await File.WriteAllBytesAsync(bad, Wav(16_000, 1, 3_200));
+            var error = new StringWriter();
+
+            var exit = await Program.RunAsync(
+                ["ask-probe", "--provider", "azure", "--part1", good, "--part2", bad],
+                new ConfigurationBuilder().Build(), new StringWriter(), error, CancellationToken.None);
+
+            exit.Should().Be(2);
+            error.ToString().Should().Contain("--part2").And.Contain("16000 Hz")
+                .And.Contain("ffmpeg -i <in> -ar 24000 -ac 1 -c:a pcm_s16le <out.wav>")
+                .And.NotContain("Configuration invalid", "the WAVs are checked before any upstream setting is read");
+            PcmWav.TryReadPcm16Mono24k(Wav(24_000, 1, 4_800), out var pcm).Should().BeNull();
+            pcm.Should().HaveCount(4_800);
+            PcmWav.TryReadPcm16Mono24k(Wav(24_000, 2, 4_800), out _).Should().Contain("2 channel(s)");
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("en", "What did the programme change at the Da Nang office in its first year, and how much did the Hanoi expansion cost?",
+        "In its first year the Da Nang office moved to paperless contracts. The Hanoi expansion cost four point two billion dong. Shall I carry on?")]
+    [InlineData("vi", "Chương trình đã thay đổi gì ở văn phòng Đà Nẵng trong năm đầu tiên, và việc mở rộng ở Hà Nội tốn bao nhiêu tiền?",
+        "Văn phòng Đà Nẵng đã chuyển sang hợp đồng không giấy. Việc mở rộng tại Hà Nội tốn 4,2 tỷ đồng. Tôi tiếp tục nhé?")]
+    public void Ask_probe_scores_part_keywords_in_order_and_quotes_each_fact(string lang, string question, string answer)
+    {
+        var deck = ProbeDeck.For(lang);
+
+        var part1 = AskProbeCommand.Find(question, deck.Part1Keywords);
+        var part2 = AskProbeCommand.Find(question, deck.Part2Keywords);
+        part1.Should().BeGreaterOrEqualTo(0);
+        part2.Should().BeGreaterThan(part1);
+        AskProbeCommand.Find(deck.QuestionPart2, deck.Part1Keywords).Should().Be(-1, "a part-2-only turn lacks the part-1 keyword");
+
+        AskProbeCommand.Quote(answer, deck.FactA).Should().NotBeNull().And.NotContain(lang == "en" ? "Hanoi" : "Hà Nội");
+        AskProbeCommand.Quote(answer, deck.FactB).Should().NotBeNull().And.NotContain(lang == "en" ? "Da Nang" : "Đà Nẵng");
+        AskProbeCommand.Quote("Only the Hanoi expansion is covered.", deck.FactA).Should().BeNull();
+    }
+
+    private static byte[] Wav(int rate, int channels, int dataBytes)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        writer.Write("RIFF"u8);
+        writer.Write(36 + dataBytes);
+        writer.Write("WAVE"u8);
+        writer.Write("fmt "u8);
+        writer.Write(16);
+        writer.Write((short)1);
+        writer.Write((short)channels);
+        writer.Write(rate);
+        writer.Write(rate * channels * 2);
+        writer.Write((short)(channels * 2));
+        writer.Write((short)16);
+        writer.Write("data"u8);
+        writer.Write(dataBytes);
+        writer.Write(new byte[dataBytes]);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
     private sealed class ThrowingClosePresenter : IPresenter
     {
         public event Action<PresenterSnapshot>? State;

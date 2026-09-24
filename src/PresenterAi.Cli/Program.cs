@@ -60,6 +60,7 @@ public static class Program
             return command switch
             {
                 SmokeArguments smoke => await SmokeCommand.RunAsync(smoke, configuration, output, error, cancellationToken).ConfigureAwait(false),
+                AskProbeArguments askProbe => await AskProbeCommand.RunAsync(askProbe, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 RunArguments run => await RunCommand.RunAsync(run, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 ImportArguments import => await ImportCommand.RunAsync(import, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 _ => 2
@@ -215,6 +216,9 @@ public static class Program
     {
         output.WriteLine("Usage:");
         output.WriteLine("  presenter-cli smoke --provider azure|openai");
+        output.WriteLine("  presenter-cli ask-probe --provider azure|openai --part1 <wav> --part2 <wav> [--gap-seconds 10] [--variant vad|continue|raw]");
+        output.WriteLine("            [--tail-ms 1000] [--gap-keep-ms 320] [--reply <wav>] [--lang en|vi] [--observe-interrupt] [--absent <wav>]");
+        output.WriteLine("            WAVs are 24 kHz mono PCM16; prints transcripts, timings and usage, never audio or secrets.");
         output.WriteLine("  presenter-cli run <id> [--owner <email>] [--max-seconds N] [--stop-after-slide N] [--content-root DIR]");
         output.WriteLine("  presenter-cli import <path-or-pattern>... --owner <email> [--content-root DIR]");
         output.WriteLine("  presenter-cli --help");
@@ -235,6 +239,7 @@ internal static class CliParser
         return args[0] switch
         {
             "smoke" => ParseSmoke(args[1..], error),
+            "ask-probe" => ParseAskProbe(args[1..], error),
             "run" => ParseRun(args[1..], error),
             "import" => ParseImport(args[1..], error),
             _ => null
@@ -275,6 +280,93 @@ internal static class CliParser
         }
 
         return new SmokeArguments(provider);
+    }
+
+    private static AskProbeArguments? ParseAskProbe(string[] args, TextWriter error)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var observeInterrupt = false;
+        string[] valued = ["--provider", "--part1", "--part2", "--gap-seconds", "--variant", "--tail-ms", "--gap-keep-ms", "--reply", "--lang", "--absent"];
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (IsConfigurationArgument(argument))
+            {
+                index += argument.Contains('=') || index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal) ? 0 : 1;
+                continue;
+            }
+
+            if (argument == "--observe-interrupt")
+            {
+                observeInterrupt = true;
+                continue;
+            }
+
+            if (!valued.Contains(argument))
+            {
+                error.WriteLine($"Unknown ask-probe option: {argument}");
+                return null;
+            }
+
+            if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                error.WriteLine($"{argument} requires a value");
+                return null;
+            }
+
+            values[argument] = args[++index];
+        }
+
+        var provider = values.GetValueOrDefault("--provider");
+        if (provider is not ("azure" or "openai"))
+        {
+            error.WriteLine("ask-probe requires --provider azure|openai");
+            return null;
+        }
+
+        if (!values.TryGetValue("--part1", out var part1) || !values.TryGetValue("--part2", out var part2))
+        {
+            error.WriteLine("ask-probe requires both --part1 <wav> and --part2 <wav>");
+            return null;
+        }
+
+        var variant = values.GetValueOrDefault("--variant", "vad");
+        if (variant is not ("vad" or "continue" or "raw"))
+        {
+            error.WriteLine("--variant must be vad, continue or raw");
+            return null;
+        }
+
+        var lang = values.GetValueOrDefault("--lang", "en");
+        if (lang is not ("en" or "vi"))
+        {
+            error.WriteLine("--lang must be en or vi");
+            return null;
+        }
+
+        if (!double.TryParse(values.GetValueOrDefault("--gap-seconds", "10"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var gapSeconds)
+            || gapSeconds is < 0 or > 60)
+        {
+            error.WriteLine("--gap-seconds must be a number from 0 to 60");
+            return null;
+        }
+
+        if (!int.TryParse(values.GetValueOrDefault("--tail-ms", "1000"), out var tailMs)
+            || tailMs is < Application.Presenting.Asking.AskRecorder.MinTailSilenceMs or > Application.Presenting.Asking.AskRecorder.MaxTailSilenceMs)
+        {
+            error.WriteLine("--tail-ms must be an integer from 500 to 2000");
+            return null;
+        }
+
+        if (!int.TryParse(values.GetValueOrDefault("--gap-keep-ms", "320"), out var gapKeepMs)
+            || gapKeepMs is < Application.Presenting.Asking.AskRecorder.MinGapKeepMs or > Application.Presenting.Asking.AskRecorder.MaxGapKeepMs)
+        {
+            error.WriteLine("--gap-keep-ms must be an integer from 200 to 400");
+            return null;
+        }
+
+        return new AskProbeArguments(provider, part1, part2, gapSeconds, variant, tailMs, gapKeepMs, observeInterrupt,
+            values.GetValueOrDefault("--reply"), lang, values.GetValueOrDefault("--absent"));
     }
 
     private static ImportArguments? ParseImport(string[] args, TextWriter error)
@@ -403,5 +495,17 @@ internal static class CliParser
 
 public abstract record CliArguments;
 internal sealed record SmokeArguments(string Provider) : CliArguments;
+internal sealed record AskProbeArguments(
+    string Provider,
+    string Part1,
+    string Part2,
+    double GapSeconds,
+    string Variant,
+    int TailMs,
+    int GapKeepMs,
+    bool ObserveInterrupt,
+    string? Reply,
+    string Lang,
+    string? Absent) : CliArguments;
 public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot, string? Owner = null) : CliArguments;
 public sealed record ImportArguments(IReadOnlyList<string> Paths, string Owner, string? ContentRoot) : CliArguments;

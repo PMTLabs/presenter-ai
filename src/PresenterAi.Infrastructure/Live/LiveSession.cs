@@ -71,6 +71,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<string, string, string, string>? ToolCallRequested;
     public event Action<string, string, string>? HostedToolActivity;
     public event Action<string, double?>? Closed;
+    public event Action<string, long>? InputPositionMarked;
 
     public LiveSessionState State => (LiveSessionState)Volatile.Read(ref _state);
 
@@ -242,6 +243,17 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         return Enqueue(new AudioFrame(pcm16[..length].ToArray(), IsSilence: false));
     }
 
+    public string? MarkInputPosition()
+    {
+        if (State != LiveSessionState.Open)
+        {
+            return null;
+        }
+
+        var id = NextEventId("mark");
+        return Enqueue(new MarkFrame(id)) ? id : null;
+    }
+
     public async Task<LiveCloseResult> CloseAsync()
     {
         if (Volatile.Read(ref _finished) != 0)
@@ -325,6 +337,10 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                         break;
                     case AudioFrame audio when State == LiveSessionState.Open:
                         await SendAudioFrameAsync(audio).ConfigureAwait(false);
+                        break;
+                    case MarkFrame mark:
+                        // _sentMs is written only by this loop, so the mark sees every append queued before it.
+                        InputPositionMarked?.Invoke(mark.Id, _sentMs);
                         break;
                 }
             }
@@ -788,4 +804,5 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     private sealed record JsonFrame(JsonObject Event, bool AllowConnecting = false, bool AllowClosing = false) : OutboundFrame;
     private sealed record AudioFrame(byte[] Bytes, bool IsSilence) : OutboundFrame;
     private sealed record PumpFrame : OutboundFrame;
+    private sealed record MarkFrame(string Id) : OutboundFrame;
 }
