@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAuthSession, setAuthSession, useAuthStore } from "@presenter/shared";
 import { usePresenterStore } from "../store/presenterStore";
 
-const { bridgeConnect, bridgeDisconnect, bridgeEnd, bridgeHandlers, bridgePause, bridgeSetTrainerMode, bridgeStart, bridgeTakeOver, bridgeTrainTurn, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
+const { bridgeAskCancel, bridgeAskDone, bridgeAskExtend, bridgeAskStart, bridgeConnect, bridgeDisconnect, bridgeEnd, bridgeHandlers, bridgePause, bridgeResume, bridgeSetTrainerMode, bridgeStart, bridgeTakeOver, bridgeTrainTurn, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   load: vi.fn().mockResolvedValue({ adapter: "sections", count: 1 }),
@@ -21,6 +21,11 @@ const { bridgeConnect, bridgeDisconnect, bridgeEnd, bridgeHandlers, bridgePause,
   bridgeStart: vi.fn(),
   bridgeTakeOver: vi.fn(),
   bridgePause: vi.fn(),
+  bridgeResume: vi.fn(),
+  bridgeAskStart: vi.fn(),
+  bridgeAskDone: vi.fn(),
+  bridgeAskExtend: vi.fn(),
+  bridgeAskCancel: vi.fn(),
   bridgeEnd: vi.fn(),
   bridgeSetTrainerMode: vi.fn(),
   bridgeTrainTurn: vi.fn(),
@@ -57,6 +62,11 @@ vi.mock("../ws/bridgeClient", () => ({
     start(...args: unknown[]) { bridgeStart(...args); }
     takeOver() { bridgeTakeOver(); }
     pause() { bridgePause(); }
+    resume() { bridgeResume(); }
+    askStart() { bridgeAskStart(); }
+    askDone() { bridgeAskDone(); }
+    askExtend() { bridgeAskExtend(); }
+    askCancel() { bridgeAskCancel(); }
     end() { bridgeEnd(); }
     setTrainerMode(...args: unknown[]) { bridgeSetTrainerMode(...args); }
     trainTurn(...args: unknown[]) { bridgeTrainTurn(...args); }
@@ -105,6 +115,11 @@ describe("Present", () => {
     bridgeStart.mockClear();
     bridgeTakeOver.mockClear();
     bridgePause.mockClear();
+    bridgeResume.mockClear();
+    bridgeAskStart.mockClear();
+    bridgeAskDone.mockClear();
+    bridgeAskExtend.mockClear();
+    bridgeAskCancel.mockClear();
     bridgeEnd.mockClear();
     bridgeSetTrainerMode.mockClear();
     bridgeTrainTurn.mockClear();
@@ -129,6 +144,7 @@ describe("Present", () => {
       edits: {},
       editOrder: [],
       currentEditId: null,
+      ask: null,
     });
     post.mockResolvedValue({ data: { ticket: "ticket" } });
     startAudio.mockResolvedValue({
@@ -777,5 +793,347 @@ describe("Present", () => {
     expect(question.endsWith(` ${actualQuestion}`)).toBe(true);
     expect(answer).toBe("It costs 10% more.");
     expect(slideIndex).toBe(0);
+  });
+
+  it("A starts an ask and A or Enter finishes it", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+
+    // A starts an ask
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(bridgeAskStart).toHaveBeenCalledOnce();
+
+    // Answered by listening frame
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 1000,
+      quietRemainingMs: 89000,
+      speechRemainingMs: 24000,
+      heard: false,
+      transcribing: false,
+      reason: null,
+    });
+
+    // A finishes it
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(bridgeAskDone).toHaveBeenCalledTimes(1);
+
+    // Enter also finishes it
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(bridgeAskDone).toHaveBeenCalledTimes(2);
+  });
+
+  it("holding A does not finish the ask it started", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+
+    // Initial press (repeat: false)
+    fireEvent.keyDown(document.body, { key: "a", repeat: false });
+    expect(bridgeAskStart).toHaveBeenCalledOnce();
+
+    // Now listening
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 100,
+      quietRemainingMs: 89900,
+      speechRemainingMs: 25000,
+      heard: false,
+      transcribing: false,
+      reason: null,
+    });
+
+    // Key repeat event from holding down A
+    fireEvent.keyDown(document.body, { key: "a", repeat: true });
+    expect(bridgeAskDone).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+A does not ask", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+
+    fireEvent.keyDown(document.body, { key: "a", ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: "a", metaKey: true });
+    expect(bridgeAskStart).not.toHaveBeenCalled();
+  });
+
+  it("A in the length select does not ask", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+
+    const select = await screen.findByRole("combobox", { name: "Length" });
+    act(() => select.focus());
+    fireEvent.keyDown(select, { key: "a" });
+    expect(bridgeAskStart).not.toHaveBeenCalled();
+  });
+
+  it("A while muted shows the unmute warning and sends no frame", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: true });
+
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(bridgeAskStart).not.toHaveBeenCalled();
+    expect(notifications().textContent).toContain("Unmute the microphone to ask a question.");
+  });
+
+  it("clicking the disabled Ask button while muted sends nothing", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: true });
+
+    const askBtn = screen.getByRole("button", { name: "Ask" });
+    expect(askBtn).toHaveProperty("disabled", true);
+    expect(screen.getByText("Unmute to ask")).toBeTruthy();
+
+    fireEvent.click(askBtn);
+    expect(bridgeAskStart).not.toHaveBeenCalled();
+  });
+
+  it("Space is ignored while listening and Escape still ends", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 5000,
+      quietRemainingMs: 85000,
+      speechRemainingMs: 20000,
+      heard: false,
+      transcribing: false,
+      reason: null,
+    });
+
+    fireEvent.keyDown(document.body, { key: " " });
+    expect(bridgePause).not.toHaveBeenCalled();
+    expect(bridgeResume).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(bridgeEnd).toHaveBeenCalledOnce();
+  });
+
+  it("Enter on a focused End button while listening sends ask_done and not end", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 5000,
+      quietRemainingMs: 85000,
+      speechRemainingMs: 20000,
+      heard: false,
+      transcribing: false,
+      reason: null,
+    });
+
+    const endBtn = screen.getByRole("button", { name: "End" });
+    act(() => endBtn.focus());
+    fireEvent.keyDown(endBtn, { key: "Enter" });
+    expect(bridgeAskDone).toHaveBeenCalledOnce();
+    expect(bridgeEnd).not.toHaveBeenCalled();
+  });
+
+  it("pressing A answered by refused_not_live shows its toast", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+
+    fireEvent.keyDown(document.body, { key: "a" });
+    expect(bridgeAskStart).toHaveBeenCalledOnce();
+
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "off",
+      elapsedMs: 0,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: false,
+      transcribing: false,
+      reason: "refused_not_live",
+    });
+
+    expect(notifications().textContent).toContain("Ask isn't available right now.");
+  });
+
+  it("Ask done answered by send_failed shows the reset toast", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 15000,
+      quietRemainingMs: 75000,
+      speechRemainingMs: 15000,
+      heard: true,
+      transcribing: false,
+      reason: null,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Ask done" }));
+    expect(bridgeAskDone).toHaveBeenCalledOnce();
+
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "off",
+      elapsedMs: 15100,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "send_failed",
+    });
+
+    expect(notifications().textContent).toContain(
+      "Couldn't send your question — the connection was reset. Press Ask to try again.",
+    );
+  });
+
+  it("Resume while listening answered by off resumed shows Ask cancelled", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 10000,
+      quietRemainingMs: 80000,
+      speechRemainingMs: 18000,
+      heard: true,
+      transcribing: false,
+      reason: null,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(bridgeResume).toHaveBeenCalledOnce();
+
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "off",
+      elapsedMs: 10050,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "resumed",
+    });
+
+    expect(notifications().textContent).toContain("Ask cancelled.");
+  });
+
+  it("quiet_cancelled and limit_sent frames show their toasts", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "paused", slideIndex: 0, slideCount: 1, muted: false });
+
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "off",
+      elapsedMs: 90000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: false,
+      transcribing: false,
+      reason: "quiet_cancelled",
+    });
+    expect(notifications().textContent).toContain(
+      "Nothing was heard for 90 s — Ask cancelled; still paused.",
+    );
+
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "answering",
+      elapsedMs: 30000,
+      quietRemainingMs: null,
+      speechRemainingMs: 0,
+      heard: true,
+      transcribing: false,
+      reason: "limit_sent",
+    });
+    expect(notifications().textContent).toContain(
+      "25-second speech limit reached — your question was sent.",
+    );
+  });
+
+  it("Continue during check-in sends resume and the off continued frame clears the control", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "answering",
+      elapsedMs: 35000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "sent",
+    });
+
+    const continueBtn = screen.getByRole("button", { name: "Continue" });
+    expect(continueBtn).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("Answering…");
+
+    fireEvent.click(continueBtn);
+    expect(bridgeResume).toHaveBeenCalledOnce();
+
+    emitBridge("ask_state", {
+      type: "ask_state",
+      state: "off",
+      elapsedMs: 36000,
+      quietRemainingMs: null,
+      speechRemainingMs: null,
+      heard: true,
+      transcribing: false,
+      reason: "continued",
+    });
+
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Ask" })).toBeTruthy();
   });
 });

@@ -439,4 +439,40 @@ describe("BridgeClient", () => {
     expect(warnings).toEqual([warningMsg]);
     expect(upstreams).toEqual([upstreamMsg]);
   });
+
+  it("sends the four ask commands", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    ws.fire("open", {});
+    c.askStart();
+    c.askDone();
+    c.askExtend();
+    c.askCancel();
+    expect(ws.sent[1]).toBe('{"type":"ask_start"}');
+    expect(ws.sent[2]).toBe('{"type":"ask_done"}');
+    expect(ws.sent[3]).toBe('{"type":"ask_extend"}');
+    expect(ws.sent[4]).toBe('{"type":"ask_cancel"}');
+  });
+
+  it("emits ask_state", () => {
+    const c = new BridgeClient("ws://test", FakeSocket as any, () => "test-ticket");
+    c.connect();
+    const ws = FakeSocket.instances.at(-1)!;
+    const states: BridgeMessage[] = [];
+    c.on("ask_state", (message) => states.push(message));
+    const message = {
+      type: "ask_state",
+      state: "listening",
+      elapsedMs: 23000,
+      quietRemainingMs: 67000,
+      speechRemainingMs: 13400,
+      heard: true,
+      transcribing: false,
+      reason: null,
+    };
+    ws.fire("message", { data: JSON.stringify(message) });
+    expect(states).toEqual([message]);
+  });
 });
+

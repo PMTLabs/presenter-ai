@@ -12,13 +12,37 @@ import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
 import { LogPanel } from "../components/LogPanel";
 import { TrainerControls } from "../components/TrainerControls";
+import { AskControls } from "../components/AskControls";
 import { ScriptVersions } from "../components/ScriptVersions";
 import { formatEndReason } from "../utils/endReasons";
 import { useToastStore } from "../store/toastStore";
 type Detail = components["schemas"]["PresentationDetail"];
 
 /** Toast keys this page owns: one toast per notification kind, updated in place and cleared on leave. */
-const TOAST_KEYS = { load: "present:load-error", ended: "present:talk-ended", limit: "present:limit-warning" } as const;
+const TOAST_KEYS = {
+  load: "present:load-error",
+  ended: "present:talk-ended",
+  limit: "present:limit-warning",
+  ask: "present:ask",
+} as const;
+
+const ASK_TOASTS: Record<string, { kind: "info" | "warning" | "error"; message: string }> = {
+  refused_muted: { kind: "warning", message: "Unmute the microphone to ask a question." },
+  refused_not_live: { kind: "warning", message: "Ask isn't available right now." },
+  unavailable: { kind: "warning", message: "Ask isn't available right now." },
+  empty: { kind: "info", message: "No question was heard — still paused." },
+  quiet_cancelled: { kind: "info", message: "Nothing was heard for 90 s — Ask cancelled; still paused." },
+  quiet_sent: { kind: "info", message: "Sent your question after 90 s of quiet." },
+  limit_sent: { kind: "info", message: "25-second speech limit reached — your question was sent." },
+  send_failed: {
+    kind: "error",
+    message: "Couldn't send your question — the connection was reset. Press Ask to try again.",
+  },
+  resumed: { kind: "info", message: "Ask cancelled." },
+  navigated: { kind: "info", message: "Ask cancelled." },
+  muted: { kind: "info", message: "Ask cancelled." },
+  cancelled: { kind: "info", message: "Ask cancelled." },
+};
 
 const startButtonClassName = [
   "rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white",
@@ -101,6 +125,7 @@ export function Present() {
   const suspended = usePresenterStore((state) => state.suspended);
   const endReason = usePresenterStore((state) => state.endReason);
   const trainerMode = usePresenterStore((state) => state.trainerMode);
+  const ask = usePresenterStore((state) => state.ask);
   const applySnapshot = usePresenterStore((state) => state.applySnapshot);
   const message = usePresenterStore((state) => state.message);
   const log = usePresenterStore((state) => state.log);
@@ -152,10 +177,21 @@ export function Present() {
       "script_edit",
       "script_version",
       "trainer_state",
+      "ask_state",
     ] as const)
       bridge.on(event, (eventMessage) => {
         message(eventMessage);
         if (event === "closed") stopAudio();
+        if (event === "ask_state") {
+          const reason = eventMessage.reason as string | undefined;
+          if (reason && ASK_TOASTS[reason]) {
+            showToast({
+              key: TOAST_KEYS.ask,
+              kind: ASK_TOASTS[reason].kind,
+              message: ASK_TOASTS[reason].message,
+            });
+          }
+        }
       });
     bridge.on("audio", (buffer) => audio.current?.playback.enqueue(buffer));
     bridge.on("flush", () => audio.current?.playback.flush());
@@ -178,7 +214,7 @@ export function Present() {
       driver.current?.dispose();
       driver.current = null;
     };
-  }, [applySnapshot, log, message, ready, stopAudio, userId]);
+  }, [applySnapshot, log, message, ready, showToast, stopAudio, userId]);
   useEffect(() => {
     if (!ready || !userId || !id) {
       setPresentation(null);
@@ -334,6 +370,38 @@ export function Present() {
       if (["INPUT", "SELECT", "TEXTAREA"].includes(active?.tagName ?? "") || active?.getAttribute("role") === "switch")
         return;
       const live = ["presenting", "paused"].includes(snapshot.state);
+      const isListening = ask?.state === "listening";
+
+      if (isListening) {
+        if (e.key === " ") {
+          e.preventDefault();
+          return;
+        }
+        if ((/^a$/i.test(e.key) || e.key === "Enter") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          if (!e.repeat) {
+            client.current?.askDone();
+          }
+          return;
+        }
+      } else {
+        if (/^a$/i.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          if (!e.repeat && live) {
+            e.preventDefault();
+            if (snapshot.muted) {
+              showToast({
+                key: TOAST_KEYS.ask,
+                kind: "warning",
+                message: "Unmute the microphone to ask a question.",
+              });
+            } else {
+              client.current?.askStart();
+            }
+          }
+          return;
+        }
+      }
+
       if (e.key === " " && live) {
         e.preventDefault();
         if (snapshot.state === "paused") client.current?.resume();
@@ -353,7 +421,7 @@ export function Present() {
     };
     window.addEventListener("keydown", keys);
     return () => window.removeEventListener("keydown", keys);
-  }, [snapshot, presentation]);
+  }, [snapshot, presentation, ask, showToast]);
   useEffect(() => {
     (window as Window & { __presenterDebug?: () => unknown }).__presenterDebug =
       () => ({
@@ -525,6 +593,14 @@ export function Present() {
               >
                 {snapshot.state === "paused" ? "Resume" : "Pause"}
               </button>
+              <AskControls
+                onAsk={() => client.current?.askStart()}
+                onDone={() => client.current?.askDone()}
+                onExtend={() => client.current?.askExtend()}
+                onCancel={() => client.current?.askCancel()}
+                onContinue={() => client.current?.resume()}
+                disabled={!live}
+              />
               <button
                 className={actionButtonClassName}
                 onClick={() => client.current?.prev()}
