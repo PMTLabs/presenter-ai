@@ -838,3 +838,34 @@ Full regression on the final plan 011 build `047da8e` (010 `7126d97` merged), au
     (`commitFirst: True`) failed once, then passed 3 isolated runs and a full rerun.
   - A test-harness artifact: a clip spoken over residual audio lost "For slide five", so one edit went to slide 10.
 - **Cleanup:** Ricoh reverted to v1 text (v30), Khóa 2 Bài 1 reverted to v1 (v7).
+
+## 2026-09-25 — plan 011 T8 live regression (Chrome, React app, Azure `gpt-live-1`)
+
+Full regression, automated as on 2026-09-24: rows 1–7 on `44e6bd8`, rows 8–14 on `47c3ece` (`44e6bd8` + the 010 fix
+`94b2099`). All 14 rows passed; row 8 after a fix.
+
+| # | Result |
+|---|---|
+| 1 | Pass: speech flushed 8 ms after `ask_start`; "Listening… 0:01" |
+| 2 | Pass: a follow-up during "One moment": the busy tool was refused and the late delegated reply ignored; the follow-up answered in 1.7 s. On `47c3ece` the first round's `go_to_slide` landed after the follow-up send: the exchange ended (navigated), then answered |
+| 3 | Pass: half a question, 10 s silence, the rest → kept 5.0 s; one answer covering both halves in 2.8 s |
+| 4 | Pass: "yes" at the check-in resumed at the cut sentence |
+| 5 | Pass: Pause → Ask → "no" → answered in 1.9 s, stayed on the slide |
+| 6 | Pass: 90 s quiet → `quiet_cancelled` at 90.0 s, toast "Nothing was heard for 90 s — Ask cancelled; still paused." |
+| 7 | Pass: Extend at 70 s → `quiet_sent` 90.1 s later, toast "Sent your question after 90 s of quiet.", answered in 1.6 s |
+| 8 | **Failed first**: spoken script edits were not delegated (0 of 2 with Ask, 0 of 3 in a talk without Ask). Fixed `94b2099` (plan 010); proof 3 new talks, 6 of 6 delegated. Then pass: an edit queued → Ask → applied v14 during the answer, no "updating", one deferred notice, one replay of slide 4 with the new text after the check-in |
+| 9 | Pass: End mid-question → no answer; usage 427.8 s confirmed; reopen idle |
+| 10 | Pass: muted + A → toast "Unmute the microphone to ask a question."; Ask disabled with "Unmute to ask" |
+| 11 | Pass (Khóa 2 Bài 1): two Vietnamese halves 6 s apart → one Vietnamese answer covering both in 3.1 s |
+| 12 | Pass: a long question → countdown 0:09..0:00, `limit_sent` at 25.0 s, toast, cut-off nudge at +10.9 s, an answer; a cut question → "I didn't get the full question. Could you please repeat it?". A long question finished with Ask done: kept 19.5 s, answered in 7.8 s, no residual |
+| 13 | Pass: Mute during the answer deferred to the exchange end; Continue resumed in 9 ms |
+| 14 | Pass: usage recorded below |
+
+- **Usage:** 495.4 s (upstream lost, unconfirmed, about 515 s estimated), then 775.8, 116.4, 427.8 s (Ricoh) and
+  60.8 s (Vietnamese), confirmed. Direct answers 1.6–3.1 s; delegated or long ones 5–8 s.
+- **Defects fixed:** `94b2099` (plan 010, row 8). The T13 regression on this branch also brought `889e61f`,
+  `7126d97` (plan 010) and `047da8e` here: a repeated request's replay is settled at Ask start, before the exchange
+  takes it over (plan 011 §10).
+- **Observed, not fixed:** in row 8 the backend routed an Ask question ("testing tools") to `revise_script`; the
+  confirmation was spoken, not given, so no edit; the real answer came after 6.3 s. In row 11 the check-in after the
+  Vietnamese answer was in English ("Shall I carry on?").

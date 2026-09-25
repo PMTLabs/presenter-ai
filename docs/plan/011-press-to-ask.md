@@ -1344,7 +1344,7 @@ T7 runs after all lanes, and T8 last. Every "Test that dies" is new unless marke
 | 13 | During the answer, press **Mute**; then at the check-in press **Continue** | The answer keeps playing to the end; Continue resumes at once |
 | 14 | End; record `usage` seconds and latencies | Work log entry |
 
-All 14 rows passed live on 2026-09-24 (row 4 after fixes); see the work log `docs/progress/002-work-log-phase0.md`.
+All 14 rows passed live on 2026-09-24 (row 4 after fixes) and again in the full regression on 2026-09-25 (row 8 after `94b2099`); see the work log `docs/progress/002-work-log-phase0.md`.
 
 ## 8. Rollout / phasing
 
