@@ -650,3 +650,43 @@ and Cli pass with no container. `secrets-guard: clean`.
 - **Verification:** build 0/0; .NET Application 52, Infrastructure 31 + 3 skipped, Api 137, Cli 11, Integration
   40 + 1 skipped; web shared 18 and app 22, lint and both builds; four orchestrator mutations, each caught.
 - **No round 3.** The follow-ups are listed in `docs/review/007` under "Fixes".
+
+## 2026-09-24 — plan 010 T13 live Trainer-mode run (Chrome, React app, Azure `gpt-live-1`, reviser `gpt-6-sol`)
+
+Automated in Chrome: a page script feeds `gpt-audio-1.5` TTS clips (voice `marin`) into a fake microphone and logs
+every non-audio bridge frame; the owner listened on headphones. Run on the plan 011 build (010 merged in).
+
+| # | Result |
+|---|---|
+| 1 | Pass: Script versions lists v1 `import`, current |
+| 2 | Pass: `trainer: on (voice: yes)`; switch on |
+| 3 | **Failed first** (no `revise_script`: "also mention…" and "please update the script…" were spoken as narration). Fixed `f1ed848`, then pass: "Shall I add that to the script?" |
+| 4 | Pass: "yes" → "Got it, slide 2 is being updated", hold, no advance. Two early attempts timed out because the automation's "yes" came late or overlapped the question (test timing, not product) |
+| 5 | Pass: v4 `live_edit` in 2.7 s; slide 2 restarted with "The program started in 2020" |
+| 6 | Pass: a real question was answered as Q&A (no tool call, no version); an edit request answered "No." → `declined`, "sticking with the current script", no version |
+| 7 | Pass: Train on this on that answer → v5 in 2.8 s, slide 2 (current) replayed |
+| 8 | Pass: slide 5 feedback on slide 3 → talk continued, v6 in 3.1 s; the retry (v9) was narrated on slide 5 ("every quarter, a roadmap review") |
+| 9 | Pass: panel "1 pending edit will apply after this revert: edit_4 (slide 5, processing)"; v8 `revert`, then v9 on top; slide 4 unchanged, so no replay |
+| 10 | Pass (Vietnamese deck): "Có" confirmed; v2 summary and narration in Vietnamese ("Biểu bì là lớp ngoài cùng của da và không có mạch máu."); Train on this → v3 in Vietnamese |
+| 11 | **Failed first** (no spoken failure; chip kept the last talk's "Updated — v9"). Fixed `c10c867`, `8015a07`, `f09a797`, then pass with `Training__ReviserTimeoutSeconds=10` and a whole-deck "twice as long" edit: "I couldn't apply that change to the script", chip "Couldn't update — timed out", script unchanged |
+| 12 | Pass: End, Start → `script_version` 9 |
+
+- **Reviser:** 2.0–3.3 s and 894–1,538 tokens in / 267–373 out for one slide; a whole-deck tone rewrite took 9.7 s
+  (3,859 / 1,775); the two timed out at 10.0 s.
+- **Usage:** 165 + 622.2 + 5 + 247 + 183.4 (Ricoh) + 161.2 (Vietnamese) ≈ 1,384 s.
+- **Defects fixed on the branch:**
+  - `f1ed848`: only the backend instructions knew about script edits, so the realtime model answered "also mention
+    X" itself. The front instructions now say to delegate a script-change request.
+  - `c10c867`: edit ids restart at `edit_1` every talk, but the web store kept the last talk's terminal edits and
+    dropped the new frames as regressions. The store clears edits when a talk leaves idle.
+  - `8015a07`, `f09a797`: a failed edit that released the held slide appended the notice and then replayed with
+    "Stop whatever you are saying now", so the notice was never heard. Any replay due (now, at resume, or after an
+    Ask exchange in plan 011) now leads with the notice.
+  - `86b6dfb`: the edit-pending notice quoted English words, spoken verbatim in the Vietnamese talk.
+- **Not fixed, for the owner:**
+  - Train on this in an Ask exchange sent only the question's late last fragment ("lâu"); the answer also starts
+    with the filler "One moment." The reviser still got it right from the answer.
+  - After "yes", the model calls `revise_script` again; the call is de-duplicated ("running"), so it is harmless.
+  - The model paraphrases the confirmation question (Vietnamese: "Mình sẽ thêm ý đó vào nội dung.", a statement).
+  - The revert panel keeps "will apply after this revert: edit_4 (applied)" after the edit applied.
+- **Cleanup:** Ricoh reverted to v1 text (v11 `revert`), Khóa 2 Bài 1 reverted to v1 (v4 `revert`).
