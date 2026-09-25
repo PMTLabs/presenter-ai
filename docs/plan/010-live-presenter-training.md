@@ -1193,7 +1193,7 @@ Every "Test that dies" is new unless marked (existing).
 | 11 | Set `Training:ReviserTimeoutSeconds` to 10 with a long edit (or block the endpoint) | Spoken failure; chip "Couldn't update — timed out"; script unchanged |
 | 12 | End; start the talk again | Starts from the latest version; record `usage` seconds and reviser tokens in the work log |
 
-All 12 rows passed live on 2026-09-24 (rows 3 and 11 after fixes); see the work log `docs/progress/002-work-log-phase0.md`.
+All 12 rows passed live on 2026-09-24 (rows 3 and 11 after fixes) and again in the full regression on 2026-09-25 (row 5 after `889e61f` and `7126d97`, row 8 on a re-run); see the work log `docs/progress/002-work-log-phase0.md`.
 
 ## 8. Rollout / phasing
 
