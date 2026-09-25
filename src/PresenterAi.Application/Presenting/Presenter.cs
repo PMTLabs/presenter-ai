@@ -1685,8 +1685,11 @@ public sealed partial class Presenter : IPresenter
         if (resolution?.Tool is { RequiresConfirmation: true } tool)
         {
             var key = tool.Name + ":" + Canonicalize(resolution.Arguments).ToJsonString();
+            // revise_script without slide numbers targets the current slide: the same words on another slide are a new edit.
+            if (intent is not null) key += ":" + SlideList(intent.Targets);
             if (_approvedTools.TryGetValue(key, out var approved) && _timeProvider.GetElapsedTime(approved.At).TotalSeconds < 60)
             {
+                if (intent is not null && AnswerRepeatedScriptEdit(call, key)) return;
                 CompleteImmediateCall(call, approved.Result ?? ToolResult.Failure("running") with { Outcome = "running" });
                 return;
             }
@@ -1884,7 +1887,7 @@ public sealed partial class Presenter : IPresenter
         var startedAt = _timeProvider.GetTimestamp();
         // A script edit is enqueued here, on the loop, from the intent captured with the question; the tool run below
         // only produces the acknowledgement.
-        if (pending.Intent is { } intent && !ApproveScriptEdit(intent)) return;
+        if (pending.Intent is { } intent && !ApproveScriptEdit(intent, pending.Key)) return;
         var runToken = _runCts?.Token ?? CancellationToken.None;
         _approvedTools[pending.Key] = new ApprovedToolCall(startedAt, null);
         _ = Task.Run(async () =>
@@ -2504,6 +2507,9 @@ public sealed partial class Presenter : IPresenter
         LogMessage("info", message);
         ClearQuestionHold();
         if (NarrationHeld) return;
+        // A repeated request for an applied edit cut the replay of this slide short (T13 live run): replay it rather
+        // than ask the model to find its place, which skipped the rest of the slide.
+        if (_replayOnResume && _state == PresenterState.Presenting && TrainingOverridesResume()) return;
         if (_heardOutput)
         {
             _session?.AppendInstructions(

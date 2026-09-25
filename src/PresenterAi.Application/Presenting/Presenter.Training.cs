@@ -22,6 +22,8 @@ public sealed partial class Presenter
 
     private readonly IScriptRevisionService? _scriptRevisions;
     private readonly Dictionary<string, LocalEdit> _localEdits = new(StringComparer.Ordinal);
+    // Approval key of a confirmed revise_script call → the edit it enqueued, to answer a repeated call by the edit's state.
+    private readonly Dictionary<string, string> _approvedEditIds = new(StringComparer.Ordinal);
     private readonly List<RecentTranscriptTurn> _recentTurns = [];
     private bool _trainerMode;
     private (string OwnerId, bool On)? _idleTrainerToggle;
@@ -124,6 +126,7 @@ public sealed partial class Presenter
         _talkId = null;
         _talkRegistration = null;
         _localEdits.Clear();
+        _approvedEditIds.Clear();
         _recentTurns.Clear();
         _replayOnResume = false;
         _replayOnResumeChanged = false;
@@ -215,6 +218,7 @@ public sealed partial class Presenter
         _trainerMode = false;
         PublishTrainerState();
         _localEdits.Clear();
+        _approvedEditIds.Clear();
         _recentTurns.Clear();
         _replayOnResume = false;
         _replayOnResumeChanged = false;
@@ -365,7 +369,7 @@ public sealed partial class Presenter
     /// Voice "yes" for a <c>revise_script</c> confirmation, on the loop: enqueues the captured intent synchronously when it
     /// still belongs to this talk. Returns false when the talk moved on (nothing is enqueued).
     /// </summary>
-    private bool ApproveScriptEdit(EditIntent intent)
+    private bool ApproveScriptEdit(EditIntent intent, string approvalKey)
     {
         if (intent.TalkId != _talkId || !TalkRunning || _presentation?.Id != intent.PresentationId ||
             intent.OwnerId != _ownerId)
@@ -374,7 +378,36 @@ public sealed partial class Presenter
             return false;
         }
 
-        EnqueueEdit(intent);
+        _approvedEditIds[approvalKey] = EnqueueEdit(intent);
+        return true;
+    }
+
+    /// <summary>
+    /// A repeated <c>revise_script</c> call with the key of a confirmed one (the model re-delegates the request after "yes").
+    /// While the edit is unsettled the caller answers as before (the hold covers the slide). Once applied, the call gets
+    /// <c>already_done</c>, and an applied edit of the current slide is replayed when the question it opened ends: the
+    /// delegation interrupts the replay, and the model then lost its place and skipped the rest of the slide (T13 live
+    /// run). Returns false when the caller should answer.
+    /// </summary>
+    private bool AnswerRepeatedScriptEdit(ToolCallReceived call, string approvalKey)
+    {
+        if (!_approvedEditIds.TryGetValue(approvalKey, out var id) || !_localEdits.TryGetValue(id, out var edit) ||
+            !edit.Settled)
+        {
+            return false;
+        }
+
+        if (edit.Failed)
+        {
+            LogMessage("info", $"edit: repeated request for {id} (failed)");
+            CompleteImmediateCall(call, ToolResult.Failure("that change could not be applied to the script"));
+            return true;
+        }
+
+        LogMessage("info", $"edit: repeated request for {id} (already applied)");
+        if (TalkRunning && !_wrappingUp && edit.Targets.Contains(_slideIndex)) _replayOnResume = true;
+        CompleteImmediateCall(call,
+            ToolResult.Success("this change is already in the script") with { Outcome = "already_done" });
         return true;
     }
 
@@ -387,7 +420,7 @@ public sealed partial class Presenter
 
     // ---- Queue, hold, reconcile -------------------------------------------------------------------------------------
 
-    private void EnqueueEdit(EditIntent intent)
+    private string EnqueueEdit(EditIntent intent)
     {
         var request = new ScriptEditRequest(intent.PresentationId, intent.OwnerId, intent.Targets, intent.BaseVersion,
             intent.Feedback, intent.Exchange,
@@ -404,6 +437,7 @@ public sealed partial class Presenter
         ArmEditKeepAlive();
         // The outcome may already be terminal (queue_full); reconciling by state is idempotent.
         ReconcileWithHead();
+        return id;
     }
 
     /// <summary>Stops in-flight narration of the current slide: no timer may send the next part or advance.</summary>
@@ -493,6 +527,7 @@ public sealed partial class Presenter
             if (outcome.IsTerminal)
             {
                 edit.Settled = true;
+                edit.Failed = outcome.Status == ScriptEditStatus.Failed;
                 settled.Add((edit, outcome));
             }
             else if (outcome.Status == ScriptEditStatus.Processing && !edit.ProcessingEmitted)
@@ -697,6 +732,7 @@ public sealed partial class Presenter
         public IReadOnlyList<int> Targets { get; } = targets;
         public long QueuedAt { get; } = queuedAt;
         public bool Settled { get; set; }
+        public bool Failed { get; set; }
         public bool ProcessingEmitted { get; set; }
     }
 

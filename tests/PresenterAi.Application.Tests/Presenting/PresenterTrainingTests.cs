@@ -535,6 +535,157 @@ public sealed class PresenterTrainingTests
         Assert.Equal(6, h.Presenter.CurrentScriptVersion()!.Version);
     }
 
+    // ---- Repeated revise_script after "yes" (T13 live run) --------------------------------------------------------
+
+    private const string Feedback = "{\"feedback\":\"Also mention the 2025 figures.\"}";
+
+    /// <summary>The model re-delegates the confirmed request: a question hold opens, the backend calls the tool again.</summary>
+    private static async Task RepeatRequest(Harness h, string callId, string arguments = Feedback)
+    {
+        // The first delegation (the confirmed call) has finished, as live: its tool round, then its answer.
+        for (var i = 0; i < 3; i++)
+        {
+            h.S.RaiseDelegatedResponse("d");
+            await h.Settle();
+        }
+
+        h.S.RaiseDelegation("responses", $"del-{callId}");
+        await h.Settle();
+        h.S.RaiseToolCall($"del-{callId}", callId, "revise_script", arguments);
+        await h.Settle();
+    }
+
+    /// <summary>The tool round and then the backend answer complete, the answer is voiced, and the audience stays quiet.</summary>
+    private static async Task AnswerAndGoQuiet(Harness h, string callId)
+    {
+        // The tool round completes, the continued response completes, then the final answer.
+        var ready = h.Logs.Count(l => l == "question: backend answer ready");
+        for (var i = 0; i < 3 && h.Logs.Count(l => l == "question: backend answer ready") == ready; i++)
+        {
+            h.S.RaiseDelegatedResponse($"del-{callId}");
+            await h.Settle();
+        }
+
+        Assert.Equal(ready + 1, h.Logs.Count(l => l == "question: backend answer ready"));
+        await h.Settle();
+        h.S.Speak(200);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 701));
+    }
+
+    [Fact]
+    public async Task Repeated_request_for_an_applied_edit_gets_already_done_and_the_question_resume_replays_the_slide()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.ConfirmEdit();
+        var beforeApply = h.S.Sent.Count;
+        await h.Apply(id, 6, "Added figures", (0, "Slide one, new text."));
+        Assert.Single(h.S.Sent.Skip(beforeApply), s => s.EventId == "slide-1-part-1" && s.Content!.Contains("Slide one, new text.", StringComparison.Ordinal));
+        h.S.Speak(200);
+        await h.Settle();
+
+        await RepeatRequest(h, "c2");
+        var output = JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!;
+        Assert.Equal("already_done", output["status"]?.ToString());
+        Assert.Contains($"edit: repeated request for {id} (already applied)", h.Logs);
+        Assert.Single(h.Service.Enqueued);
+
+        var sent = h.S.Sent.Count;
+        await AnswerAndGoQuiet(h, "c2");
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.DoesNotContain(after, s => s.EventId?.StartsWith("slide-1-resume-", StringComparison.Ordinal) == true);
+        var replay = Assert.Single(after, s => s.EventId == "slide-1-part-1");
+        Assert.Contains("Slide one, new text.", replay.Content);
+        Assert.Equal(0, h.Presenter.Snapshot().SlideIndex);
+    }
+
+    [Fact]
+    public async Task Repeated_request_while_the_edit_is_pending_is_answered_as_before_and_replays_once()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.ConfirmEdit();
+        var ack = h.S.Sent.Single(s => s.EventId == "c1").Content;
+
+        await RepeatRequest(h, "c2");
+        var output = JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!;
+        Assert.NotEqual("already_done", output["status"]?.ToString());
+        Assert.DoesNotContain(h.Logs, l => l.StartsWith("edit: repeated request", StringComparison.Ordinal));
+
+        await h.Apply(id, 6, "Added figures", (0, "Slide one, new text."));
+        await AnswerAndGoQuiet(h, "c2");
+        Assert.Single(h.S.Sent, s => s.EventId == "slide-1-part-1" && s.Content!.Contains("Slide one, new text.", StringComparison.Ordinal));
+        Assert.NotNull(ack);
+    }
+
+    [Fact]
+    public async Task Repeated_request_for_an_applied_edit_of_another_slide_resumes_without_a_replay()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        const string laterSlide = "{\"feedback\":\"Add the 2025 figures.\",\"slide_numbers\":[4]}";
+        await h.Ask(laterSlide);
+        await h.Answer("yes");
+        var id = h.Service.Enqueued.Single().Id;
+        await h.Apply(id, 6, "Added figures", (3, "Slide four, new text."));
+        h.S.Speak(200);
+        await h.Settle();
+
+        await RepeatRequest(h, "c2", laterSlide);
+        Assert.Equal("already_done", JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!["status"]?.ToString());
+        var sent = h.S.Sent.Count;
+        await AnswerAndGoQuiet(h, "c2");
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.Contains(after, s => s.Content == PromptBuilder.ResumeAfterQuestionInstruction());
+        Assert.DoesNotContain(after, s => s.EventId == "slide-1-part-1");
+    }
+
+    [Fact]
+    public async Task Same_words_on_another_slide_within_a_minute_ask_for_a_new_confirmation()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.ConfirmEdit();
+        await h.Apply(id, 6, "Added figures", (0, "Slide one, new text."));
+        // The slide ends and the talk advances on its own (a manual Next clears the approvals).
+        h.S.Speak(200);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromSeconds(10));
+        Assert.Equal(1, h.Presenter.Snapshot().SlideIndex);
+
+        await h.Ask(Feedback, "c2");
+        var output = JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!;
+        Assert.Equal("confirmation_required", output["status"]?.ToString());
+        await h.Answer("yes");
+        Assert.Equal([1], h.Service.Enqueued[^1].Request.TargetSlideIndexes);
+    }
+
+    [Fact]
+    public async Task Repeated_request_for_a_failed_edit_reports_the_failure_without_a_replay()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.ConfirmEdit();
+        Assert.True(h.Service.SetOutcome(id, EditOutcome.Failed([0], "timed out"), null));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+        var replays = h.S.Sent.Count(s => s.EventId == "slide-1-part-1");
+
+        await RepeatRequest(h, "c2");
+        var output = JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!;
+        Assert.False(output["ok"]!.GetValue<bool>());
+        Assert.Null(output["status"]);
+        Assert.Contains($"edit: repeated request for {id} (failed)", h.Logs);
+        await AnswerAndGoQuiet(h, "c2");
+        Assert.Equal(replays, h.S.Sent.Count(s => s.EventId == "slide-1-part-1"));
+    }
+
     [Fact]
     public async Task Applied_while_paused_replays_on_resume()
     {
