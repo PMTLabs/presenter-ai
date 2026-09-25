@@ -364,6 +364,8 @@ public sealed class PresenterAskTests
     [Theory]
     [InlineData("yes", "continued")]
     [InlineData("no", "waiting")]
+    [InlineData("no thank you", "waiting")]
+    [InlineData("yes go ahead", "continued")]
     public async Task Check_in_hears_a_real_yes_and_a_real_no(string reply, string reason)
     {
         await using var h = new Harness();
@@ -372,7 +374,7 @@ public sealed class PresenterAskTests
         await h.Reply(reply);
 
         Assert.Equal(reason, Assert.Single(h.Offs).Reason);
-        if (reply == "yes")
+        if (reason == "continued")
         {
             Assert.Single(h.S.Sent, IsResumeAfterQuestion);
         }
