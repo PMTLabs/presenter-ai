@@ -171,6 +171,37 @@ describe("presenterStore", () => {
     expect(state.currentEditId).toBe("edit_2");
   });
 
+  it("a new talk starts with no edits, so a reused edit id is tracked again", () => {
+    const store = usePresenterStore.getState();
+    const frame = (status: string, extra: Record<string, unknown> = {}) =>
+      store.message({
+        type: "script_edit",
+        id: "edit_1",
+        status,
+        slideIndexes: [0],
+        version: null,
+        summary: null,
+        error: null,
+        ...extra,
+      });
+    store.applySnapshot({ state: "presenting", slideIndex: 0, slideCount: 3, muted: false });
+    frame("queued");
+    frame("applied", { version: 9, summary: "Old talk" });
+    store.applySnapshot({ state: "idle", slideIndex: 0, slideCount: 3, muted: false });
+
+    // T13 live run: the next talk's edit_1 failed, but the chip kept "Updated — v9".
+    store.applySnapshot({ state: "connecting", slideIndex: 0, slideCount: 3, muted: false });
+    expect(usePresenterStore.getState().edits).toEqual({});
+    expect(usePresenterStore.getState().currentEditId).toBeNull();
+    frame("queued");
+    frame("failed", { error: "timeout" });
+
+    const state = usePresenterStore.getState();
+    expect(state.currentEditId).toBe("edit_1");
+    expect(state.edits.edit_1.status).toBe("failed");
+    expect(state.edits.edit_1.error).toBe("timeout");
+  });
+
   it("does not regress a terminal edit status", () => {
     const store = usePresenterStore.getState();
     store.message({
