@@ -701,6 +701,7 @@ public sealed partial class Presenter : IPresenter
         ResetUtterance();
         SetInteraction(Interaction.None);
         _askTrailingDeltaAt = null;
+        _askLateReplyUntil = null;
         _noticesForReconnect.Clear();
         _voicedIntervals.Clear();
         _lastVoicedAt = 0;
@@ -1038,6 +1039,7 @@ public sealed partial class Presenter : IPresenter
         if (forwarded)
         {
             Audio?.Invoke(new PresenterAudio(audio.Bytes, audio.StartMs, audio.EndMs));
+            TrackExchangePlayback(audio.Bytes.Length);
         }
 
         if (!forwarded)
@@ -1394,7 +1396,8 @@ public sealed partial class Presenter : IPresenter
                 }
                 SetInteraction(Interaction.AwaitingCarryOn);
                 MarkExchangeCheckIn();
-                var remaining = FollowUpWaitMs + 700 - (int)_timeProvider.GetElapsedTime(_lastAnswerAt).TotalMilliseconds;
+                var remaining = CheckInWindowDelayMs(
+                    FollowUpWaitMs + 700 - (int)_timeProvider.GetElapsedTime(_lastAnswerAt).TotalMilliseconds);
                 if (remaining <= 0)
                 {
                     OnInteractionElapsed();
@@ -1406,6 +1409,7 @@ public sealed partial class Presenter : IPresenter
 
                 break;
             case Interaction.AwaitingCarryOn:
+                if (HoldCheckInForSpeech()) break;
                 SetInteraction(Interaction.None);
                 if (_exchange is not null)
                     EndExchange(AskOutcome.Resume, "continued", $"question: no follow-up after {FollowUpWaitMs} ms; resuming");
@@ -2295,6 +2299,7 @@ public sealed partial class Presenter : IPresenter
     private bool SendAudioCore(byte[] pcm16)
     {
         if (_exchange is { Phase: AskPhase.Listening or AskPhase.Sending } exchange) return RecordAskAudio(exchange, pcm16);
+        TrackExchangeMic(pcm16);
         return (_state is PresenterState.Presenting or PresenterState.Paused) && !_muted && (_session?.SendAudio(pcm16) ?? false);
     }
 
@@ -2378,6 +2383,7 @@ public sealed partial class Presenter : IPresenter
     {
         EndExchange(AskOutcome.Ended, "ended");
         _askTrailingDeltaAt = null;
+        _askLateReplyUntil = null;
         if (_noticesForReconnect.Count > 0) LogMessage("info", $"ask: dropped {_noticesForReconnect.Count} deferred notices");
         _noticesForReconnect.Clear();
         // A reset segment whose close has not completed is estimated once here; its late completion only disposes.

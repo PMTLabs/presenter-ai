@@ -45,6 +45,15 @@ public static class VoiceCommandMatcher
         (VoiceCommandIntent.No, language.No.ToArray())
     })).ToArray();
 
+    // A Yes/No phrase followed only by polite words (owner decision, 2026-09-24), compared without spaces as the
+    // exact phrases are, because the assembler concatenates deltas verbatim.
+    private static readonly (VoiceCommandIntent Intent, string[] Heads, string[] Tails)[] PoliteReplies =
+        ConfirmationLexicon.Languages.SelectMany(language => new[]
+        {
+            (VoiceCommandIntent.Yes, Compact(language.Yes), Compact(language.Polite.Concat(language.Fillers).Concat(language.YesPolite))),
+            (VoiceCommandIntent.No, Compact(language.No), Compact(language.Polite.Concat(language.Fillers)))
+        }).ToArray();
+
     public static VoiceCommand? Match(string utterance)
     {
         ArgumentNullException.ThrowIfNull(utterance);
@@ -56,6 +65,12 @@ public static class VoiceCommandMatcher
         foreach (var (intent, phrases) in Phrases)
             foreach (var phrase in phrases)
                 if (spaced == phrase || compact == phrase.Replace(" ", "", StringComparison.Ordinal))
+                    return new VoiceCommand(intent);
+
+        foreach (var (intent, heads, tails) in PoliteReplies)
+            foreach (var head in heads)
+                if (compact.Length > head.Length && compact.StartsWith(head, StringComparison.Ordinal) &&
+                    IsPoliteTail(compact[head.Length..], tails))
                     return new VoiceCommand(intent);
 
         foreach (var prefix in new[] { "go to slide", "slide" })
@@ -72,6 +87,12 @@ public static class VoiceCommandMatcher
         }
         return null;
     }
+
+    private static bool IsPoliteTail(string rest, string[] tails) =>
+        rest.Length == 0 || tails.Any(tail => rest.StartsWith(tail, StringComparison.Ordinal) && IsPoliteTail(rest[tail.Length..], tails));
+
+    private static string[] Compact(IEnumerable<string> phrases) =>
+        phrases.Select(phrase => phrase.Normalize(NormalizationForm.FormC).Replace(" ", "", StringComparison.Ordinal)).ToArray();
 
     private static List<string> Normalize(string utterance)
     {

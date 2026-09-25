@@ -364,6 +364,8 @@ public sealed class PresenterAskTests
     [Theory]
     [InlineData("yes", "continued")]
     [InlineData("no", "waiting")]
+    [InlineData("no thank you", "waiting")]
+    [InlineData("yes go ahead", "continued")]
     public async Task Check_in_hears_a_real_yes_and_a_real_no(string reply, string reason)
     {
         await using var h = new Harness();
@@ -372,7 +374,7 @@ public sealed class PresenterAskTests
         await h.Reply(reply);
 
         Assert.Equal(reason, Assert.Single(h.Offs).Reason);
-        if (reply == "yes")
+        if (reason == "continued")
         {
             Assert.Single(h.S.Sent, IsResumeAfterQuestion);
         }
@@ -2513,6 +2515,228 @@ public sealed class PresenterAskTests
 
         Assert.Equal(PromptBuilder.ResumeAfterQuestionInstruction(), Assert.Single(h.S.Sent, IsResumeAfterQuestion).Content);
         Assert.DoesNotContain(h.S.Sent, s => s.EventId?.StartsWith("pause-", StringComparison.Ordinal) == true);
+    }
+
+    // ---- T8 live-run anomaly: a check-in "Yes" around a voiced model blip ---------------------------------------
+
+    [Theory]
+    [InlineData("blip-then-yes")]
+    [InlineData("yes-then-blip")]
+    public async Task Check_in_yes_counts_when_model_audio_re_enters_answering_around_it(string order)
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        // Answer audio begins while the question's own transcript is still arriving (live frames 643.5-644.8 s).
+        h.S.Hear("delivery", 66000, 66200);
+        await h.Settle();
+        await h.Answer();
+        h.S.Hear("And which two products are in active development", 69200, 69400);
+        await h.Settle();
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+        await h.Advance(TimeSpan.FromMilliseconds(2700));
+
+        // The upstream hears the user's audio first, so the model may voice something (no transcript) around the
+        // "Yes" delta: before it (Answering re-entered) or after it (the reply is already open).
+        if (order == "blip-then-yes")
+        {
+            await h.Answer(200);
+            h.S.Hear(" Yes", 75800, 76000);
+            await h.Settle();
+        }
+        else
+        {
+            h.S.Hear(" Yes", 75800, 76000);
+            await h.Settle();
+            await h.Answer(200);
+        }
+
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.Contains("question: confirmed; resuming", h.Logs);
+        Assert.Single(h.S.Sent, IsResumeAfterQuestion);
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 701));
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+        Assert.Single(h.Offs);
+    }
+
+    [Fact]
+    public async Task A_voiced_blip_during_check_in_keeps_the_same_check_in_and_its_timeout()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+        await h.Advance(TimeSpan.FromMilliseconds(2000));
+
+        await h.Answer(200);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 1));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+    }
+
+    [Fact]
+    public async Task A_follow_up_answer_wait_starts_before_its_check_in_again()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+        await h.Reply("next slide");
+        Assert.Contains("ask: unclear check-in reply; follow-up", h.Logs);
+        await h.Advance(TimeSpan.FromMilliseconds(1600));
+
+        // The follow-up's answer is not yet at its check-in: a user delta over it stays UI-only.
+        await h.Answer();
+        h.S.Hear("yes", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Empty(h.Offs);
+        Assert.Equal(2, h.Logs.Count(l => l == "ask: check-in"));
+    }
+
+    // ---- Owner decision "hold for speech" (2026-09-24): check-in window vs. transcript lag ----------------------
+
+    [Fact]
+    public async Task Silent_check_in_times_out_five_seconds_after_the_check_in_audio_finishes_playing()
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        // 3 s of answer audio arrive at once (faster than real time): it plays until t0 + 3000.
+        await h.Answer(3000);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+        Assert.Contains(h.Logs, l => l.StartsWith("ask: check-in window starts after playback", StringComparison.Ordinal));
+
+        await h.Advance(TimeSpan.FromMilliseconds(3000 + Presenter.DefaultFollowUpWaitMs - 701 - 2));
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(3));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Silent_check_in_after_a_short_answer_keeps_the_existing_window()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs - 3));
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(3));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.DoesNotContain("ask: check-in held for listener speech", h.Logs);
+    }
+
+    [Theory]
+    [InlineData("before-window", 3000, 1200)]
+    [InlineData("late-in-window", 300, 3000)]
+    public async Task Check_in_reply_whose_transcript_lags_the_mic_speech_by_2_7_s_counts(
+        string when, int answerMs, int speechAfterCheckInMs)
+    {
+        _ = when;
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        await h.Answer(answerMs);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        await h.Advance(TimeSpan.FromMilliseconds(speechAfterCheckInMs));
+
+        // The listener says "No" for about a second; its transcript arrives 2.7 s after the speech ends.
+        await MicSpeechLive(h, 1000);
+        await h.Advance(TimeSpan.FromMilliseconds(2700));
+        Assert.Empty(h.Offs);
+        h.S.Hear("No.", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Equal("waiting", Assert.Single(h.Offs).Reason);
+        Assert.DoesNotContain(h.S.Sent, IsResumeAfterQuestion);
+    }
+
+    [Fact]
+    public async Task Speech_hold_never_makes_a_stale_delta_count()
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        await h.Answer();
+        h.S.Hear("and the budget", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+
+        // Within 1.5 s of the previous user delta: UI-only (P-13), and the speech hold below must not change that.
+        await h.Advance(TimeSpan.FromMilliseconds(300));
+        h.S.Hear("no", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(3700));
+        await MicSpeechLive(h, 1000);
+        await h.Advance(TimeSpan.FromMilliseconds(CheckInGraceMs + 1));
+
+        Assert.Contains("ask: check-in held for listener speech", h.Logs);
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Speech_hold_is_bounded_while_the_mic_keeps_hearing_voice()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+
+        // Continuous voice (a noisy room): the window closes at its normal end plus CheckInMaxHoldMs.
+        for (var i = 0; i < 29; i++)
+        {
+            await h.MicSpeech(100);
+            await h.Advance(TimeSpan.FromMilliseconds(500));
+        }
+
+        Assert.Empty(h.Offs);
+        for (var i = 0; i < 3; i++)
+        {
+            await h.MicSpeech(100);
+            await h.Advance(TimeSpan.FromMilliseconds(500));
+        }
+
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Late_check_in_transcript_after_the_timeout_does_not_open_a_question_hold()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+        var holds = h.Logs.Count(l => l == "question: hold opened");
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 1));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+
+        // The reply was not heard by the mic hold (e.g. too quiet); its transcript lands 2.7 s after the timeout.
+        await h.Advance(TimeSpan.FromMilliseconds(2700));
+        h.S.Hear("No.", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Contains("ask: late check-in reply after the exchange ended; ignored", h.Logs);
+        Assert.Equal(holds, h.Logs.Count(l => l == "question: hold opened"));
+        Assert.Single(h.S.Sent, IsResumeAfterQuestion);
+
+        // The guard is bounded: a new question later opens the hold as before.
+        await h.Advance(TimeSpan.FromSeconds(5));
+        h.S.Hear("What about the budget?", 0, 100);
+        await h.Settle();
+        Assert.Equal(holds + 1, h.Logs.Count(l => l == "question: hold opened"));
+    }
+
+    private const int CheckInGraceMs = Presenter.CheckInTranscriptGraceMs;
+
+    /// <summary>Voiced mic audio in real time: 100 ms frames with the clock advancing between them.</summary>
+    private static async Task MicSpeechLive(Harness h, int milliseconds)
+    {
+        for (var i = 0; i < milliseconds / 100; i++)
+        {
+            await h.MicSpeech(100);
+            await h.Advance(TimeSpan.FromMilliseconds(100));
+        }
     }
 
     // ---- Harness --------------------------------------------------------------------------------------------------
