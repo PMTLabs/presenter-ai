@@ -22,8 +22,8 @@ chose "Push + open both PRs"; hold the PRs until the regression passes.
   - `window.__fm` is injected: `say`, `btn`, `ev`, `tx`, `edit(clip, yes)`, `ver(n)` (reads a version's
     Before/After), `wait`, `has`, `slide`, `sleep`, `out`.
   - It logs frames by patching `WebSocket.prototype.send`, so it works after load.
-  - The full script: `scratchpad\fm-full.js` is the older variant. The compact variant is the last `javascript_exec`
-    before this handoff; re-create it if the page reloads, because a Vite HMR reload loses it.
+  - The script is `scratchpad\fm-compact.js`. Paste its content into `javascript_exec` again if the page reloads,
+    because a Vite HMR reload loses it.
   - Keep each JS call under 45 s. Say "yes" about 3 s after `backend answer ready`: a late yes times out (8 s), an
     early one is ignored while the question plays.
 - **Decks:**
