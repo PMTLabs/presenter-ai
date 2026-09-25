@@ -17,6 +17,9 @@ public interface IPresenter : IAsyncDisposable
     event Action<PresenterScriptVersion>? ScriptVersion { add { } remove { } }
     event Action<PresenterTrainerState>? TrainerState { add { } remove { } }
 
+    /// <summary>Press-to-ask state changes for the <c>ask_state</c> frame (plan 011 §4.3).</summary>
+    event Action<PresenterAskState>? AskState { add { } remove { } }
+
     PresenterSnapshot Snapshot();
 
     Task<PresenterStartResult> StartAsync(string id, int? fromIndex, string ownerId, CancellationToken cancellationToken = default);
@@ -59,4 +62,16 @@ public interface IPresenter : IAsyncDisposable
         int slideIndex,
         CancellationToken cancellationToken = default) =>
         Task.FromResult(false);
+
+    /// <summary>Press-to-ask (plan 011): starts listening; the answer arrives through <see cref="AskState"/>. False when refused.</summary>
+    Task<bool> AskStartAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    /// <summary>Press-to-ask (plan 011): finishes listening and sends the question; false when not listening.</summary>
+    Task<bool> AskDoneAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    /// <summary>Press-to-ask (plan 011): restarts the quiet timer; false when not listening.</summary>
+    Task<bool> AskExtendAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
+
+    /// <summary>Press-to-ask (plan 011): discards the question; false when not listening or awaiting the unmute ack.</summary>
+    Task<bool> AskCancelAsync(CancellationToken cancellationToken = default) => Task.FromResult(false);
 }

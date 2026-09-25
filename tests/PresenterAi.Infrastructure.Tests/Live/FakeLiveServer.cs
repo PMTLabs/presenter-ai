@@ -40,6 +40,43 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
     public string SessionId { get; set; } = "sess_fake";
 
+    /// <summary>Plan 011 T5: when true, every recorded append also carries its base64 <c>audio</c> payload.</summary>
+    public bool KeepAudio { get; set; }
+
+    /// <summary>Plan 011 T5: when set, <c>session.start</c> waits on it before answering (e.g. to hold a reconnect).</summary>
+    public TaskCompletionSource? StartGate { get; set; }
+
+    /// <summary>How many <c>session.start</c> events reached the server (counted before any <see cref="StartGate"/> wait).</summary>
+    public int StartCount => Volatile.Read(ref _startCount);
+
+    /// <summary>
+    /// Plan 011 T5: when set, the <c>session.input_audio.unmuted</c> ack is sent only after it completes. Reads go on
+    /// meanwhile, so an append sent before the ack is still received and recorded.
+    /// </summary>
+    public TaskCompletionSource? UnmuteAckGate { get; set; }
+
+    /// <summary>Plan 011 T5: after this many burst-sized (non-960-byte) appends, reads wait on <see cref="ReadGate"/>.</summary>
+    public int? GateReadsAfterBurstAppends { get; set; }
+
+    public TaskCompletionSource ReadGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// Plan 011 T5 (P-16): after a burst, answers with this many 20 ms <see cref="AnswerDelta"/> frames, each sent only
+    /// once the server has received 20 ms more unmuted input audio, emulating an upstream whose output is paced by its
+    /// input clock (it stalls when input stops or is muted).
+    /// </summary>
+    public int PacedAnswerFrames { get; set; }
+
+    public int AnswerFramesSent => Volatile.Read(ref _answerFramesSent);
+
+    private int _startCount;
+    private int _answerFramesSent;
+    private int _burstAppends;
+    private bool _inputMuted;
+    private long _inputMs;
+    private bool _burstSeen;
+    private bool _answerStarted;
+
     public int Port { get; private set; }
 
     public string Url => $"ws://127.0.0.1:{Port}/v1/live/sessions";
@@ -186,12 +223,31 @@ public sealed class FakeLiveServer : IAsyncDisposable
                 bytes = [];
             }
 
-            Record(new JsonObject
+            var append = new JsonObject
             {
                 ["type"] = type,
                 ["audioLength"] = audio.Length,
                 ["silent"] = bytes.All(value => value == 0)
-            });
+            };
+            if (KeepAudio) append["audio"] = audio;
+            Record(append);
+            if (!_inputMuted) Interlocked.Add(ref _inputMs, bytes.Length / 48);
+            if (bytes.Length > 960)
+            {
+                _burstSeen = true;
+                _burstAppends++;
+                if (GateReadsAfterBurstAppends is { } gateAfter && _burstAppends >= gateAfter)
+                {
+                    await ReadGate.Task.WaitAsync(cancellationToken);
+                }
+            }
+            else if (_burstSeen && !_answerStarted && PacedAnswerFrames > 0)
+            {
+                // The first ordinary 960-byte append after a burst: the burst is over, so the answer begins.
+                _answerStarted = true;
+                _ = SendPacedAnswerAsync(socket, Interlocked.Read(ref _inputMs), cancellationToken);
+            }
+
             return;
         }
 
@@ -199,6 +255,12 @@ public sealed class FakeLiveServer : IAsyncDisposable
         switch (type)
         {
             case "session.start":
+                Interlocked.Increment(ref _startCount);
+                if (StartGate is { } startGate)
+                {
+                    await startGate.Task.WaitAsync(cancellationToken);
+                }
+
                 if (StartDelayMs > 0)
                 {
                     await Task.Delay(StartDelayMs, cancellationToken);
@@ -290,10 +352,20 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
                 return;
             case "session.input_audio.mute":
+                _inputMuted = true;
                 await SendAsync(socket, new JsonObject { ["type"] = "session.input_audio.muted" }, cancellationToken);
                 return;
             case "session.input_audio.unmute":
-                await SendAsync(socket, new JsonObject { ["type"] = "session.input_audio.unmuted" }, cancellationToken);
+                _inputMuted = false;
+                // The upstream echoes the unmute's event id as client_event_id (T1 trace: "unmute-3").
+                var unmuteId = message["event_id"]?.GetValue<string>();
+                if (UnmuteAckGate is { } ackGate)
+                {
+                    _ = SendAfterAsync(ackGate.Task, socket, new JsonObject { ["type"] = "session.input_audio.unmuted", ["client_event_id"] = unmuteId }, cancellationToken);
+                    return;
+                }
+
+                await SendAsync(socket, new JsonObject { ["type"] = "session.input_audio.unmuted", ["client_event_id"] = unmuteId }, cancellationToken);
                 return;
             case "session.close":
                 if (!IgnoreClose)
@@ -319,6 +391,60 @@ public sealed class FakeLiveServer : IAsyncDisposable
 
                 return;
         }
+    }
+
+    private static async Task SendAfterAsync(Task gate, WebSocket socket, JsonObject message, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await gate.WaitAsync(cancellationToken);
+            await SendAsync(socket, message, cancellationToken);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or WebSocketException or ObjectDisposedException)
+        {
+        }
+    }
+
+    private async Task SendPacedAnswerAsync(WebSocket socket, long startInputMs, CancellationToken cancellationToken)
+    {
+        try
+        {
+            for (var index = 0; index < PacedAnswerFrames; index++)
+            {
+                var needed = startInputMs + (index + 1) * 20L;
+                var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+                while (Interlocked.Read(ref _inputMs) < needed)
+                {
+                    // The upstream stalls without input; give up rather than hang the test.
+                    if (DateTimeOffset.UtcNow > deadline || socket.State != WebSocketState.Open) return;
+                    await Task.Delay(5, cancellationToken);
+                }
+
+                await SendAsync(socket, new JsonObject
+                {
+                    ["type"] = "session.output_audio.delta",
+                    ["delta"] = Convert.ToBase64String(AnswerDelta()),
+                    ["start_ms"] = 60_000 + index * 20,
+                    ["end_ms"] = 60_000 + index * 20 + 20
+                }, cancellationToken);
+                Interlocked.Increment(ref _answerFramesSent);
+            }
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or WebSocketException or ObjectDisposedException)
+        {
+        }
+    }
+
+    /// <summary>A voiced 20 ms answer frame distinguishable from narration audio (a square wave of ±2000).</summary>
+    public static byte[] AnswerDelta()
+    {
+        var bytes = new byte[960];
+        for (var index = 0; index < 480; index++)
+        {
+            BitConverter.TryWriteBytes(bytes.AsSpan(index * 2, 2), (short)(index % 2 == 0 ? 2000 : -2000));
+        }
+
+        return bytes;
     }
 
     private async Task SendInstructionAudioAsync(WebSocket socket, string? eventId, CancellationToken cancellationToken)

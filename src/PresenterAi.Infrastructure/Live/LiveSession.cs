@@ -71,6 +71,15 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     public event Action<string, string, string, string>? ToolCallRequested;
     public event Action<string, string, string>? HostedToolActivity;
     public event Action<string, double?>? Closed;
+    public event Action<string, long>? InputPositionMarked;
+    public event Action<string?>? InputAudioUnmuted;
+
+    /// <summary>
+    /// Every parsed upstream text event except <c>session.output_audio.delta</c> (audio is raised through
+    /// <see cref="Audio"/>), with its type, before it is handled. Diagnostics only (the ask probe's trace); not part of
+    /// <see cref="ILiveSession"/>.
+    /// </summary>
+    public event Action<string, JsonElement>? EventReceived;
 
     public LiveSessionState State => (LiveSessionState)Volatile.Read(ref _state);
 
@@ -221,9 +230,14 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         return SendCommand("session.input_audio.mute", NextEventId("mute"));
     }
 
-    public bool Unmute()
+    public bool Unmute() => Unmute(out _);
+
+    public bool Unmute(out string? eventId)
     {
-        return SendCommand("session.input_audio.unmute", NextEventId("unmute"));
+        var id = NextEventId("unmute");
+        var sent = SendCommand("session.input_audio.unmute", id);
+        eventId = sent ? id : null;
+        return sent;
     }
 
     public bool SendAudio(ReadOnlyMemory<byte> pcm16)
@@ -240,6 +254,17 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
         }
 
         return Enqueue(new AudioFrame(pcm16[..length].ToArray(), IsSilence: false));
+    }
+
+    public string? MarkInputPosition()
+    {
+        if (State != LiveSessionState.Open)
+        {
+            return null;
+        }
+
+        var id = NextEventId("mark");
+        return Enqueue(new MarkFrame(id)) ? id : null;
     }
 
     public async Task<LiveCloseResult> CloseAsync()
@@ -325,6 +350,10 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                         break;
                     case AudioFrame audio when State == LiveSessionState.Open:
                         await SendAudioFrameAsync(audio).ConfigureAwait(false);
+                        break;
+                    case MarkFrame mark:
+                        // _sentMs is written only by this loop, so the mark sees every append queued before it.
+                        InputPositionMarked?.Invoke(mark.Id, _sentMs);
                         break;
                 }
             }
@@ -506,6 +535,7 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
             return;
         }
 
+        EventReceived?.Invoke(type, message);
         if (_options.LogEvents)
         {
             _logger.LogInformation("<< {Event}", message.GetRawText());
@@ -538,6 +568,9 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
                 break;
             case "session.delegation.created":
                 Delegation?.Invoke(message);
+                break;
+            case "session.input_audio.unmuted":
+                InputAudioUnmuted?.Invoke(GetString(message, "client_event_id"));
                 break;
             case "response.event":
                 HandleResponseEvent(message);
@@ -788,4 +821,5 @@ public sealed class LiveSession : ILiveSession, IAsyncDisposable
     private sealed record JsonFrame(JsonObject Event, bool AllowConnecting = false, bool AllowClosing = false) : OutboundFrame;
     private sealed record AudioFrame(byte[] Bytes, bool IsSilence) : OutboundFrame;
     private sealed record PumpFrame : OutboundFrame;
+    private sealed record MarkFrame(string Id) : OutboundFrame;
 }

@@ -80,12 +80,71 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Cut_off_nudge_answers_in_the_language_of_the_talk_without_a_phrase_to_read_out()
+    {
+        // T8 regression fix: a question cut off at the cap; a quoted phrase would be spoken verbatim (T13 live run).
+        var instruction = PromptBuilder.AskCutOffInstruction();
+
+        Assert.Contains("in the language of the talk", instruction, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("repeat the question", instruction);
+        // T8 re-run: after the Ask's PauseInstruction only an explicit "now" made the model speak.
+        Assert.Contains("Answer it now", instruction);
+        Assert.EndsWith("Then stop and wait.", instruction);
+        Assert.DoesNotContain("\"", instruction);
+        Assert.DoesNotContain("Say:", instruction);
+    }
+
+    [Fact]
+    public void Answer_now_nudge_answers_in_the_language_of_the_talk_without_a_phrase_to_read_out()
+    {
+        // T8 regression run: a complete question left unanswered after the Ask's PauseInstruction.
+        var instruction = PromptBuilder.AskAnswerNowInstruction();
+
+        Assert.Contains("in the language of the talk", instruction, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Answer it now", instruction);
+        Assert.Contains("repeat it", instruction);
+        Assert.EndsWith("Then stop and wait.", instruction);
+        Assert.DoesNotContain("cut off", instruction);
+        Assert.DoesNotContain("\"", instruction);
+        Assert.DoesNotContain("Say:", instruction);
+    }
+
+    [Fact]
     public void Question_resume_asks_for_a_natural_transition_not_a_canned_bridge()
     {
         var instruction = PromptBuilder.ResumeAfterQuestionInstruction();
         Assert.Contains("natural transition of your own", instruction);
         Assert.Contains("restart the sentence", instruction);
         Assert.DoesNotContain("Back to the slide", instruction);
+    }
+
+    [Theory]
+    [InlineData(false, "then restart the sentence you were in when the question came")]
+    [InlineData(true, "then restart the narration sentence you were in before the first question, not an earlier answer")]
+    public void Ask_resume_names_the_slide_ends_the_pause_and_keeps_the_transition(bool followUp, string restart)
+    {
+        var instruction = PromptBuilder.ResumeAfterAskInstruction(1, 5, "Plan", followUp);
+        Assert.StartsWith("The pause is over. Resume slide 2 of 5 (\"Plan\") now:", instruction);
+        Assert.Contains("natural transition of your own", instruction);
+        Assert.Contains(restart, instruction);
+        Assert.Contains("if the slide was finished, say only the transition", instruction);
+        Assert.EndsWith("Then stop and wait.", instruction);
+        Assert.DoesNotContain("Back to the slide", instruction);
+        // T8 regression fix: after several Asks the model left plain speech unanswered.
+        Assert.Contains("If someone speaks to you afterwards, answer them or pass on their request as usual.", instruction);
+    }
+
+    [Fact]
+    public void Ask_pause_announces_the_question_and_asks_for_the_answer()
+    {
+        var instruction = PromptBuilder.AskPauseInstruction();
+
+        Assert.StartsWith("Pause now", instruction);
+        Assert.Contains("a listener is asking a question", instruction);
+        Assert.Contains("then answer it", instruction);
+        Assert.Contains("Do not continue the narration until told.", instruction);
+        Assert.DoesNotContain("you may answer", instruction);
+        Assert.DoesNotContain("\"", instruction);
     }
 
     [Fact]

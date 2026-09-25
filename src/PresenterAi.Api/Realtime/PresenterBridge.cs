@@ -34,6 +34,11 @@ public sealed class PresenterBridge : IAsyncDisposable
     private const int MaxTrainingTextChars = 2_000;
     // The capture worklet sends 480 PCM16 samples (960 bytes) every 20 ms; permit four frames for transport margin.
     private const int MaxAudioFrameBytes = 4 * 1024;
+    // Plan 011 P-10/P-14: audio and presenter commands (except start and end) enter the presenter through one bounded,
+    // serial admission queue per connection. 256 items is about 5 s of mic audio behind a wedged loop.
+    internal const int AdmissionCapacity = 256;
+    // Disconnect cleanup waits this long for the admission pump's in-flight presenter call before ending the talk.
+    private static readonly TimeSpan AdmissionDrainBound = TimeSpan.FromSeconds(5);
     private readonly IPresenter _presenter;
     private readonly ILogger<PresenterBridge> _logger;
     private readonly ITicketStore _ticketStore;
@@ -46,6 +51,7 @@ public sealed class PresenterBridge : IAsyncDisposable
     private ClientConnection? _client;
     private int _outboundCapacity = 500;
     private Func<Task>? _beforeSocketSendAsync;
+    private Func<CancellationToken, Task>? _beforeAdmissionItemAsync;
 
     public PresenterBridge(
         IPresenter presenter,
@@ -85,7 +91,21 @@ public sealed class PresenterBridge : IAsyncDisposable
             var current = Current;
             current?.EnqueueText(TrainerStateFrame(trainer, current.UserId));
         };
+        presenter.AskState += ask => Current?.EnqueueText(AskStateFrame(ask));
     }
+
+    /// <summary>Press-to-ask state (plan 011 §4.3); every field is always present, the nullable ones as null.</summary>
+    private static object AskStateFrame(PresenterAskState ask) => new
+    {
+        type = "ask_state",
+        state = ask.State,
+        elapsedMs = ask.ElapsedMs,
+        quietRemainingMs = ask.QuietRemainingMs,
+        speechRemainingMs = ask.SpeechRemainingMs,
+        heard = ask.Heard,
+        transcribing = ask.Transcribing,
+        reason = ask.Reason
+    };
 
     private static object ScriptEditFrame(PresenterScriptEdit edit) => new
     {
@@ -134,7 +154,8 @@ public sealed class PresenterBridge : IAsyncDisposable
             return;
 
         var connection = new ClientConnection(socket, authentication.Value.UserId, _logger, Volatile.Read(ref _outboundCapacity),
-            Volatile.Read(ref _beforeSocketSendAsync), _clock, _heartbeatInterval, _heartbeatTimeout);
+            Volatile.Read(ref _beforeSocketSendAsync), _clock, _heartbeatInterval, _heartbeatTimeout,
+            Volatile.Read(ref _beforeAdmissionItemAsync));
         var holder = Interlocked.CompareExchange(ref _client, connection, null);
         if (holder is not null && authentication.Value.TakeOver && string.Equals(holder.UserId, connection.UserId, StringComparison.Ordinal))
         {
@@ -183,6 +204,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             if (_presenter.CurrentScriptVersion() is { } scriptVersion)
                 connection.EnqueueText(ScriptVersionFrame(scriptVersion));
             connection.StartHeartbeat();
+            connection.StartAdmission();
             using var receive = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, connection.Aborted);
             await ReceiveLoopAsync(socket, connection, receive.Token).ConfigureAwait(false);
         }
@@ -201,6 +223,11 @@ public sealed class PresenterBridge : IAsyncDisposable
             {
                 if (owned)
                 {
+                    // Plan 011 P-10: no admitted item starts from here on. A presenter call already in flight is
+                    // awaited (bounded) so it lands inside the old talk before its End; a loop held in a Start or an
+                    // Ask-from-suspended reconnect is released first.
+                    await connection.StopAdmissionAsync(_presenter.AbortPendingStart, AdmissionDrainBound)
+                        .ConfigureAwait(false);
                     // StartAsync only means the command was queued until its task completes. In particular, do not
                     // inspect idle or retire the recorder until ObserveStartAsync has also attempted BeginAsync.
                     if (connection.AbortReason is not null) _presenter.AbortPendingStart();
@@ -379,17 +406,33 @@ public sealed class PresenterBridge : IAsyncDisposable
             }
             while (!result.EndOfMessage);
 
-            if (result.MessageType == WebSocketMessageType.Binary)
+            var admitted = result.MessageType == WebSocketMessageType.Binary
+                ? Admit(connection, "audio", frame.ToArray(), static (presenter, pcm16) => presenter.SendAudioAsync(pcm16))
+                : HandleText(Encoding.UTF8.GetString(frame.ToArray()), connection, cancellationToken);
+            if (!admitted)
             {
-                ObserveCommand(_presenter.SendAudioAsync(frame.ToArray(), cancellationToken), connection, "audio", false);
-                continue;
+                // P-14: the receive loop never waits for admission. A full queue closes 1011 and the disconnect
+                // cleanup ends the talk; an end frame is therefore always read at once.
+                _logger.LogWarning("Admission queue full for user {UserId}; closing 1011", connection.UserId);
+                connection.MarkAbortReason(EndReasons.Backpressure);
+                await CloseServerInitiatedAsync(socket, (WebSocketCloseStatus)1011, "backpressure").ConfigureAwait(false);
+                return;
             }
-
-            HandleText(Encoding.UTF8.GetString(frame.ToArray()), connection, cancellationToken);
         }
     }
 
-    private void HandleText(string text, ClientConnection connection, CancellationToken cancellationToken)
+    /// <summary>Queues one presenter call on the connection's admission queue; false when the queue is full.</summary>
+    private bool Admit<T>(ClientConnection connection, string command, T argument, Func<IPresenter, T, Task> call)
+    {
+        var presenter = _presenter;
+        return connection.TryAdmit(command, () => call(presenter, argument));
+    }
+
+    private bool Admit(ClientConnection connection, string command, Func<IPresenter, Task> call) =>
+        Admit(connection, command, call, static (presenter, invoke) => invoke(presenter));
+
+    /// <summary>Handles one text command; false only when an admitted command found the admission queue full.</summary>
+    private bool HandleText(string text, ClientConnection connection, CancellationToken cancellationToken)
     {
         JsonDocument document;
         try
@@ -399,7 +442,7 @@ public sealed class PresenterBridge : IAsyncDisposable
         catch (JsonException)
         {
             connection.EnqueueText(new { type = "error", message = "invalid JSON", code = "protocol" });
-            return;
+            return true;
         }
 
         using (document)
@@ -407,7 +450,7 @@ public sealed class PresenterBridge : IAsyncDisposable
             if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.TryGetProperty("type", out var typeValue) || typeValue.ValueKind != JsonValueKind.String)
             {
                 connection.EnqueueText(new { type = "error", message = "unknown command: ", code = "protocol" });
-                return;
+                return true;
             }
 
             var type = typeValue.GetString() ?? string.Empty;
@@ -417,12 +460,12 @@ public sealed class PresenterBridge : IAsyncDisposable
                     // The first auth frame is consumed by AuthenticateAsync. Keep later auth frames
                     // harmless for clients that retry their handshake after connecting.
                     _logger.LogDebug("WebSocket auth frame received for user {UserId}", connection.UserId);
-                    return;
+                    return true;
                 case "start":
                     if (!document.RootElement.TryGetProperty("presentation", out var presentation) || presentation.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(presentation.GetString()))
                     {
                         connection.EnqueueText(new { type = "error", message = "start.presentation is required", code = "protocol" });
-                        return;
+                        return true;
                     }
 
                     int? fromIndex = document.RootElement.TryGetProperty("fromIndex", out var from) && from.TryGetInt32(out var value) ? value : null;
@@ -434,7 +477,7 @@ public sealed class PresenterBridge : IAsyncDisposable
                         {
                             connection.EnqueueText(new { type = "error", message = "start.maxMinutes must be an integer >= 5",
                                 code = "protocol" });
-                            return;
+                            return true;
                         }
                         maxMinutes = minutes;
                     }
@@ -446,40 +489,47 @@ public sealed class PresenterBridge : IAsyncDisposable
                         _presenter.StartAsync(presentation.GetString()!, fromIndex, connection.UserId, maxMinutes, CancellationToken.None),
                         connection,
                         recorder));
-                    return;
-                case "next": ObserveCommand(_presenter.NextAsync(cancellationToken), connection, type, false); return;
-                case "prev": ObserveCommand(_presenter.PrevAsync(cancellationToken), connection, type, false); return;
+                    return true;
+                // Plan 011 P-10: every other presenter command enters through the ordered admission queue, so the loop
+                // sees them in socket order, interleaved exactly with the mic audio.
+                case "next": return Admit(connection, type, static presenter => presenter.NextAsync());
+                case "prev": return Admit(connection, type, static presenter => presenter.PrevAsync());
                 case "goto":
                     var index = document.RootElement.TryGetProperty("index", out var candidate) && candidate.TryGetInt32(out var parsed) ? parsed : int.MinValue;
-                    ObserveCommand(_presenter.GotoAsync(index, cancellationToken), connection, type, false);
-                    return;
-                case "pause": ObserveCommand(_presenter.PauseAsync(cancellationToken), connection, type, false); return;
-                case "resume": ObserveCommand(_presenter.ResumeAsync(cancellationToken), connection, type, false); return;
-                case "mute": ObserveCommand(_presenter.MuteAsync(cancellationToken), connection, type, false); return;
-                case "unmute": ObserveCommand(_presenter.UnmuteAsync(cancellationToken), connection, type, false); return;
-                case "end": ObserveCommand(_presenter.EndAsync(cancellationToken: cancellationToken), connection, type, false); return;
+                    return Admit(connection, type, index, static (presenter, target) => presenter.GotoAsync(target));
+                case "pause": return Admit(connection, type, static presenter => presenter.PauseAsync());
+                case "resume": return Admit(connection, type, static presenter => presenter.ResumeAsync());
+                case "mute": return Admit(connection, type, static presenter => presenter.MuteAsync());
+                case "unmute": return Admit(connection, type, static presenter => presenter.UnmuteAsync());
+                // Plan 011 §4.3: extra fields on the four ask commands are ignored, as for pause.
+                case "ask_start": return Admit(connection, type, static presenter => presenter.AskStartAsync());
+                case "ask_done": return Admit(connection, type, static presenter => presenter.AskDoneAsync());
+                case "ask_extend": return Admit(connection, type, static presenter => presenter.AskExtendAsync());
+                case "ask_cancel": return Admit(connection, type, static presenter => presenter.AskCancelAsync());
+                // End bypasses admission: EndAsync cancels any Start or reconnect off the loop before it enqueues, and
+                // items delivered after it find the talk no longer live.
+                case "end": ObserveCommand(_presenter.EndAsync(cancellationToken: cancellationToken), connection, type, false); return true;
                 case "trainer_mode":
                     if (!document.RootElement.TryGetProperty("on", out var on) || on.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                     {
                         connection.EnqueueText(new { type = "error", message = "trainer_mode.on must be a boolean", code = "protocol" });
-                        return;
+                        return true;
                     }
 
-                    ObserveCommand(_presenter.SetTrainerModeAsync(connection.UserId, on.GetBoolean(), cancellationToken), connection, type, false);
-                    return;
+                    return Admit(connection, type, (connection.UserId, On: on.GetBoolean()),
+                        static (presenter, trainer) => presenter.SetTrainerModeAsync(trainer.UserId, trainer.On));
                 case "train_turn":
                     if (!TryReadTrainTurn(document.RootElement, out var question, out var answer, out var slideIndex, out var problem))
                     {
                         connection.EnqueueText(new { type = "error", message = problem, code = "protocol" });
-                        return;
+                        return true;
                     }
 
-                    ObserveCommand(_presenter.TrainOnTurnAsync(connection.UserId, question, answer, slideIndex, cancellationToken),
-                        connection, type, false);
-                    return;
-                case "ping": connection.EnqueueText(new { type = "pong" }); return;
-                case "pong": return;
-                default: connection.EnqueueText(new { type = "error", message = $"unknown command: {type}", code = "protocol" }); return;
+                    return Admit(connection, type, (connection.UserId, Question: question, Answer: answer, SlideIndex: slideIndex),
+                        static (presenter, turn) => presenter.TrainOnTurnAsync(turn.UserId, turn.Question, turn.Answer, turn.SlideIndex));
+                case "ping": connection.EnqueueText(new { type = "pong" }); return true;
+                case "pong": return true;
+                default: connection.EnqueueText(new { type = "error", message = $"unknown command: {type}", code = "protocol" }); return true;
             }
         }
     }
@@ -619,6 +669,20 @@ public sealed class PresenterBridge : IAsyncDisposable
         _beforeSocketSendAsync = beforeSocketSendAsync;
     }
 
+    /// <summary>
+    /// Test seam (plan 011 T5): awaited by the admission pump before it starts each item; the token is cancelled when the
+    /// connection stops admitting, so a blocked hook models a pump held at an item boundary.
+    /// </summary>
+    internal void ConfigureAdmissionForTest(Func<CancellationToken, Task>? beforeItemAsync)
+    {
+        if (Current is not null)
+        {
+            throw new InvalidOperationException("Configure the admission test seam before connecting a browser.");
+        }
+
+        _beforeAdmissionItemAsync = beforeItemAsync;
+    }
+
     internal Task StopCurrentWriterForTestAsync() => Current?.StopWriterForTestAsync() ?? Task.CompletedTask;
 
     internal void ConfigureTakeOverBoundForTest(TimeSpan bound)
@@ -702,10 +766,24 @@ public sealed class PresenterBridge : IAsyncDisposable
         internal bool StartObservationExpired => Volatile.Read(ref _startObservationExpired) != 0;
         internal TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool TakeOverRequested => Volatile.Read(ref _takeOverRequested) != 0;
+        // Plan 011 P-10: one bounded admission queue with one reader. The pump awaits each presenter call to completion
+        // before taking the next, so the presenter loop sees admitted items in socket order.
+        private readonly Channel<AdmissionItem> _admission = Channel.CreateBounded<AdmissionItem>(
+            new BoundedChannelOptions(AdmissionCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = true
+            });
+        private readonly CancellationTokenSource _admissionStop = new();
+        private readonly Func<CancellationToken, Task>? _beforeAdmissionItemAsync;
+        private Task _pump = Task.CompletedTask;
+        private int _pumpBusy;
 
         public ClientConnection(WebSocket socket, string userId, ILogger logger, int outboundCapacity, Func<Task>? beforeSocketSendAsync, TimeProvider clock,
-            TimeSpan heartbeatInterval, TimeSpan heartbeatTimeout)
+            TimeSpan heartbeatInterval, TimeSpan heartbeatTimeout, Func<CancellationToken, Task>? beforeAdmissionItemAsync = null)
         {
+            _beforeAdmissionItemAsync = beforeAdmissionItemAsync;
             _socket = socket;
             _clock = clock;
             _heartbeatInterval = heartbeatInterval;
@@ -749,6 +827,76 @@ public sealed class PresenterBridge : IAsyncDisposable
                 }
             }
             Abort(EndReasons.Heartbeat);
+        }
+
+        /// <summary>Records why the connection ends without aborting the socket, so a server close frame can still go out.</summary>
+        internal void MarkAbortReason(string reason) => Interlocked.CompareExchange(ref _abortReason, reason, null);
+
+        internal void StartAdmission() => _pump = Task.Run(PumpAdmissionAsync);
+
+        /// <summary>Never waits: false when the admission queue is full (or no longer admitting).</summary>
+        internal bool TryAdmit(string command, Func<Task> call)
+        {
+            if (_admissionStop.IsCancellationRequested) return true;
+            return _admission.Writer.TryWrite(new AdmissionItem(command, call));
+        }
+
+        private async Task PumpAdmissionAsync()
+        {
+            var stop = _admissionStop.Token;
+            try
+            {
+                while (await _admission.Reader.WaitToReadAsync(stop).ConfigureAwait(false))
+                {
+                    while (_admission.Reader.TryRead(out var item))
+                    {
+                        if (_beforeAdmissionItemAsync is not null)
+                            await _beforeAdmissionItemAsync(stop).ConfigureAwait(false);
+                        // Busy is published before the stop check, so StopAdmissionAsync either sees this call in flight
+                        // or this pump sees the stop and starts nothing.
+                        Interlocked.Exchange(ref _pumpBusy, 1);
+                        try
+                        {
+                            if (stop.IsCancellationRequested) return;
+                            await item.Call().ConfigureAwait(false);
+                        }
+                        catch (Exception exception)
+                        {
+                            _logger.LogError(exception, "Presenter command {Command} failed", item.Command);
+                            EnqueueText(new { type = "log", level = "error", message = $"{item.Command} failed: {exception.Message}" });
+                        }
+                        finally
+                        {
+                            Interlocked.Exchange(ref _pumpBusy, 0);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
+            {
+            }
+        }
+
+        /// <summary>
+        /// Stops admitting: the queue is completed and the pump stops at the next item boundary, dropping the rest. A
+        /// presenter call already in flight is awaited up to <paramref name="bound"/>; <paramref name="abortPendingStart"/>
+        /// runs first when one is, so a loop held in a Start or reconnect lets it finish. Idempotent.
+        /// </summary>
+        internal async Task StopAdmissionAsync(Action? abortPendingStart, TimeSpan bound)
+        {
+            _admission.Writer.TryComplete();
+            try { _admissionStop.Cancel(); }
+            catch (ObjectDisposedException) { }
+            if (_pump.IsCompleted) return;
+            if (Volatile.Read(ref _pumpBusy) != 0) abortPendingStart?.Invoke();
+            try
+            {
+                await _pump.WaitAsync(bound, _clock).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                _logger.LogWarning("Admission pump still in a presenter call after {Bound}; ending the talk anyway", bound);
+            }
         }
 
         internal void Abort(string reason)
@@ -1041,6 +1189,7 @@ public sealed class PresenterBridge : IAsyncDisposable
 
         public async ValueTask DisposeAsync()
         {
+            await StopAdmissionAsync(null, AdmissionDrainBound).ConfigureAwait(false);
             _outbound.Writer.TryComplete();
             _lifetime.Cancel();
             try { await _writer.ConfigureAwait(false); } catch (OperationCanceledException) { }
@@ -1057,6 +1206,8 @@ public sealed class PresenterBridge : IAsyncDisposable
             _takeOverAbort.Dispose();
             _lifetime.Dispose();
         }
+
+        private readonly record struct AdmissionItem(string Command, Func<Task> Call);
 
         private sealed record OutboundMessage(byte[] Bytes, bool Binary, WebSocketCloseStatus? CloseStatus = null, string? CloseReason = null);
     }

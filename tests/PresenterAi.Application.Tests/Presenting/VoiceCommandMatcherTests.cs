@@ -120,6 +120,58 @@ public class VoiceCommandMatcherTests
     public void Vietnamese_question_particles_inside_a_sentence_are_not_answers(string question) =>
         Assert.Null(VoiceCommandMatcher.Match(question));
 
+    // Owner decision "allow polite words" (2026-09-24): a clear yes/no followed only by polite words.
+    [Theory]
+    [InlineData("no thank you", VoiceCommandIntent.No)]
+    [InlineData("No, thank you.", VoiceCommandIntent.No)]
+    [InlineData("no thanks", VoiceCommandIntent.No)]
+    [InlineData("Nope, thanks!", VoiceCommandIntent.No)]
+    [InlineData("not yet, thanks", VoiceCommandIntent.No)]
+    [InlineData("yes please", VoiceCommandIntent.Yes)]
+    [InlineData("Yes, go ahead.", VoiceCommandIntent.Yes)]
+    [InlineData("yes thanks", VoiceCommandIntent.Yes)]
+    [InlineData("yeah, thank you", VoiceCommandIntent.Yes)]
+    [InlineData("sure, go ahead, thanks", VoiceCommandIntent.Yes)]
+    [InlineData("có ạ", VoiceCommandIntent.Yes)]
+    [InlineData("vâng ạ", VoiceCommandIntent.Yes)]
+    [InlineData("Vâng, cảm ơn.", VoiceCommandIntent.Yes)]
+    [InlineData("có, cám ơn ạ", VoiceCommandIntent.Yes)]
+    [InlineData("không cảm ơn", VoiceCommandIntent.No)]
+    [InlineData("Không, cảm ơn ạ.", VoiceCommandIntent.No)]
+    [InlineData("không ạ", VoiceCommandIntent.No)]
+    [InlineData("thôi, cảm ơn", VoiceCommandIntent.No)]
+    public void Yes_or_no_followed_only_by_polite_words_is_that_answer(string phrase, VoiceCommandIntent intent)
+    {
+        Assert.Equal(intent, VoiceCommandMatcher.Match(phrase)?.Intent);
+        Assert.Equal(intent, VoiceCommandMatcher.Match(phrase.Normalize(System.Text.NormalizationForm.FormD))?.Intent);
+        // The assembler concatenates deltas verbatim, never inserts a separator.
+        Assert.Equal(intent, VoiceCommandMatcher.Match(phrase.Replace(" ", "", StringComparison.Ordinal))?.Intent);
+    }
+
+    [Theory]
+    [InlineData("no but what about the budget")]
+    [InlineData("no thanks but what about the budget")]
+    [InlineData("yes and also")]
+    [InlineData("yes thanks and also the costs")]
+    [InlineData("no go ahead")]
+    [InlineData("thanks")]
+    [InlineData("thank you no")]
+    [InlineData("yes go ahead and skip it")]
+    [InlineData("không cảm ơn nhưng còn ngân sách")]
+    [InlineData("có cảm ơn không")]
+    [InlineData("cảm ơn")]
+    [InlineData("không biết cảm ơn")]
+    public void Yes_or_no_followed_by_anything_but_polite_words_is_not_a_reply(string utterance) =>
+        Assert.Null(VoiceCommandMatcher.Match(utterance));
+
+    [Theory]
+    [InlineData("go ahead", VoiceCommandIntent.Resume)]
+    [InlineData("not yet", VoiceCommandIntent.No)]
+    [InlineData("next slide please", VoiceCommandIntent.Next)]
+    [InlineData("go to slide 3", VoiceCommandIntent.GoTo)]
+    public void Polite_word_rule_leaves_exact_and_command_phrases_unchanged(string phrase, VoiceCommandIntent intent) =>
+        Assert.Equal(intent, VoiceCommandMatcher.Match(phrase)?.Intent);
+
     [Fact]
     public void Every_lexicon_language_has_yes_and_no()
     {

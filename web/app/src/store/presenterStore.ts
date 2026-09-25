@@ -20,6 +20,15 @@ export type ScriptEdit = {
   summary: string | null;
   error: string | null;
 };
+export type PresenterAskState = {
+  state: "listening" | "answering" | "off";
+  elapsedMs: number;
+  quietRemainingMs: number | null;
+  speechRemainingMs: number | null;
+  heard: boolean;
+  transcribing: boolean;
+  reason: string | null;
+};
 const TERMINAL_EDIT_STATUSES: readonly ScriptEditStatus[] = ["applied", "failed"];
 const MAX_TRACKED_EDITS = 20;
 type State = {
@@ -44,6 +53,7 @@ type State = {
   edits: Record<string, ScriptEdit>;
   editOrder: string[];
   currentEditId: string | null;
+  ask: PresenterAskState | null;
   setMicReady: (ready: boolean) => void;
   setBuffered: (ms: number) => void;
   applySnapshot: (s: Snapshot) => void;
@@ -72,6 +82,7 @@ export const usePresenterStore = create<State>((set) => ({
   edits: {},
   editOrder: [],
   currentEditId: null,
+  ask: null,
   setMicReady: (micReady) => set({ micReady }),
   setBuffered: (bufferedMs) => set({ bufferedMs }),
   applySnapshot: (snapshot) =>
@@ -81,7 +92,7 @@ export const usePresenterStore = create<State>((set) => ({
       usage: snapshot.usageSeconds ?? null,
       suspended: snapshot.suspended ?? (snapshot.state === "idle" ? false : s.suspended),
       ...(snapshot.state === "idle"
-        ? { limitWarning: null, upstreamStatus: null, suspended: false }
+        ? { limitWarning: null, upstreamStatus: null, suspended: false, ask: null }
         : {}),
       ...(snapshot.state === "presenting"
         ? { endReason: null, usageConfirmed: null, estimatedSeconds: null }
@@ -108,6 +119,19 @@ export const usePresenterStore = create<State>((set) => ({
     set((s) => {
       if (m.type === "slide") return { slide: m.index as number };
       if (m.type === "usage") return { usage: m.seconds as number };
+      if (m.type === "ask_state") {
+        return {
+          ask: {
+            state: m.state as "listening" | "answering" | "off",
+            elapsedMs: (m.elapsedMs as number | undefined) ?? 0,
+            quietRemainingMs: (m.quietRemainingMs as number | null | undefined) ?? null,
+            speechRemainingMs: (m.speechRemainingMs as number | null | undefined) ?? null,
+            heard: Boolean(m.heard),
+            transcribing: Boolean(m.transcribing),
+            reason: (m.reason as string | null | undefined) ?? null,
+          },
+        };
+      }
       if (m.type === "transcript") {
         const endMs = (m.end_ms as number | null) ?? null;
         const old = s.transcript.at(-1);
@@ -159,6 +183,7 @@ export const usePresenterStore = create<State>((set) => ({
           limitWarning: null,
           upstreamStatus: null,
           suspended: false,
+          ask: null,
           endReason: (m.endReason as string) ?? null,
           usageConfirmed: (m.usageConfirmed as boolean) ?? null,
           estimatedSeconds: (m.estimatedSeconds as number) ?? null,

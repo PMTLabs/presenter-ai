@@ -651,6 +651,78 @@ and Cli pass with no container. `secrets-guard: clean`.
   40 + 1 skipped; web shared 18 and app 22, lint and both builds; four orchestrator mutations, each caught.
 - **No round 3.** The follow-ups are listed in `docs/review/007` under "Fixes".
 
+## 2026-09-24 — plan 011 T1 live probe (`presenter-cli ask-probe`, Azure `gpt-live-1`, delegation `gpt-5.6-luna`)
+
+- **Code:** `560153d` recorder, input marker, probe; `6ecda36` trace and scoring; `7b5d27a` answer segmentation by
+  output-clock continuity. English WAVs from Windows SAPI (no vi voice on this host; vi run not done).
+- **Runs** (variant `vad`, 10 s gap, tail 1000 ms, gap-keep 320 ms; kept audio 6.4 s unless noted):
+
+  | Run | (i) | (ii) | (iii) | (iv) | (v) | (vi) | Ask done → answer audio | usage s |
+  |---|---|---|---|---|---|---|---|---|
+  | en-1 (pre-trace) | P | P | P | scoring bug | cut by 3 s-quiet bug | — | 2600 ms | 49.8 |
+  | en-2 (trace) | P | P | P | P | complete answer, mis-split by 3 s quiet | — | 3144 ms | 49.0 |
+  | en-3 | P | P | P | F: 5 assistant events arrived between the halves | P | P | 1992 ms | 56.0 |
+  | en-4 | P | P | P | F: 2 events between | P ("It moved the It moved the…" restart) | P | 2449 ms | 57.6 |
+  | en-5 | P | P | P | P | P | P | 3105 ms | 58.0 |
+  | near-cap (106.5 s kept) | P | P | P | F: question never transcribed | F: "Okay. Go ahead." | P | 32893 ms | 59.0 |
+  | raw control (17.6 s) | P | P | P | F: 16 events between | P | P | 2555 ms | 53.8 |
+  | observe-interrupt | narration: 0.7 s audio arrived after mute (last +672 ms); delegation: none triggered | | | | | | | 81.6 |
+
+- **Findings:**
+  - Short asks work: every 6.4 s burst was answered once with both facts; the 10 s thinking gap never split it.
+    Mute is silent. Provenance by `start_ms` holds for short bursts.
+  - (iv) as written (arrival order) fails because the upstream streams its answer while the burst transcript is
+    still arriving: assistant transcript precedes the last user deltas. Not a split: the user deltas are all in the
+    burst range and the answer covers both halves.
+  - Mid-answer delivery stalls of 3+ s occur (en-2); an answer is one response on the output clock.
+  - **Near-cap FAILS:** the upstream input clock advanced only ~38 s for a 107.5 s burst (reply "yes" appended at
+    local 125200 ms got `start_ms` 55600); transcription stopped at the background preamble at ~50400 ms. The
+    upstream ingested about real time and discarded the rest, so the question was never heard.
+- **T1 result: FAIL** (near-cap; (iv) oracle). Plan 011 status set to "Blocked at T1"; returned to the owner.
+  Total probe usage ≈ 465 s.
+
+### T1 cap sweep (2026-09-24, `285c29f`: `--pace`, timestamp-based (iv), truncation detector)
+
+| Kept speech | Pace | Ingested | (iv) | (v) | Answer audio after Ask done | usage s |
+|---|---|---|---|---|---|---|
+| 16.4 s | burst | all | P | P | 5528 ms | 73.6 |
+| 16.4 s | 2× | all | P | P | 8886 ms (185 ms after the send) | 68.2 |
+| 36.5 s | burst | ~31.6 s | F (part 2 lost) | F | 32333 ms | 76.8 |
+| 36.5 s | 2× | all | P | P, but (iii) F: 1.8 s spoken during the send | 18849 ms | 67.6 |
+| 63.6 s | burst | ~29 s, TRUNCATED | F | F ("I'll stay quiet.") | 31966 ms | 57.4 |
+| 63.6 s | 2× | all | P | cut by the probe's own reply (artifact) | 32486 ms | 86.4 |
+| 97.6 s | burst | ~31 s, TRUNCATED | F | F ("Okay, go on.") | 30644 ms | 56.0 |
+| 97.6 s | 2× | all | 1 delta just past the range | cut by the reply (artifact) | 49779 ms | 120.0 |
+| 97.6 s | 1.5× | all | P | cut by the reply (artifact) | 65920 ms | 119.6 |
+
+- An unpaced burst is ingested only up to about 30 s of audio (29–33 s across 5 runs); the rest is dropped
+  silently. Pacing avoids the drop but delays the answer by kept/pace, and at 36.5 s it let the model answer
+  during the send.
+- **Owner decision:** cap an ask at **25 s of kept speech**, sent unpaced; at the cap the ask finishes on its own
+  with a toast, and the UI shows the remaining speech time. Also: (iv) is redefined by `start_ms` inside the burst
+  range, and the probe audio is generated with `gpt-audio-1.5` TTS through an automated suite (en + vi), which
+  confirms the cap. Sweep usage ≈ 726 s.
+
+### T1 automated suite (2026-09-24, `gpt-audio-1.5` TTS voice `marin`, `scripts/run-ask-probe-suite.ps1`)
+
+- **Run 1** (`d790ccb`, 728 s): the mechanism worked, but upstream `start_ms` drifted up to +4.3 s past our input
+  clock when the upload lagged (0.4–7.7 s). Owner chose the **turn-taking check-in rule** (a new utterance after
+  ≥ 1.5 s of user quiet), which replaces timestamp provenance.
+- **Run 2** (`188cf6f`, 738 s): English and caps passed; **vi lost the start of the question** (the whole of part 1
+  once, "Chương trình đã thay đổi" in the other runs). The burst reached the wire before `session.input_audio.unmuted`
+  was acknowledged. Fix: wait for the unmute ack (≤ 2 s), then a 200 ms silence lead-in, then the burst. Check
+  (viii), "question start present", added.
+- **Run 3** (`f2b42d8`, 856 s incl. one cap-40 rerun after an upstream start hiccup): **T1 verdict PASS.**
+  - en ×3, vi ×3, cap-24 ×3, cap-28 and raw passed (i)–(viii) and the reply check.
+  - The unmute ack took 38–45 ms.
+  - First answer audio: en/vi 2.3–3.6 s, 24 s questions 9.3–9.4 s, 28 s 11.0 s. `AnswerStartBudgetMs` = 15000.
+  - Over the cap, 40 s fails as expected ("Got it.").
+  - Interrupt: 0.6 s of narration audio still arrived after the mute (the last at +514 ms); no delegation was
+    triggered, so there was nothing to observe there.
+- **Plan updates from T1:** 25 s cap (P-1), turn-taking check-in (P-13), input pacing — never mute upstream during
+  an answer, since the answer only advances with input audio (P-16), Continue button (P-17), unmute-ack wait
+  before the burst (P-18).
+
 ## 2026-09-24 — plan 010 T13 live Trainer-mode run (Chrome, React app, Azure `gpt-live-1`, reviser `gpt-6-sol`)
 
 Automated in Chrome: a page script feeds `gpt-audio-1.5` TTS clips (voice `marin`) into a fake microphone and logs
@@ -690,6 +762,40 @@ every non-audio bridge frame; the owner listened on headphones. Run on the plan 
   - The model paraphrases the confirmation question (Vietnamese: "Mình sẽ thêm ý đó vào nội dung.", a statement).
   - The revert panel keeps "will apply after this revert: edit_4 (applied)" after the edit applied.
 - **Cleanup:** Ricoh reverted to v1 text (v11 `revert`), Khóa 2 Bài 1 reverted to v1 (v4 `revert`).
+
+## 2026-09-24 — plan 011 T8 live run (Chrome, React app, Azure `gpt-live-1`)
+
+Automated in Chrome as T13 above (TTS clips into a fake microphone, frames logged, owner on headphones).
+
+| # | Result |
+|---|---|
+| 1 | Pass: speech stopped about 10 ms after Ask (flush); "Listening…"; no playback while listening |
+| 2 | Pass: a delegated lookup interrupted by Ask; its late result was ignored, one answer to the new question |
+| 3 | Pass: half a question, 10 s silence, the rest → nothing spoken in the gap; one answer covering both halves |
+| 4 | Pass after fixes: "Yes" at the check-in resumes the interrupted sentence |
+| 5 | Pass: Pause → Ask → "No, thank you" → "check-in answered no", stays on the slide silent |
+| 6 | Pass: 90 s quiet → toast "Nothing was heard…", still paused |
+| 7 | Pass: Extend at about 70 s → countdown reset; sent after 90 s more of quiet |
+| 8 | Pass: an edit pending during Ask → no replay during the answer; one replay with the new text after the check-in (v3) |
+| 9 | Pass: End mid-question → no answer afterwards; reopen idle |
+| 10 | Pass: muted Ask → toast "Unmute the microphone to ask a question."; button disabled with the hint |
+| 11 | Pass (Khóa 2 Bài 1): two Vietnamese halves 6 s apart (recorded 15.4 s, kept 6.8 s) → one Vietnamese answer to both 3.1 s after Ask done; silent check-in resumed after 5 s |
+| 12 | Pass: 27 s of speech → countdown, `limit_sent`, toast, one answer |
+| 13 | Pass: Mute during the answer deferred; Continue resumed at once |
+| 14 | Pass: usage recorded below |
+
+- **Usage:** run 1 ≈ 617, then 379.8, 119.8, 386.4, 382.8 s (Ricoh); step 11 shares the T13 Vietnamese talk
+  (161.2 s).
+- **Defects found and fixed on the branch** (details in plan 011 §10):
+  - `b5d7e5b`: the advance after a resume waits for resumed audio (15 s fallback).
+  - `45bb84e`: speech before a delegation is filler, not the answer.
+  - `7bf6f3d`: the resume after an Ask names the slide and ends the pause (the model stayed silent after
+    `PauseInstruction`'s "until told").
+  - `41e776b`: a check-in reply survives a model blip that re-enters Answering.
+  - `7041027`: owner decision "hold for speech" (transcription lags speech by about 2.5 s).
+  - `35aabc2`: owner decision "polite words" for yes/no.
+- **Observed, not fixed:** leftover narration audio right after `ask_done` can log "answered after 181 ms"; harmless,
+  because the check-in window follows playback.
 
 ## 2026-09-25 — plan 010 T13 live regression (Chrome, React app, Azure `gpt-live-1`, reviser `gpt-6-sol`)
 
@@ -732,3 +838,34 @@ Full regression on the final plan 011 build `047da8e` (010 `7126d97` merged), au
     (`commitFirst: True`) failed once, then passed 3 isolated runs and a full rerun.
   - A test-harness artifact: a clip spoken over residual audio lost "For slide five", so one edit went to slide 10.
 - **Cleanup:** Ricoh reverted to v1 text (v30), Khóa 2 Bài 1 reverted to v1 (v7).
+
+## 2026-09-25 — plan 011 T8 live regression (Chrome, React app, Azure `gpt-live-1`)
+
+Full regression, automated as on 2026-09-24: rows 1–7 on `44e6bd8`, rows 8–14 on `47c3ece` (`44e6bd8` + the 010 fix
+`94b2099`). All 14 rows passed; row 8 after a fix.
+
+| # | Result |
+|---|---|
+| 1 | Pass: speech flushed 8 ms after `ask_start`; "Listening… 0:01" |
+| 2 | Pass: a follow-up during "One moment": the busy tool was refused and the late delegated reply ignored; the follow-up answered in 1.7 s. On `47c3ece` the first round's `go_to_slide` landed after the follow-up send: the exchange ended (navigated), then answered |
+| 3 | Pass: half a question, 10 s silence, the rest → kept 5.0 s; one answer covering both halves in 2.8 s |
+| 4 | Pass: "yes" at the check-in resumed at the cut sentence |
+| 5 | Pass: Pause → Ask → "no" → answered in 1.9 s, stayed on the slide |
+| 6 | Pass: 90 s quiet → `quiet_cancelled` at 90.0 s, toast "Nothing was heard for 90 s — Ask cancelled; still paused." |
+| 7 | Pass: Extend at 70 s → `quiet_sent` 90.1 s later, toast "Sent your question after 90 s of quiet.", answered in 1.6 s |
+| 8 | **Failed first**: spoken script edits were not delegated (0 of 2 with Ask, 0 of 3 in a talk without Ask). Fixed `94b2099` (plan 010); proof 3 new talks, 6 of 6 delegated. Then pass: an edit queued → Ask → applied v14 during the answer, no "updating", one deferred notice, one replay of slide 4 with the new text after the check-in |
+| 9 | Pass: End mid-question → no answer; usage 427.8 s confirmed; reopen idle |
+| 10 | Pass: muted + A → toast "Unmute the microphone to ask a question."; Ask disabled with "Unmute to ask" |
+| 11 | Pass (Khóa 2 Bài 1): two Vietnamese halves 6 s apart → one Vietnamese answer covering both in 3.1 s |
+| 12 | Pass: a long question → countdown 0:09..0:00, `limit_sent` at 25.0 s, toast, cut-off nudge at +10.9 s, an answer; a cut question → "I didn't get the full question. Could you please repeat it?". A long question finished with Ask done: kept 19.5 s, answered in 7.8 s, no residual |
+| 13 | Pass: Mute during the answer deferred to the exchange end; Continue resumed in 9 ms |
+| 14 | Pass: usage recorded below |
+
+- **Usage:** 495.4 s (upstream lost, unconfirmed, about 515 s estimated), then 775.8, 116.4, 427.8 s (Ricoh) and
+  60.8 s (Vietnamese), confirmed. Direct answers 1.6–3.1 s; delegated or long ones 5–8 s.
+- **Defects fixed:** `94b2099` (plan 010, row 8). The T13 regression on this branch also brought `889e61f`,
+  `7126d97` (plan 010) and `047da8e` here: a repeated request's replay is settled at Ask start, before the exchange
+  takes it over (plan 011 §10).
+- **Observed, not fixed:** in row 8 the backend routed an Ask question ("testing tools") to `revise_script`; the
+  confirmation was spoken, not given, so no edit; the real answer came after 6.3 s. In row 11 the check-in after the
+  Vietnamese answer was in English ("Shall I carry on?").

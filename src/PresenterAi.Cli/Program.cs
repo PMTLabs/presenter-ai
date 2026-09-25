@@ -13,6 +13,8 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        // Vietnamese narration and transcripts must survive a redirected console (the suite logs).
+        Console.OutputEncoding = System.Text.Encoding.UTF8;
         var configuration = BuildConfiguration(args);
         using var cancellation = new CancellationTokenSource();
         var cancelCount = 0;
@@ -60,6 +62,10 @@ public static class Program
             return command switch
             {
                 SmokeArguments smoke => await SmokeCommand.RunAsync(smoke, configuration, output, error, cancellationToken).ConfigureAwait(false),
+                AskProbeArguments askProbe => await AskProbeCommand.RunAsync(askProbe, configuration, output, error, cancellationToken).ConfigureAwait(false),
+                TtsArguments tts => await TtsCommand.RunAsync(tts, configuration, output, error, cancellationToken).ConfigureAwait(false),
+                ComposeAskWavArguments compose => await ComposeAskWavCommand.RunAsync(compose, output, error, cancellationToken).ConfigureAwait(false),
+                AskProbeSummaryArguments summary => await AskProbeSummary.RunAsync(summary, output, error).ConfigureAwait(false),
                 RunArguments run => await RunCommand.RunAsync(run, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 ImportArguments import => await ImportCommand.RunAsync(import, configuration, output, error, cancellationToken).ConfigureAwait(false),
                 _ => 2
@@ -215,6 +221,13 @@ public static class Program
     {
         output.WriteLine("Usage:");
         output.WriteLine("  presenter-cli smoke --provider azure|openai");
+        output.WriteLine("  presenter-cli ask-probe --provider azure|openai --part1 <wav> --part2 <wav> [--gap-seconds 10] [--variant vad|continue|raw]");
+        output.WriteLine("            [--tail-ms 1000] [--gap-keep-ms 320] [--reply <wav>] [--lang en|vi] [--observe-interrupt] [--absent <wav>] [--trace] [--pace F]");
+        output.WriteLine("            [--unmute-wait ack|none] [--lead-ms 200]   (wait for the unmute acknowledgement, then a silence lead-in)");
+        output.WriteLine("            WAVs are 24 kHz mono PCM16; prints transcripts, timings and usage, never audio or secrets.");
+        output.WriteLine("  presenter-cli tts --out <wav> (--text <t> | --text-file <f>) [--provider azure|openai] [--model gpt-audio-1.5] [--voice marin]");
+        output.WriteLine("  presenter-cli compose-ask-wav --question <wav> --out <wav> --kept-seconds N [--preamble <wav>]... [--part2 <wav>] [--gap-seconds 10]");
+        output.WriteLine("  presenter-cli ask-probe-summary <log-dir>   (T1 suite table and verdict; exit 0 = T1 passes)");
         output.WriteLine("  presenter-cli run <id> [--owner <email>] [--max-seconds N] [--stop-after-slide N] [--content-root DIR]");
         output.WriteLine("  presenter-cli import <path-or-pattern>... --owner <email> [--content-root DIR]");
         output.WriteLine("  presenter-cli --help");
@@ -235,6 +248,10 @@ internal static class CliParser
         return args[0] switch
         {
             "smoke" => ParseSmoke(args[1..], error),
+            "ask-probe" => ParseAskProbe(args[1..], error),
+            "tts" => ParseTts(args[1..], error),
+            "compose-ask-wav" => ParseCompose(args[1..], error),
+            "ask-probe-summary" => ParseSummary(args[1..], error),
             "run" => ParseRun(args[1..], error),
             "import" => ParseImport(args[1..], error),
             _ => null
@@ -275,6 +292,246 @@ internal static class CliParser
         }
 
         return new SmokeArguments(provider);
+    }
+
+    private static AskProbeArguments? ParseAskProbe(string[] args, TextWriter error)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var observeInterrupt = false;
+        var trace = false;
+        string[] valued = ["--provider", "--part1", "--part2", "--gap-seconds", "--variant", "--tail-ms", "--gap-keep-ms", "--reply", "--lang", "--absent", "--pace", "--unmute-wait", "--lead-ms"];
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (IsConfigurationArgument(argument))
+            {
+                index += argument.Contains('=') || index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal) ? 0 : 1;
+                continue;
+            }
+
+            if (argument == "--observe-interrupt")
+            {
+                observeInterrupt = true;
+                continue;
+            }
+
+            if (argument == "--trace")
+            {
+                trace = true;
+                continue;
+            }
+
+            if (!valued.Contains(argument))
+            {
+                error.WriteLine($"Unknown ask-probe option: {argument}");
+                return null;
+            }
+
+            if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                error.WriteLine($"{argument} requires a value");
+                return null;
+            }
+
+            values[argument] = args[++index];
+        }
+
+        var provider = values.GetValueOrDefault("--provider");
+        if (provider is not ("azure" or "openai"))
+        {
+            error.WriteLine("ask-probe requires --provider azure|openai");
+            return null;
+        }
+
+        if (!values.TryGetValue("--part1", out var part1) || !values.TryGetValue("--part2", out var part2))
+        {
+            error.WriteLine("ask-probe requires both --part1 <wav> and --part2 <wav>");
+            return null;
+        }
+
+        var variant = values.GetValueOrDefault("--variant", "vad");
+        if (variant is not ("vad" or "continue" or "raw"))
+        {
+            error.WriteLine("--variant must be vad, continue or raw");
+            return null;
+        }
+
+        var lang = values.GetValueOrDefault("--lang", "en");
+        if (lang is not ("en" or "vi"))
+        {
+            error.WriteLine("--lang must be en or vi");
+            return null;
+        }
+
+        if (!double.TryParse(values.GetValueOrDefault("--gap-seconds", "10"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var gapSeconds)
+            || gapSeconds is < 0 or > 60)
+        {
+            error.WriteLine("--gap-seconds must be a number from 0 to 60");
+            return null;
+        }
+
+        if (!int.TryParse(values.GetValueOrDefault("--tail-ms", "1000"), out var tailMs)
+            || tailMs is < Application.Presenting.Asking.AskRecorder.MinTailSilenceMs or > Application.Presenting.Asking.AskRecorder.MaxTailSilenceMs)
+        {
+            error.WriteLine("--tail-ms must be an integer from 500 to 2000");
+            return null;
+        }
+
+        if (!int.TryParse(values.GetValueOrDefault("--gap-keep-ms", "320"), out var gapKeepMs)
+            || gapKeepMs is < Application.Presenting.Asking.AskRecorder.MinGapKeepMs or > Application.Presenting.Asking.AskRecorder.MaxGapKeepMs)
+        {
+            error.WriteLine("--gap-keep-ms must be an integer from 200 to 400");
+            return null;
+        }
+
+        if (!double.TryParse(values.GetValueOrDefault("--pace", "0"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var pace)
+            || pace is < 0 or > 20)
+        {
+            error.WriteLine("--pace must be a number from 0 (unpaced burst) to 20");
+            return null;
+        }
+
+        var unmuteWait = values.GetValueOrDefault("--unmute-wait", "ack");
+        if (unmuteWait is not ("ack" or "none"))
+        {
+            error.WriteLine("--unmute-wait must be ack or none");
+            return null;
+        }
+
+        if (!int.TryParse(values.GetValueOrDefault("--lead-ms", "200"), out var leadMs) || leadMs is < 0 or > 2000)
+        {
+            error.WriteLine("--lead-ms must be an integer from 0 to 2000");
+            return null;
+        }
+
+        return new AskProbeArguments(provider, part1, part2, gapSeconds, variant, tailMs, gapKeepMs, observeInterrupt,
+            values.GetValueOrDefault("--reply"), lang, values.GetValueOrDefault("--absent"), trace, pace, unmuteWait, leadMs);
+    }
+
+    private static Dictionary<string, List<string>>? ParseOptions(string[] args, string command, string[] valued, TextWriter error, List<string>? positional = null)
+    {
+        var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (IsConfigurationArgument(argument))
+            {
+                index += argument.Contains('=') || index + 1 >= args.Length || args[index + 1].StartsWith("-", StringComparison.Ordinal) ? 0 : 1;
+                continue;
+            }
+
+            if (positional is not null && !argument.StartsWith("--", StringComparison.Ordinal))
+            {
+                positional.Add(argument);
+                continue;
+            }
+
+            if (!valued.Contains(argument))
+            {
+                error.WriteLine($"Unknown {command} option: {argument}");
+                return null;
+            }
+
+            if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                error.WriteLine($"{argument} requires a value");
+                return null;
+            }
+
+            if (!values.TryGetValue(argument, out var list))
+            {
+                values[argument] = list = [];
+            }
+
+            list.Add(args[++index]);
+        }
+
+        return values;
+    }
+
+    private static TtsArguments? ParseTts(string[] args, TextWriter error)
+    {
+        var values = ParseOptions(args, "tts", ["--provider", "--model", "--voice", "--text", "--text-file", "--out", "--attempts"], error);
+        if (values is null)
+        {
+            return null;
+        }
+
+        string? One(string key) => values.TryGetValue(key, out var list) ? list[^1] : null;
+        var provider = One("--provider") ?? "azure";
+        if (provider is not ("azure" or "openai"))
+        {
+            error.WriteLine("tts requires --provider azure|openai");
+            return null;
+        }
+
+        if ((One("--text") is null) == (One("--text-file") is null))
+        {
+            error.WriteLine("tts requires exactly one of --text <t> or --text-file <f>");
+            return null;
+        }
+
+        if (One("--out") is not { } output)
+        {
+            error.WriteLine("tts requires --out <wav>");
+            return null;
+        }
+
+        if (!int.TryParse(One("--attempts") ?? "3", out var attempts) || attempts is < 1 or > 10)
+        {
+            error.WriteLine("--attempts must be an integer from 1 to 10");
+            return null;
+        }
+
+        return new TtsArguments(provider, One("--model") ?? "gpt-audio-1.5", One("--voice") ?? "marin", One("--text"), One("--text-file"), output, attempts);
+    }
+
+    private static ComposeAskWavArguments? ParseCompose(string[] args, TextWriter error)
+    {
+        var values = ParseOptions(args, "compose-ask-wav", ["--preamble", "--question", "--part2", "--kept-seconds", "--gap-seconds", "--out"], error);
+        if (values is null)
+        {
+            return null;
+        }
+
+        string? One(string key) => values.TryGetValue(key, out var list) ? list[^1] : null;
+        if (One("--question") is not { } question || One("--out") is not { } output)
+        {
+            error.WriteLine("compose-ask-wav requires --question <wav> and --out <wav>");
+            return null;
+        }
+
+        if (!double.TryParse(One("--kept-seconds"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var kept) || kept is <= 0 or > 120)
+        {
+            error.WriteLine("compose-ask-wav requires --kept-seconds from 1 to 120");
+            return null;
+        }
+
+        if (!double.TryParse(One("--gap-seconds") ?? "10", System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var gap) || gap is < 0 or > 60)
+        {
+            error.WriteLine("--gap-seconds must be a number from 0 to 60");
+            return null;
+        }
+
+        return new ComposeAskWavArguments(values.TryGetValue("--preamble", out var preambles) ? preambles : [], question, One("--part2"), kept, gap, output);
+    }
+
+    private static AskProbeSummaryArguments? ParseSummary(string[] args, TextWriter error)
+    {
+        var positional = new List<string>();
+        var values = ParseOptions(args, "ask-probe-summary", ["--cap-seconds"], error, positional);
+        if (values is null)
+        {
+            return null;
+        }
+
+        if (positional.Count != 1)
+        {
+            error.WriteLine("ask-probe-summary requires one log directory");
+            return null;
+        }
+
+        return new AskProbeSummaryArguments(positional[0]);
     }
 
     private static ImportArguments? ParseImport(string[] args, TextWriter error)
@@ -403,5 +660,21 @@ internal static class CliParser
 
 public abstract record CliArguments;
 internal sealed record SmokeArguments(string Provider) : CliArguments;
+internal sealed record AskProbeArguments(
+    string Provider,
+    string Part1,
+    string Part2,
+    double GapSeconds,
+    string Variant,
+    int TailMs,
+    int GapKeepMs,
+    bool ObserveInterrupt,
+    string? Reply,
+    string Lang,
+    string? Absent,
+    bool Trace = false,
+    double Pace = 0,
+    string UnmuteWait = "ack",
+    int LeadMs = 200) : CliArguments;
 public sealed record RunArguments(string Id, int MaxSeconds, int StopAfterSlide, string? ContentRoot, string? Owner = null) : CliArguments;
 public sealed record ImportArguments(IReadOnlyList<string> Paths, string Owner, string? ContentRoot) : CliArguments;

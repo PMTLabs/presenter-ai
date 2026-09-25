@@ -423,7 +423,9 @@ public sealed partial class Presenter
 
     private void OnScriptEditDeclined()
     {
-        _session?.AppendInstructions(PromptBuilder.ScriptEditDeclinedInstruction(), $"edit-declined-{_slideIndex + 1}");
+        // Site 18 (plan 011): deferred while an ask exchange runs.
+        var eventId = $"edit-declined-{_slideIndex + 1}";
+        EmitOrDefer("edit declined", PromptBuilder.ScriptEditDeclinedInstruction(), eventId);
     }
 
     // ---- Queue, hold, reconcile -------------------------------------------------------------------------------------
@@ -436,8 +438,10 @@ public sealed partial class Presenter
         var id = _scriptRevisions!.Enqueue(intent.TalkId, request);
         _localEdits[id] = new LocalEdit(id, intent.Targets, _timeProvider.GetTimestamp());
         LogMessage("info", $"edit: queued {id} slide {SlideList(intent.Targets)}");
-        if (_state == PresenterState.Presenting && NarrationHeld) EnterHold();
-        _session?.AppendInstructions(PromptBuilder.ScriptEditPendingInstruction(), $"edit-{id}-pending");
+        // Site 8 (plan 011): during an ask exchange the notice waits for its end, and so does the hold's flush and
+        // instruction (EndExchange re-enters the hold if the slide is still held).
+        if (_state == PresenterState.Presenting && NarrationHeld && ExchangeAllows(ModelAction.EnterHold)) EnterHold();
+        EmitOrDefer("edit pending", PromptBuilder.ScriptEditPendingInstruction(), $"edit-{id}-pending");
         ScriptEdit?.Invoke(new PresenterScriptEdit(id, ScriptEditStatus.Queued, intent.Targets, null, null, null));
         RecordActivity();
         ArmEditKeepAlive();
@@ -552,7 +556,13 @@ public sealed partial class Presenter
             var released = wasHeld && !NarrationHeld;
             if ((currentChanged || released) && !NarrationHeld)
             {
-                if (_state == PresenterState.Presenting)
+                if (_exchange is { } exchange)
+                {
+                    // Site 10 (plan 011): the exchange owns the replay in every phase; it runs once when it ends.
+                    exchange.ReplayDue = true;
+                    exchange.ReplayChanged |= currentChanged;
+                }
+                else if (_state == PresenterState.Presenting)
                 {
                     replayNow = true;
                 }
@@ -568,10 +578,12 @@ public sealed partial class Presenter
         // (T13 live run): when a replay is due, now or at resume, it carries the notice itself.
         if (failed is not null)
         {
-            if (replayNow || _replayOnResume)
+            // Site 10 (plan 011): an exchange's replay at its end is a replay due too.
+            if (replayNow || _replayOnResume || _exchange?.ReplayDue == true)
                 _replayLead = PromptBuilder.ScriptEditFailedLead();
             else
-                _session?.AppendInstructions(PromptBuilder.ScriptEditFailedInstruction(), $"edit-failed-{failed.Id}");
+                // Site 9 (plan 011): deferred while an ask exchange runs.
+                EmitOrDefer("edit failed", PromptBuilder.ScriptEditFailedInstruction(), $"edit-failed-{failed.Id}");
         }
 
         if (replayNow) ReplayCurrentSlide(currentChanged);

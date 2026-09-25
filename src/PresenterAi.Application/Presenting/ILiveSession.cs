@@ -17,6 +17,29 @@ public interface ILiveSession : IAsyncDisposable
     event Action<string, string, string>? HostedToolActivity;
     event Action<string, double?>? Closed;
 
+    /// <summary>
+    /// Plan 011 (P-13): raised by the send loop when it reaches a marker queued by <see cref="MarkInputPosition"/>,
+    /// with the mark id and the ms of input audio appended upstream so far (pump silence included). Implementations
+    /// without an input clock never raise it.
+    /// </summary>
+    event Action<string, long>? InputPositionMarked
+    {
+        add { }
+        remove { }
+    }
+
+    /// <summary>
+    /// Plan 011 (P-18): raised when the upstream acknowledges <see cref="Unmute"/> with
+    /// <c>session.input_audio.unmuted</c>, with the <c>client_event_id</c> it echoes (the event id
+    /// <see cref="Unmute(out string?)"/> sent), or null when the ack carries none. Implementations without an ack never
+    /// raise it.
+    /// </summary>
+    event Action<string?>? InputAudioUnmuted
+    {
+        add { }
+        remove { }
+    }
+
     LiveSessionState State { get; }
 
     string? Id { get; }
@@ -41,7 +64,23 @@ public interface ILiveSession : IAsyncDisposable
 
     bool Unmute();
 
+    /// <summary>
+    /// Plan 011 (review r1 #1): <see cref="Unmute()"/> that also reports the event id it sent, so an ack can be
+    /// attributed to it; null when the implementation sends no id.
+    /// </summary>
+    bool Unmute(out string? eventId)
+    {
+        eventId = null;
+        return Unmute();
+    }
+
     bool SendAudio(ReadOnlyMemory<byte> pcm16);
+
+    /// <summary>
+    /// Plan 011 (P-13): queues a marker in the outbound FIFO behind everything queued so far and returns its id, or
+    /// null when the session cannot queue it. <see cref="InputPositionMarked"/> reports the input clock at the mark.
+    /// </summary>
+    string? MarkInputPosition() => null;
 
     Task<LiveCloseResult> CloseAsync();
 

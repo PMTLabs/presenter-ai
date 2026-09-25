@@ -28,6 +28,8 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
     public IReadOnlyDictionary<string, string?>? Overrides { get; set; }
     public string EnvironmentName { get; set; } = "Testing";
     public bool UseQueuedPresenter { get; set; }
+    /// <summary>Plan 011 T5: when set, replaces the registered <see cref="IPresenter"/> (e.g. a call-recording fake).</summary>
+    public IPresenter? PresenterOverride { get; set; }
     public ISessionToolSource? SessionToolSource { get; set; }
     /// <summary>Plan 010 T8: when set, replaces the registered <see cref="IScriptRevisionService"/> for bridge tests.</summary>
     public PresenterAi.TestSupport.FakeScriptRevisionService? ScriptRevisions { get; set; }
@@ -135,6 +137,12 @@ public sealed class ApiFactory : WebApplicationFactory<Program>
             // supplies its own source.
             services.RemoveAll<ISessionToolSource>();
             services.AddSingleton(SessionToolSource ?? new EmptySessionToolSource());
+            if (PresenterOverride is { } presenterOverride)
+            {
+                services.RemoveAll<IPresenter>();
+                services.AddSingleton(presenterOverride);
+            }
+
             if (UseQueuedPresenter)
             {
                 services.RemoveAll<IPresenter>();
