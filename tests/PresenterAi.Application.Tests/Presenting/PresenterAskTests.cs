@@ -2097,6 +2097,73 @@ public sealed class PresenterAskTests
         if (reply == "no") Assert.Single(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditDeclinedInstruction());
     }
 
+    // ---- Repeated revise_script for an applied edit (T13 live run; plan 010 fix, site 10) ------------------------
+
+    [Fact]
+    public async Task Repeated_request_for_an_edit_applied_during_the_exchange_replays_the_slide_once_after_it()
+    {
+        const string feedback = "{\"feedback\":\"Also mention the 2025 figures.\"}";
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.TrainerOn();
+        await h.ToAwaitingAnswer(start: false);
+        await h.Answer();
+        // Ask start clears approvals, so a repeat inside an exchange is of an edit confirmed in it.
+        h.S.RaiseToolCall("d1", "c1", "revise_script", feedback);
+        await Eventually(() => h.S.Sent.Any(s => s.EventId == "c1"));
+        await h.Settle();
+        await h.Advance(TimeSpan.FromSeconds(2));
+        await h.Reply("yes");
+        var id = Assert.Single(h.Service.Enqueued).Id;
+        await h.Apply(id, 6, (0, "Slide one, new text."));
+        // The confirmed call's delegation finishes, as live: its tool round, then its answer.
+        h.S.RaiseDelegatedResponse("d1");
+        await h.Settle();
+        h.S.RaiseDelegatedResponse("d1");
+        await h.Settle();
+
+        h.S.RaiseDelegation("responses", "del-c2");
+        await h.Settle();
+        h.S.RaiseToolCall("del-c2", "c2", "revise_script", feedback);
+        await h.Settle();
+        var output = JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!;
+        Assert.Equal("already_done", output["status"]?.ToString());
+        Assert.Contains($"edit: repeated request for {id} (already applied)", h.Logs);
+        Assert.Single(h.Service.Enqueued);
+
+        // The re-delegation completes (its tool round, then the answer), which is voiced.
+        h.S.RaiseDelegatedResponse("del-c2");
+        await h.Settle();
+        h.S.RaiseDelegatedResponse("del-c2");
+        await h.Settle();
+        var sent = h.S.Sent.Count;
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 701));
+
+        // Site 10: the exchange owns the replay (the release of the edit's hold); it runs once, with the new text.
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.Contains(h.Logs, l => l.StartsWith("ask: exchange ended (resume)", StringComparison.Ordinal) &&
+            l.EndsWith("replay yes", StringComparison.Ordinal));
+        var replay = Assert.Single(h.S.Sent.Skip(sent), s => s.EventId == "slide-1-part-1");
+        Assert.Contains("Slide one, new text.", replay.Content);
+        Assert.DoesNotContain(h.S.Sent.Skip(sent), IsResumeAfterQuestion);
+        await h.Answer(200);
+
+        // The repeat left no replay behind: the next Ask resumes the slide instead of replaying it again.
+        sent = h.S.Sent.Count;
+        await h.ToAwaitingAnswer(start: false);
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 701));
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.DoesNotContain(after, s => s.EventId == "slide-1-part-1");
+        var resume = Assert.Single(after, IsResumeAfterQuestion);
+        Assert.Equal(PromptBuilder.ResumeAfterAskInstruction(0, 3, "One", followUp: false), resume.Content);
+        Assert.Equal("ask: exchange ended (resume), 0 deferred notices, replay no",
+            h.Logs.Last(l => l.StartsWith("ask: exchange ended", StringComparison.Ordinal)));
+    }
+
     [Fact]
     public async Task Delayed_question_fragment_does_not_confirm_a_tool_during_the_answer()
     {
