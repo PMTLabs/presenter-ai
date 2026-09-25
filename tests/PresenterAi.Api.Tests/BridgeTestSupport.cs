@@ -123,6 +123,19 @@ internal static class BridgeTestSupport
         return result;
     }
 
+    /// <summary>Skips data frames (the connect handshake's trailing frames, say) and returns the close frame.</summary>
+    public static async Task<WebSocketReceiveResult> ReceiveUntilCloseAsync(WebSocket socket)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var result = await socket.ReceiveAsync(new byte[32 * 1024], CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+            if (result.MessageType == WebSocketMessageType.Close) return result;
+        }
+
+        throw new TimeoutException("Timed out waiting for the close frame.");
+    }
+
     public static async Task WaitForAsync(Func<bool> condition)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(5);

@@ -804,7 +804,9 @@ public sealed class PresenterToolTests
             var req = managed.Session().Request;
             Assert.NotNull(req);
             Assert.NotNull(req.Tools);
-            Assert.Equal(6, req.Tools.Count);
+            // Plan 010: revise_script is declared in every managed talk (gated by Trainer mode), so 6 → 7.
+            Assert.Equal(7, req.Tools.Count);
+            Assert.Contains(req.Tools, tool => tool["name"]?.ToString() == "revise_script");
             Assert.NotNull(req.DelegationInstructions);
             Assert.Contains("Use the tools for any request", req.DelegationInstructions);
         }

@@ -6,6 +6,7 @@ using PresenterAi.Application.Content;
 using Microsoft.EntityFrameworkCore;
 using StackExchange.Redis;
 using PresenterAi.Application.Presenting;
+using PresenterAi.Application.Scripts.Revisions;
 using PresenterAi.Application.Sessions;
 using PresenterAi.Application.Tools;
 using PresenterAi.Application.Tools.External;
@@ -15,6 +16,7 @@ using PresenterAi.Infrastructure.Live;
 using PresenterAi.Infrastructure.Persistence;
 using PresenterAi.Infrastructure.Redis;
 using PresenterAi.Infrastructure.Sessions;
+using PresenterAi.Infrastructure.Training;
 
 namespace PresenterAi.Infrastructure;
 
@@ -28,6 +30,9 @@ public static class DependencyInjection
         services.AddDbContext<PresenterAiDbContext>(options =>
             options.UseNpgsql(connectionString ?? string.Empty, npgsql => npgsql.EnableRetryOnFailure()));
         services.AddScoped<IPresentationRepository, PostgresPresentationRepository>();
+        // Plan 010: scoped like the DbContext; singletons (the revision service) open a scope per store operation.
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<IPresentationRevisionStore, PostgresPresentationRevisionStore>();
         services.AddScoped<IToolConnectionRepository, PostgresToolConnectionRepository>();
         services.TryAddSingleton<ISessionRecorderFactory, SessionRecorderFactory>();
         return services;
@@ -115,6 +120,15 @@ public static class DependencyInjection
             .Validate(options => options.Mcp.StartBudgetMs > 0 && options.Mcp.CallTimeoutSeconds > 0,
                 "Tools:Mcp budgets must be positive")
             .ValidateOnStart();
+
+        // Plan 010: bounds each script reviser call; read by ScriptRevisionService.
+        services.AddOptions<TrainingOptions>()
+            .Bind(configuration.GetSection(TrainingOptions.SectionName))
+            .Validate(
+                options => options.ReviserTimeoutSeconds is >= TrainingOptions.MinReviserTimeoutSeconds
+                    and <= TrainingOptions.MaxReviserTimeoutSeconds,
+                $"Training:ReviserTimeoutSeconds must be between {TrainingOptions.MinReviserTimeoutSeconds} and {TrainingOptions.MaxReviserTimeoutSeconds}")
+            .ValidateOnStart();
         services.AddSingleton<CredentialProtector>();
 
         services.AddSingleton<UpstreamRoutes>(serviceProvider =>
@@ -162,6 +176,30 @@ public static class DependencyInjection
     public static IServiceCollection AddPresenter(this IServiceCollection services, bool fileBacked = false)
     {
         services.TryAddSingleton<ToolRegistry>();
+        AddScriptTraining(services);
+
+        if (fileBacked)
+        {
+            // Plan 010: file mode has no database, so versions live in memory for the process, seeded from the file.
+            services.AddSingleton<IPresentationRevisionStore>(serviceProvider =>
+            {
+                var source = serviceProvider.GetRequiredService<IPresentationImportSource>();
+                return new InMemoryPresentationRevisionStore(
+                    async (_, id, cancellationToken) =>
+                    {
+                        try
+                        {
+                            return (await source.ReadSourceAsync(id, cancellationToken).ConfigureAwait(false)).Markdown;
+                        }
+                        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException or ArgumentException)
+                        {
+                            return null;
+                        }
+                    },
+                    serviceProvider.GetService<TimeProvider>());
+            });
+        }
+
         services.AddSingleton<IPresenter>(serviceProvider =>
         {
             var factory = serviceProvider.GetRequiredService<ILiveSessionFactory>();
@@ -221,8 +259,36 @@ public static class DependencyInjection
                         await using var scope = serviceProvider.GetRequiredService<IServiceScopeFactory>().CreateAsyncScope();
                         return await scope.ServiceProvider.GetRequiredService<ISessionToolSource>().LoadAsync(ownerId, ct).ConfigureAwait(false);
                     } : null,
-                TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000));
+                TimeSpan.FromMilliseconds((serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ExternalToolsOptions>>()?.Value.Mcp.StartBudgetMs ?? 3000) + 1000),
+                // Plan 010: optional so hosts without the revision service still build; the presenter subscribes to its
+                // Changed signal itself (a reconcile request only).
+                serviceProvider.GetService<IScriptRevisionService>());
         });
         return services;
+    }
+
+    // Plan 010 T5/T6: the out-of-band Responses reviser on the upstream routes and the revision service. The named client has no timeout of its
+    // own (Training:ReviserTimeoutSeconds and the caller's token bound each call) and no logging handlers, so request
+    // URLs and headers never reach the logs.
+    private static void AddScriptTraining(IServiceCollection services)
+    {
+        services.AddHttpClient(ResponsesScriptReviser.HttpClientName)
+            .ConfigureHttpClient(client => client.Timeout = Timeout.InfiniteTimeSpan)
+            .RemoveAllLoggers();
+        services.TryAddSingleton(TimeProvider.System);
+        services.TryAddSingleton<IScriptReviser>(serviceProvider => new ResponsesScriptReviser(
+            serviceProvider.GetRequiredService<IHttpClientFactory>(),
+            serviceProvider.GetRequiredService<UpstreamRoutes>(),
+            serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrainingOptions>>().Value.ReviserTimeout,
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ResponsesScriptReviser>>()));
+
+        // Plan 010 T6: singleton; it resolves IPresentationRevisionStore from a fresh async scope per store operation.
+        services.TryAddSingleton<IScriptRevisionService>(serviceProvider => new ScriptRevisionService(
+            serviceProvider.GetRequiredService<IServiceScopeFactory>(),
+            serviceProvider.GetRequiredService<IScriptReviser>(),
+            serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TrainingOptions>>().Value,
+            serviceProvider.GetRequiredService<TimeProvider>(),
+            serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ScriptRevisionService>>()));
     }
 }

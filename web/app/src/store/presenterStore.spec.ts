@@ -18,6 +18,13 @@ describe("presenterStore", () => {
       endReason: null,
       usageConfirmed: null,
       estimatedSeconds: null,
+      trainerMode: false,
+      trainerAvailable: false,
+      voiceTraining: true,
+      scriptVersion: null,
+      edits: {},
+      editOrder: [],
+      currentEditId: null,
     });
   });
 
@@ -31,6 +38,26 @@ describe("presenterStore", () => {
 
     store.message({ type: "limit_warning", kind: "max_length", secondsLeft: null });
     expect(usePresenterStore.getState().limitWarning).toBeNull();
+  });
+
+  it("trainer_state sets Trainer mode from the server in and out of a talk", () => {
+    const store = usePresenterStore.getState();
+    store.message({ type: "trainer_state", trainerMode: true, trainerAvailable: true, voiceTraining: true });
+    expect(usePresenterStore.getState()).toMatchObject({ trainerMode: true, trainerAvailable: true, voiceTraining: true });
+
+    // A talk on a client-mode connection, then End: the reset clears both the switch and the voice notice.
+    store.message({
+      type: "script_version",
+      presentationId: "demo",
+      version: 3,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: false,
+    });
+    expect(usePresenterStore.getState().voiceTraining).toBe(false);
+    store.message({ type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    expect(usePresenterStore.getState()).toMatchObject({ trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    expect(usePresenterStore.getState().scriptVersion).toBe(3);
   });
 
   it("handles upstream status frames", () => {
@@ -91,5 +118,149 @@ describe("presenterStore", () => {
       muted: false,
     });
     expect(usePresenterStore.getState().suspended).toBe(false);
+  });
+
+  it("tracks edit status by id", () => {
+    const store = usePresenterStore.getState();
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "queued",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    store.message({
+      type: "script_edit",
+      id: "edit_2",
+      status: "queued",
+      slideIndexes: [5],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "processing",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+
+    const state = usePresenterStore.getState();
+    expect(state.edits.edit_1).toEqual({
+      id: "edit_1",
+      status: "processing",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    expect(state.edits.edit_2).toEqual({
+      id: "edit_2",
+      status: "queued",
+      slideIndexes: [5],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    // The most recently queued edit becomes the one the chip follows.
+    expect(state.currentEditId).toBe("edit_2");
+  });
+
+  it("a new talk starts with no edits, so a reused edit id is tracked again", () => {
+    const store = usePresenterStore.getState();
+    const frame = (status: string, extra: Record<string, unknown> = {}) =>
+      store.message({
+        type: "script_edit",
+        id: "edit_1",
+        status,
+        slideIndexes: [0],
+        version: null,
+        summary: null,
+        error: null,
+        ...extra,
+      });
+    store.applySnapshot({ state: "presenting", slideIndex: 0, slideCount: 3, muted: false });
+    frame("queued");
+    frame("applied", { version: 9, summary: "Old talk" });
+    store.applySnapshot({ state: "idle", slideIndex: 0, slideCount: 3, muted: false });
+
+    // T13 live run: the next talk's edit_1 failed, but the chip kept "Updated — v9".
+    store.applySnapshot({ state: "connecting", slideIndex: 0, slideCount: 3, muted: false });
+    expect(usePresenterStore.getState().edits).toEqual({});
+    expect(usePresenterStore.getState().currentEditId).toBeNull();
+    frame("queued");
+    // Snapshots inside the same talk (presenting, paused) must keep its edits: only leaving idle starts a new talk.
+    store.applySnapshot({ state: "presenting", slideIndex: 0, slideCount: 3, muted: false });
+    store.applySnapshot({ state: "paused", slideIndex: 0, slideCount: 3, muted: false });
+    expect(usePresenterStore.getState().edits.edit_1.status).toBe("queued");
+    frame("failed", { error: "timeout" });
+
+    const state = usePresenterStore.getState();
+    expect(state.currentEditId).toBe("edit_1");
+    expect(state.edits.edit_1.status).toBe("failed");
+    expect(state.edits.edit_1.error).toBe("timeout");
+  });
+
+  it("does not regress a terminal edit status", () => {
+    const store = usePresenterStore.getState();
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "queued",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "applied",
+      slideIndexes: [2],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    });
+    // A stale/duplicate non-terminal frame for the same id must never overwrite the terminal status.
+    store.message({
+      type: "script_edit",
+      id: "edit_1",
+      status: "processing",
+      slideIndexes: [2],
+      version: null,
+      summary: null,
+      error: null,
+    });
+
+    expect(usePresenterStore.getState().edits.edit_1).toEqual({
+      id: "edit_1",
+      status: "applied",
+      slideIndexes: [2],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    });
+  });
+
+  it("stamps slide on the first delta and keeps it while merging", () => {
+    const store = usePresenterStore.getState();
+    store.message({ type: "slide", index: 2 });
+    store.message({ type: "transcript", role: "assistant", delta: "Hello", end_ms: 100 });
+    // Navigation mid-utterance must not retroactively move the turn's stamped slide.
+    store.message({ type: "slide", index: 5 });
+    store.message({ type: "transcript", role: "assistant", delta: " world", end_ms: 900 });
+
+    const transcript = usePresenterStore.getState().transcript;
+    expect(transcript).toHaveLength(1);
+    expect(transcript[0]).toEqual({ role: "assistant", text: "Hello world", endMs: 900, slide: 2 });
+
+    // A new turn (role change) picks up the current slide.
+    store.message({ type: "transcript", role: "user", delta: "Question", end_ms: 1500 });
+    expect(usePresenterStore.getState().transcript[1].slide).toBe(5);
   });
 });

@@ -27,6 +27,10 @@ export type BridgeEventMap = {
   flush: []; // Server {type:"flush"}: discard queued playback audio.
   limit_warning: [BridgeMessage];
   upstream: [BridgeMessage];
+  script_edit: [BridgeMessage];
+  script_version: [BridgeMessage];
+  /** Server-authoritative Trainer mode, in or out of a talk (on connect, idle requests, refusals, talk end). */
+  trainer_state: [BridgeMessage];
 };
 export type BridgeMessage = { type: string; [key: string]: unknown };
 type Handler<T extends keyof BridgeEventMap> = (
@@ -190,6 +194,12 @@ export class BridgeClient {
   end() {
     this.send({ type: "end" });
   }
+  setTrainerMode(on: boolean) {
+    this.send({ type: "trainer_mode", on });
+  }
+  trainTurn(question: string, answer: string, slideIndex: number) {
+    this.send({ type: "train_turn", question, answer, slideIndex });
+  }
   ping() {
     this.send({ type: "ping" });
   }
@@ -261,6 +271,15 @@ export class BridgeClient {
         break;
       case "busy":
         this.emit("busy", message);
+        break;
+      case "script_edit":
+        this.emit("script_edit", message);
+        break;
+      case "script_version":
+        this.emit("script_version", message);
+        break;
+      case "trainer_state":
+        this.emit("trainer_state", message);
         break;
     }
   }

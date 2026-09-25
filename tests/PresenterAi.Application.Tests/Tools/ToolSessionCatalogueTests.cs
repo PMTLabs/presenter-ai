@@ -595,6 +595,46 @@ public sealed class ToolSessionCatalogueTests
         Assert.Equal("crm", inline.Resolve("gated", ParseJson("{}")).Tool!.Source);
     }
 
+    [Theory]
+    [InlineData(16)]
+    [InlineData(0)]
+    public void Snapshot_forwards_confirmation_question(int maxInlineTools)
+    {
+        var registry = new ToolRegistry();
+        registry.Register(new QuestionTool());
+        var catalogue = ToolSessionCatalogue.Build(registry, [new GatedTool()], maxInlineTools);
+
+        var direct = catalogue.Resolve("ask_first", ParseJson("{}"));
+        var viaCallTool = catalogue.Resolve("call_tool", ParseJson("{\"name\":\"ask_first\",\"arguments\":{}}"));
+
+        Assert.True(direct.IsResolved);
+        Assert.Equal(QuestionTool.Question, direct.Tool!.ConfirmationQuestion);
+        if (maxInlineTools == 0)
+        {
+            Assert.True(viaCallTool.IsResolved);
+            Assert.Equal(QuestionTool.Question, viaCallTool.Tool!.ConfirmationQuestion);
+        }
+
+        Assert.Equal(QuestionTool.Question, catalogue.FindTool("ask_first")!.ConfirmationQuestion);
+        Assert.Equal(QuestionTool.Question, catalogue.AllTools.Single(t => t.Name == "ask_first").ConfirmationQuestion);
+        Assert.Equal(QuestionTool.Question, catalogue.InlineTools.Single(t => t.Name == "ask_first").ConfirmationQuestion);
+        Assert.Null(catalogue.AllTools.Single(t => t.Name == "gated").ConfirmationQuestion);
+    }
+
+    private sealed class QuestionTool : ITool
+    {
+        public const string Question = "Shall I add that to the script?";
+        public string Name => "ask_first";
+        public string Description => "Needs its own question";
+        public JsonObject Parameters => new() { ["type"] = "object", ["properties"] = new JsonObject() };
+        public IReadOnlyList<string> Tags => [];
+        public bool Pinned => true;
+        public bool RequiresConfirmation => true;
+        public string? ConfirmationQuestion => Question;
+        public Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default) =>
+            Task.FromResult(ToolResult.Success("ok"));
+    }
+
     private sealed class GatedTool : ITool
     {
         public string Name => "gated";

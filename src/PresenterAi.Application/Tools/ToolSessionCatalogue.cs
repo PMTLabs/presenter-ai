@@ -103,6 +103,7 @@ public sealed class ToolSessionCatalogue
         public TimeSpan Timeout { get; } = original.Timeout;
         public string Source { get; } = original.Source;
         public string Title { get; } = original.Title;
+        public string? ConfirmationQuestion { get; } = original.ConfirmationQuestion;
         public JsonObject Parameters => (JsonObject)_parameters.DeepClone();
         public Task<ToolResult> InvokeAsync(JsonElement arguments, CancellationToken cancellationToken = default) =>
             original.InvokeAsync(arguments, cancellationToken);

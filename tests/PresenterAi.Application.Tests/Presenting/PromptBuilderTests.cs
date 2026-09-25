@@ -60,12 +60,46 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Script_change_requests_are_delegated_so_they_reach_revise_script()
+    {
+        // T13 live run: without this rule the realtime model spoke the requested change instead of delegating it.
+        foreach (var managed in new[] { false, true })
+        {
+            var prompt = PromptBuilder.SystemInstructions("T", Slides, string.Empty, managedMode: managed);
+
+            Assert.Contains("asks for the script itself to change", prompt);
+            Assert.Contains("delegate it in their words; do not just say the change aloud", prompt);
+        }
+    }
+
+    [Fact]
+    public void Edit_pending_notice_is_spoken_in_the_language_of_the_talk()
+    {
+        // T13 live run: the quoted English phrase was spoken verbatim in a Vietnamese talk.
+        Assert.Contains("in the language of the talk", PromptBuilder.ScriptEditPendingInstruction());
+    }
+
+    [Fact]
     public void Question_resume_asks_for_a_natural_transition_not_a_canned_bridge()
     {
         var instruction = PromptBuilder.ResumeAfterQuestionInstruction();
         Assert.Contains("natural transition of your own", instruction);
         Assert.Contains("restart the sentence", instruction);
         Assert.DoesNotContain("Back to the slide", instruction);
+    }
+
+    [Fact]
+    public void Trainer_mode_instructions_say_to_delegate_changes_not_speak_them()
+    {
+        var on = PromptBuilder.TrainerModeOnInstruction();
+        Assert.StartsWith("Trainer mode is on.", on);
+        Assert.Contains("delegate it in their words", on);
+        Assert.Contains("Never say the change aloud yourself", on);
+        Assert.Contains("never re-narrate the slide", on);
+
+        var off = PromptBuilder.TrainerModeOffInstruction();
+        Assert.StartsWith("Trainer mode is off.", off);
+        Assert.Contains("still delegate it", off);
     }
 
     [Fact]

@@ -145,6 +145,61 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                     b.ToTable("presentations", (string)null);
                 });
 
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.PresentationRevision", b =>
+                {
+                    b.Property<string>("PresentationId")
+                        .HasColumnType("text")
+                        .HasColumnName("presentation_id");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("integer")
+                        .HasColumnName("number");
+
+                    b.Property<int?>("BaseVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("base_version");
+
+                    b.PrimitiveCollection<int[]>("ChangedSlides")
+                        .IsRequired()
+                        .HasColumnType("integer[]")
+                        .HasColumnName("changed_slides");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("text")
+                        .HasColumnName("created_by");
+
+                    b.Property<int?>("RevertedFrom")
+                        .HasColumnType("integer")
+                        .HasColumnName("reverted_from");
+
+                    b.Property<string>("Script")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("script");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("source");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("summary");
+
+                    b.HasKey("PresentationId", "Number");
+
+                    b.ToTable("presentation_revisions", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_presentation_revisions_source", "source IN ('import', 'live_edit', 'revert')");
+                        });
+                });
+
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.RefreshToken", b =>
                 {
                     b.Property<string>("Id")
@@ -512,6 +567,17 @@ namespace PresenterAi.Infrastructure.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Owner");
+                });
+
+            modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.PresentationRevision", b =>
+                {
+                    b.HasOne("PresenterAi.Infrastructure.Persistence.Entities.Presentation", "Presentation")
+                        .WithMany()
+                        .HasForeignKey("PresentationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Presentation");
                 });
 
             modelBuilder.Entity("PresenterAi.Infrastructure.Persistence.Entities.RefreshToken", b =>

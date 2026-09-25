@@ -115,9 +115,11 @@ public sealed class BridgeContractTests
         await using var fake = await FakeLiveServer.StartAsync();
         using var factory = BridgeTestSupport.Factory(fake);
         using var socket = await BridgeTestSupport.ConnectAsync(factory);
-        await BridgeTestSupport.SendFragmentedAsync(socket, new string('x', 4 * 1024 + 1), WebSocketMessageType.Text);
+        // Plan 010: authenticated text commands carry train_turn exchanges, so the bound moved from 4 KiB to 16 KiB.
+        await BridgeTestSupport.SendFragmentedAsync(socket, new string('x', 16 * 1024 + 1), WebSocketMessageType.Text);
 
-        (await BridgeTestSupport.ReceiveCloseAsync(socket)).CloseStatus.Should().Be(WebSocketCloseStatus.MessageTooBig);
+        // The connect handshake may carry further frames (trainer_state), so read through them to the close.
+        (await BridgeTestSupport.ReceiveUntilCloseAsync(socket)).CloseStatus.Should().Be(WebSocketCloseStatus.MessageTooBig);
     }
 
     [Fact]
@@ -128,7 +130,7 @@ public sealed class BridgeContractTests
         using var socket = await BridgeTestSupport.ConnectAsync(factory);
         await BridgeTestSupport.SendFragmentedAsync(socket, new byte[4 * 1024 + 1], WebSocketMessageType.Binary);
 
-        (await BridgeTestSupport.ReceiveCloseAsync(socket)).CloseStatus.Should().Be(WebSocketCloseStatus.MessageTooBig);
+        (await BridgeTestSupport.ReceiveUntilCloseAsync(socket)).CloseStatus.Should().Be(WebSocketCloseStatus.MessageTooBig);
     }
 
     [Fact]

@@ -650,3 +650,85 @@ and Cli pass with no container. `secrets-guard: clean`.
 - **Verification:** build 0/0; .NET Application 52, Infrastructure 31 + 3 skipped, Api 137, Cli 11, Integration
   40 + 1 skipped; web shared 18 and app 22, lint and both builds; four orchestrator mutations, each caught.
 - **No round 3.** The follow-ups are listed in `docs/review/007` under "Fixes".
+
+## 2026-09-24 — plan 010 T13 live Trainer-mode run (Chrome, React app, Azure `gpt-live-1`, reviser `gpt-6-sol`)
+
+Automated in Chrome: a page script feeds `gpt-audio-1.5` TTS clips (voice `marin`) into a fake microphone and logs
+every non-audio bridge frame; the owner listened on headphones. Run on the plan 011 build (010 merged in).
+
+| # | Result |
+|---|---|
+| 1 | Pass: Script versions lists v1 `import`, current |
+| 2 | Pass: `trainer: on (voice: yes)`; switch on |
+| 3 | **Failed first** (no `revise_script`: "also mention…" and "please update the script…" were spoken as narration). Fixed `f1ed848`, then pass: "Shall I add that to the script?" |
+| 4 | Pass: "yes" → "Got it, slide 2 is being updated", hold, no advance. Two early attempts timed out because the automation's "yes" came late or overlapped the question (test timing, not product) |
+| 5 | Pass: v4 `live_edit` in 2.7 s; slide 2 restarted with "The program started in 2020" |
+| 6 | Pass: a real question was answered as Q&A (no tool call, no version); an edit request answered "No." → `declined`, "sticking with the current script", no version |
+| 7 | Pass: Train on this on that answer → v5 in 2.8 s, slide 2 (current) replayed |
+| 8 | Pass: slide 5 feedback on slide 3 → talk continued, v6 in 3.1 s; the retry (v9) was narrated on slide 5 ("every quarter, a roadmap review") |
+| 9 | Pass: panel "1 pending edit will apply after this revert: edit_4 (slide 5, processing)"; v8 `revert`, then v9 on top; slide 4 unchanged, so no replay |
+| 10 | Pass (Vietnamese deck): "Có" confirmed; v2 summary and narration in Vietnamese ("Biểu bì là lớp ngoài cùng của da và không có mạch máu."); Train on this → v3 in Vietnamese |
+| 11 | **Failed first** (no spoken failure; chip kept the last talk's "Updated — v9"). Fixed `c10c867`, `8015a07`, `f09a797`, then pass with `Training__ReviserTimeoutSeconds=10` and a whole-deck "twice as long" edit: "I couldn't apply that change to the script", chip "Couldn't update — timed out", script unchanged |
+| 12 | Pass: End, Start → `script_version` 9 |
+
+- **Reviser:** 2.0–3.3 s and 894–1,538 tokens in / 267–373 out for one slide; a whole-deck tone rewrite took 9.7 s
+  (3,859 / 1,775); the two timed out at 10.0 s.
+- **Usage:** 165 + 622.2 + 5 + 247 + 183.4 (Ricoh) + 161.2 (Vietnamese) ≈ 1,384 s.
+- **Defects fixed on the branch:**
+  - `f1ed848`: only the backend instructions knew about script edits, so the realtime model answered "also mention
+    X" itself. The front instructions now say to delegate a script-change request.
+  - `c10c867`: edit ids restart at `edit_1` every talk, but the web store kept the last talk's terminal edits and
+    dropped the new frames as regressions. The store clears edits when a talk leaves idle.
+  - `8015a07`, `f09a797`: a failed edit that released the held slide appended the notice and then replayed with
+    "Stop whatever you are saying now", so the notice was never heard. Any replay due (now, at resume, or after an
+    Ask exchange in plan 011) now leads with the notice.
+  - `86b6dfb`: the edit-pending notice quoted English words, spoken verbatim in the Vietnamese talk.
+- **Not fixed, for the owner:**
+  - Train on this in an Ask exchange sent only the question's late last fragment ("lâu"); the answer also starts
+    with the filler "One moment." The reviser still got it right from the answer.
+  - After "yes", the model calls `revise_script` again; the call is de-duplicated ("running"), so it is harmless.
+  - The model paraphrases the confirmation question (Vietnamese: "Mình sẽ thêm ý đó vào nội dung.", a statement).
+  - The revert panel keeps "will apply after this revert: edit_4 (applied)" after the edit applied.
+- **Cleanup:** Ricoh reverted to v1 text (v11 `revert`), Khóa 2 Bài 1 reverted to v1 (v4 `revert`).
+
+## 2026-09-25 — plan 010 T13 live regression (Chrome, React app, Azure `gpt-live-1`, reviser `gpt-6-sol`)
+
+Full regression on the final plan 011 build `047da8e` (010 `7126d97` merged), automated as on 2026-09-24, with
+`Training__ReviserTimeoutSeconds=10`. All 12 rows and proofs (a)–(f) passed; two rows needed a fix or a re-run.
+
+| # | Result |
+|---|---|
+| 1–2 | Pass: v1 `import` current; Trainer mode on. Proof (a): before the edit the model has no start year |
+| 3–4 | Pass (slide 3 v17, again on slide 4 v18): question → "yes" → "Got it, updating that" → hold, chip Updating… → Updated |
+| 5 | **Failed first** (see the fixes below), then pass on slide 4: the repeat got `already_done`, "slide 4 was spoken in full (coverage 100%); no replay", resume, advance. Proof (b) v16 diff; proof (c) the replay spoke the 2020 sentence; proof (d) same talk "It started in 2020."; proof (e) new talk, same answer |
+| 6 | Pass: a real question answered as Q&A, no confirmation; an edit request + "No, thank you" → `declined`, "Alright.", no version |
+| 7 | Pass: Train on this on the ADO/Jira answer → v19, current slide replayed with "For testing, the team works in ADO and uses Jira." |
+| 8 | Pass on the third run (v25, fresh talk): slide 5 narrated in full including "and every quarter, a roadmap review". Run 1 (v20): the model stopped slide 5 early at "…improvement actions...", no interruption logged; recorded as a one-off model early stop (owner decision). Run 2 invalid: the upstream degraded and closed (`connection_lost`) |
+| 9 | Pass: an edit, then Revert to v1 while processing → v26 `revert`, the edit on top as v27, slide 6 replayed; panel "1 pending edit will apply after this revert" |
+| 10 | Pass (Khóa 2 Bài 1): "Có" → v5, Vietnamese replay; a repeat got "spoken in full (coverage 100%); no replay"; Train on this → v6 in Vietnamese |
+| 11 | Pass: a formal-tone rewrite applied in 9.9 s (v28); "twice as long" timed out at 10 s → "I couldn't apply that change to the script.", chip "Couldn't update — timed out", no version. Round-4 case (Pause while processing, timeout, Next): the next slide led with the failure notice once |
+| 12 | Pass: End, Start → v28. Proof (f): Revert to v1 (v30), new talk → "I don't have that in this deck" |
+
+- **Reviser:** 12 applied edits, 1.6–3.1 s and 637–1,630 tokens in / 103–413 out for one slide; the whole-deck
+  rewrite took 9.9 s (3,662 / 1,813); two timed out at 10.0 s. Total 14,955 in / 4,753 out.
+- **Usage:** 171, 468.4, 60.2, 25.8 s (Ricoh) and 261.6 s (Vietnamese), confirmed; one talk lost the upstream,
+  about 581 s estimated, unconfirmed.
+- **Defects fixed on the branch** (details in plan 010 §10):
+  - `94b2099` (from the T8 regression): the Trainer-mode rule in the system prompt alone did not hold; turning it on
+    or off mid-talk now tells the voice model.
+  - `889e61f`: after an applied edit the model re-delegated the same edit; the cached approval made it announce the
+    edit mid-replay and the resume skipped the rest of the slide. A repeat now answers by the edit's state.
+  - `7126d97`: the repeat's replay spoke a slide the model had already finished a second time. The replay is now
+    gated on narration coverage (`NarrationCoverage`); pi review `docs/review/032`.
+  - `047da8e` (plan 011): the gate is settled at Ask start, before the exchange takes over the replay.
+- **Not fixed, for the owner:**
+  - A re-delegation after an applied edit with different wording asks "Shall I add that?" again (2 of 3); it lapses
+    as not confirmed after 15 s. `already_done` catches only identical requests.
+  - Once the "updating" phrase came out in German in an English talk.
+  - The backend once said a revision was submitted without calling a tool.
+  - After a resume on a slide already spoken in full the model stays silent; the 15 s fallback advances (about 18 s
+    quiet).
+  - Flaky Integration test `ScriptRevisionServicePostgresTests.End_between_cas_and_commit_on_postgres_in_both_orders`
+    (`commitFirst: True`) failed once, then passed 3 isolated runs and a full rerun.
+  - A test-harness artifact: a clip spoken over residual audio lost "For slide five", so one edit went to slide 10.
+- **Cleanup:** Ricoh reverted to v1 text (v30), Khóa 2 Bài 1 reverted to v1 (v7).

@@ -11,8 +11,14 @@ import { Transcript } from "../components/Transcript";
 import { SlidePill } from "../components/SlidePill";
 import { UsagePill } from "../components/UsagePill";
 import { LogPanel } from "../components/LogPanel";
+import { TrainerControls } from "../components/TrainerControls";
+import { ScriptVersions } from "../components/ScriptVersions";
 import { formatEndReason } from "../utils/endReasons";
+import { useToastStore } from "../store/toastStore";
 type Detail = components["schemas"]["PresentationDetail"];
+
+/** Toast keys this page owns: one toast per notification kind, updated in place and cleared on leave. */
+const TOAST_KEYS = { load: "present:load-error", ended: "present:talk-ended", limit: "present:limit-warning" } as const;
 
 const startButtonClassName = [
   "rounded-lg bg-blue-600 px-3 py-1.5 text-sm font-medium text-white",
@@ -80,7 +86,6 @@ export function Present() {
     bargeIns: 0,
   });
   const [presentation, setPresentation] = useState<Detail | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [canTakeOver, setCanTakeOver] = useState(false);
   const [selectedLength, setSelectedLength] = useState<number | undefined>(undefined);
@@ -95,11 +100,14 @@ export function Present() {
   const upstreamStatus = usePresenterStore((state) => state.upstreamStatus);
   const suspended = usePresenterStore((state) => state.suspended);
   const endReason = usePresenterStore((state) => state.endReason);
+  const trainerMode = usePresenterStore((state) => state.trainerMode);
   const applySnapshot = usePresenterStore((state) => state.applySnapshot);
   const message = usePresenterStore((state) => state.message);
   const log = usePresenterStore((state) => state.log);
   const setMicReady = usePresenterStore((state) => state.setMicReady);
   const setBuffered = usePresenterStore((state) => state.setBuffered);
+  const showToast = useToastStore((state) => state.show);
+  const dismissToast = useToastStore((state) => state.dismissKey);
   const stopAudio = useCallback(() => {
     audioAbort.current?.abort();
     audioAbort.current = null;
@@ -141,6 +149,9 @@ export function Present() {
       "closed",
       "limit_warning",
       "upstream",
+      "script_edit",
+      "script_version",
+      "trainer_state",
     ] as const)
       bridge.on(event, (eventMessage) => {
         message(eventMessage);
@@ -171,24 +182,26 @@ export function Present() {
   useEffect(() => {
     if (!ready || !userId || !id) {
       setPresentation(null);
-      setError(null);
+      dismissToast(TOAST_KEYS.load);
       driver.current?.dispose();
       driver.current = null;
       return;
     }
     let active = true;
-    setError(null);
+    dismissToast(TOAST_KEYS.load);
     void apiClient
       .GET("/v1/presentations/{id}", { params: { path: { id } } })
       .then(({ data, error: requestError }) => {
         if (!active) return;
         if (requestError) {
           const problem: unknown = requestError;
-          setError(
-            isProblem(problem)
+          showToast({
+            key: TOAST_KEYS.load,
+            kind: "error",
+            message: isProblem(problem)
               ? (errorMessages[problem.code] ?? problem.detail ?? problem.title)
               : "Unable to load presentation.",
-          );
+          });
           return;
         }
         const detail: Detail | undefined = data;
@@ -216,17 +229,24 @@ export function Present() {
           });
       })
       .catch(() => {
-        if (active) setError("Unable to load presentation.");
+        if (active)
+          showToast({ key: TOAST_KEYS.load, kind: "error", message: "Unable to load presentation." });
       });
     return () => {
       active = false;
       driver.current?.dispose();
       driver.current = null;
     };
-  }, [id, log, ready, userId]);
+  }, [dismissToast, id, log, ready, showToast, userId]);
   useEffect(() => {
     setSelectedLength(undefined);
   }, [id]);
+  useEffect(
+    () => () => {
+      for (const key of Object.values(TOAST_KEYS)) dismissToast(key);
+    },
+    [dismissToast],
+  );
   useEffect(() => {
     if (!limitWarning || limitWarning.secondsLeft === null || limitWarning.secondsLeft === undefined) {
       setCountdown(null);
@@ -238,6 +258,31 @@ export function Present() {
     }, 1000);
     return () => clearInterval(timer);
   }, [limitWarning]);
+  // A limit warning is a toast that counts down in place and stays until the warning clears or the user closes it.
+  const limitToastFor = useRef<typeof limitWarning>(null);
+  useEffect(() => {
+    if (countdown === null || !limitWarning) {
+      limitToastFor.current = null;
+      dismissToast(TOAST_KEYS.limit);
+      return;
+    }
+    const open = useToastStore.getState().toasts.some((toast) => toast.key === TOAST_KEYS.limit);
+    if (limitToastFor.current === limitWarning && !open) return; // closed by the user: do not reopen this warning
+    limitToastFor.current = limitWarning;
+    showToast({
+      key: TOAST_KEYS.limit,
+      kind: "warning",
+      message:
+        limitWarning.kind === "max_length"
+          ? `Time limit warning: ${countdown}s remaining`
+          : `Inactivity warning: ${countdown}s remaining`,
+    });
+  }, [countdown, dismissToast, limitWarning, showToast]);
+  const endReasonText = formatEndReason(endReason);
+  const idle = snapshot.state === "idle";
+  useEffect(() => {
+    if (endReasonText && idle) showToast({ key: TOAST_KEYS.ended, kind: "info", message: `Talk ended: ${endReasonText}` });
+  }, [endReasonText, idle, showToast]);
   const begin = async () => {
     if (!ready || !userId || !presentation || snapshot.state !== "idle") return;
     stopAudio();
@@ -284,11 +329,9 @@ export function Present() {
   };
   useEffect(() => {
     const keys = (e: KeyboardEvent) => {
-      if (
-        ["INPUT", "SELECT", "TEXTAREA"].includes(
-          (document.activeElement as HTMLElement)?.tagName,
-        )
-      )
+      const active = document.activeElement as HTMLElement | null;
+      // Form fields and the Trainer mode switch own their keys (Space toggles the switch, not Pause).
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(active?.tagName ?? "") || active?.getAttribute("role") === "switch")
         return;
       const live = ["presenting", "paused"].includes(snapshot.state);
       if (e.key === " " && live) {
@@ -354,7 +397,6 @@ export function Present() {
       ? false
       : snapshot.suspended === true || suspended || upstreamStatus === "suspended";
   const isReconnecting = upstreamStatus === "reconnecting";
-  const endReasonText = formatEndReason(endReason);
   const LENGTH_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 90] as const;
   const scriptMinutes =
     (presentation?.meta as { maxMinutes?: number } | undefined)?.maxMinutes;
@@ -365,50 +407,12 @@ export function Present() {
         "text-gray-900 dark:text-gray-100",
       ].join(" ")}
     >
-      <Link className="flex-none text-sm text-blue-600" to="/">
-        ← Library
-      </Link>
-      {ready && !userId && (
-        <p className="mt-4 flex-none text-gray-600 dark:text-gray-400">
-          Please sign in to continue. <Link className="text-blue-600 hover:underline" to="/login">Sign in</Link>
-        </p>
-      )}
-      {busyMessage && (
-        <div className="mt-4 flex flex-none items-center justify-between gap-3 rounded-lg bg-amber-50 p-4 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-          <p>{busyMessage}</p>
-          {canTakeOver && (
-            <button className={actionButtonClassName} onClick={() => client.current?.takeOver()}>
-              Take over
-            </button>
-          )}
-        </div>
-      )}
-      {error && (
-        <p className="mt-4 flex-none rounded-lg bg-red-50 p-4 text-red-700 dark:bg-red-950 dark:text-red-200">
-          {error}
-        </p>
-      )}
-      {endReasonText && snapshot.state === "idle" && (
-        <p role="status" className="mt-4 flex-none rounded-lg bg-gray-100 p-4 text-gray-800 dark:bg-gray-800 dark:text-gray-200">
-          Talk ended: {endReasonText}
-        </p>
-      )}
-      <div className="mt-3 flex flex-none flex-wrap gap-2">
-        <span className="rounded-full bg-blue-100 px-3 py-1 text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
-          {snapshot.state}
-        </span>
-        <SlidePill />
-        <UsagePill />
-        <span className="rounded-full bg-gray-200 px-3 py-1 text-xs text-gray-900 dark:bg-gray-800 dark:text-gray-100">
-          buf {bufferedMs} ms
-        </span>
-      </div>
       <Group
         orientation={isDesktop ? "horizontal" : "vertical"}
         id="presenter-split"
         defaultLayout={defaultLayout}
         onLayoutChanged={onLayoutChanged}
-        className="mt-4 min-h-0 min-w-0 flex-1 overflow-hidden"
+        className="min-h-0 min-w-0 flex-1 overflow-hidden"
       >
         <Panel
           id="deck"
@@ -422,12 +426,40 @@ export function Present() {
               "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
             ].join(" ")}
           >
-            {countdown !== null && limitWarning && (
-              <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-amber-50 p-3 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
-                {limitWarning.kind === "max_length"
-                  ? `Time limit warning: ${countdown}s remaining`
-                  : `Inactivity warning: ${countdown}s remaining`}
+            {/* One row above the deck: the breadcrumb on the left, the info bar flush with the deck's right edge. */}
+            <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-2 px-1 py-2">
+              <Link className="text-sm text-blue-600 hover:underline dark:text-blue-400" to="/">
+                ← Library
+              </Link>
+              <div
+                data-testid="info-bar"
+                className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2"
+              >
+                <span className="rounded-full bg-blue-100 px-3 py-1 text-xs text-blue-900 dark:bg-blue-900 dark:text-blue-100">
+                  {snapshot.state}
+                </span>
+                <SlidePill />
+                <UsagePill />
+                <span className="rounded-full bg-gray-200 px-3 py-1 text-xs text-gray-900 dark:bg-gray-800 dark:text-gray-100">
+                  buf {bufferedMs} ms
+                </span>
+                <TrainerControls onToggle={() => client.current?.setTrainerMode(!trainerMode)} />
+              </div>
+            </div>
+            {ready && !userId && (
+              <p className="m-3 mb-0 flex-none text-gray-600 dark:text-gray-400">
+                Please sign in to continue. <Link className="text-blue-600 hover:underline" to="/login">Sign in</Link>
               </p>
+            )}
+            {busyMessage && (
+              <div className="m-3 mb-0 flex flex-none items-center justify-between gap-3 rounded-lg bg-amber-50 p-4 text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+                <p>{busyMessage}</p>
+                {canTakeOver && (
+                  <button className={actionButtonClassName} onClick={() => client.current?.takeOver()}>
+                    Take over
+                  </button>
+                )}
+              </div>
             )}
             {isReconnecting && (
               <p role="alert" className="m-3 mb-0 flex-none rounded-lg bg-blue-50 p-3 text-blue-800 dark:bg-blue-950 dark:text-blue-200">
@@ -547,7 +579,12 @@ export function Present() {
               "text-gray-900 dark:bg-gray-950 dark:text-gray-100",
             ].join(" ")}
           >
-            <Transcript />
+            <Transcript
+              onTrainOnThis={(question, answer, slideIndex) =>
+                client.current?.trainTurn(question, answer, slideIndex)
+              }
+            />
+            {presentation && <ScriptVersions presentationId={presentation.id} />}
             <LogPanel />
           </aside>
         </Panel>

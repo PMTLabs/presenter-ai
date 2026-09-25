@@ -166,6 +166,7 @@ app.UseRateLimiter();
 
 app.MapHealthEndpoints();
 app.MapPresentationEndpoints();
+app.MapRevisionEndpoints();
 app.MapConfigEndpoints();
 app.MapAuthEndpoints(builder.Configuration, app.Environment);
 app.MapSessionEndpoints();

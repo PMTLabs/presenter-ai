@@ -6,6 +6,7 @@ using PresenterAi.Application.Tools.External;
 using PresenterAi.Cli;
 using PresenterAi.Application.Presenting;
 using PresenterAi.Application.Scripts;
+using PresenterAi.Application.Scripts.Revisions;
 using PresenterAi.Infrastructure.Tests.Live;
 using Xunit;
 
@@ -63,6 +64,43 @@ public sealed class CliTests
             var tools = start["session"]?["delegation"]?["responses"]?["tools"]?.AsArray();
             (tools?.Any(t => t?["type"]?.ToString() == "web_search" || t?["name"]?.ToString() == "external_action") ?? false).Should().BeFalse();
         }
+    }
+
+    [Fact]
+    public async Task Run_services_build_with_training_services_in_owner_and_file_mode()
+    {
+        // Plan 010 T3/T11: both CLI containers build with ValidateOnBuild/ValidateScopes and resolve the presenter, the
+        // revision service (singleton), the Responses reviser and the revision store (Postgres, scoped, in owner mode;
+        // in-memory, seeded from the file, in file mode).
+        await using var fake = await FakeLiveServer.StartAsync();
+        var configuration = Configuration(fake, new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:Postgres"] = "Host=localhost;Port=1;Database=unused;Username=unused"
+        });
+
+        await using (var ownerServices = Program.BuildRunServices(configuration))
+        {
+            ownerServices.GetRequiredService<IPresenter>().Should().NotBeNull();
+            ownerServices.GetRequiredService<IScriptRevisionService>().Should().BeOfType<ScriptRevisionService>();
+            ownerServices.GetRequiredService<IScriptReviser>()
+                .Should().BeOfType<PresenterAi.Infrastructure.Training.ResponsesScriptReviser>();
+            await using var scope = ownerServices.CreateAsyncScope();
+            scope.ServiceProvider.GetRequiredService<IPresentationRevisionStore>()
+                .Should().BeOfType<PresenterAi.Infrastructure.Content.PostgresPresentationRevisionStore>();
+        }
+
+        await using var fileServices = Program.BuildServices(configuration, FindRepositoryRoot());
+        fileServices.GetRequiredService<IPresenter>().Should().NotBeNull();
+        fileServices.GetRequiredService<IScriptRevisionService>().Should().BeOfType<ScriptRevisionService>();
+        fileServices.GetRequiredService<IScriptReviser>()
+            .Should().BeOfType<PresenterAi.Infrastructure.Training.ResponsesScriptReviser>();
+        var store = fileServices.GetRequiredService<IPresentationRevisionStore>();
+        store.Should().BeOfType<InMemoryPresentationRevisionStore>();
+        var head = await store.GetHeadAsync("local", "sample");
+        head.Should().NotBeNull();
+        head!.Version.Should().Be(1);
+        head.Markdown.Should().Be(await File.ReadAllTextAsync(Path.Combine(FindRepositoryRoot(), "presentations", "sample.md")));
+        (await store.GetHeadAsync("local", "no-such-presentation")).Should().BeNull();
     }
 
     [Fact]

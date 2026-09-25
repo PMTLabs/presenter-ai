@@ -13,6 +13,9 @@ public interface IPresenter : IAsyncDisposable
     event Action<PresenterUpstreamError>? UpstreamError;
     event Action<PresenterLimitWarning>? LimitWarning { add { } remove { } }
     event Action<PresenterUpstreamStatus>? UpstreamStatus { add { } remove { } }
+    event Action<PresenterScriptEdit>? ScriptEdit { add { } remove { } }
+    event Action<PresenterScriptVersion>? ScriptVersion { add { } remove { } }
+    event Action<PresenterTrainerState>? TrainerState { add { } remove { } }
 
     PresenterSnapshot Snapshot();
 
@@ -32,4 +35,28 @@ public interface IPresenter : IAsyncDisposable
     Task<bool> EndAsync(string endReason, bool resumable = false, CancellationToken cancellationToken = default) =>
         EndAsync(resumable, cancellationToken);
     void AbortPendingStart() { }
+
+    /// <summary>Turns Trainer mode on or off for <paramref name="ownerId"/>'s talk (plan 010); false when refused.</summary>
+    Task<bool> SetTrainerModeAsync(string ownerId, bool on, CancellationToken cancellationToken = default) =>
+        Task.FromResult(false);
+
+    /// <summary>
+    /// The running talk's last <c>script_version</c> (plan 010), for a bridge that connects mid-talk; null when no talk runs.
+    /// </summary>
+    PresenterScriptVersion? CurrentScriptVersion() => null;
+
+    /// <summary>
+    /// The current Trainer mode (plan 010), in a talk or requested for the next Start, for a bridge that connects; raised
+    /// again through <see cref="TrainerState"/> on every change.
+    /// </summary>
+    PresenterTrainerState CurrentTrainerState() => new(null, false, false, true);
+
+    /// <summary>"Train on this": queues an edit of <paramref name="slideIndex"/> from a transcript exchange.</summary>
+    Task<bool> TrainOnTurnAsync(
+        string ownerId,
+        string question,
+        string answer,
+        int slideIndex,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(false);
 }

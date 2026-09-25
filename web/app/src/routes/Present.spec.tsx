@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAuthSession, setAuthSession, useAuthStore } from "@presenter/shared";
 import { usePresenterStore } from "../store/presenterStore";
 
-const { bridgeConnect, bridgeDisconnect, bridgeHandlers, bridgeStart, bridgeTakeOver, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
+const { bridgeConnect, bridgeDisconnect, bridgeEnd, bridgeHandlers, bridgePause, bridgeSetTrainerMode, bridgeStart, bridgeTakeOver, bridgeTrainTurn, captureStop, close, deckLogs, dispose, get, load, playbackFlush, playbackStop, post, startAudio } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   load: vi.fn().mockResolvedValue({ adapter: "sections", count: 1 }),
@@ -20,6 +20,10 @@ const { bridgeConnect, bridgeDisconnect, bridgeHandlers, bridgeStart, bridgeTake
   bridgeDisconnect: vi.fn(),
   bridgeStart: vi.fn(),
   bridgeTakeOver: vi.fn(),
+  bridgePause: vi.fn(),
+  bridgeEnd: vi.fn(),
+  bridgeSetTrainerMode: vi.fn(),
+  bridgeTrainTurn: vi.fn(),
   bridgeHandlers: new Map<string, ((...args: unknown[]) => void)[]>(),
 }));
 vi.mock("@presenter/shared/api", () => ({ default: { GET: get, POST: post } }));
@@ -52,10 +56,16 @@ vi.mock("../ws/bridgeClient", () => ({
     disconnect() { bridgeDisconnect(); }
     start(...args: unknown[]) { bridgeStart(...args); }
     takeOver() { bridgeTakeOver(); }
+    pause() { bridgePause(); }
+    end() { bridgeEnd(); }
+    setTrainerMode(...args: unknown[]) { bridgeSetTrainerMode(...args); }
+    trainTurn(...args: unknown[]) { bridgeTrainTurn(...args); }
     sendAudio() {}
   },
 }));
 import { Present } from "./Present";
+import { Toaster } from "../components/Toaster";
+import { useToastStore } from "../store/toastStore";
 
 const user = { id: "usr_test", email: "test@example.invalid", displayName: null, role: "user" };
 
@@ -71,9 +81,12 @@ function renderPresent() {
   return render(
     <MemoryRouter initialEntries={["/present/demo"]}>
       <Routes><Route path="/present/:id" element={<Present />} /></Routes>
+      <Toaster />
     </MemoryRouter>,
   );
 }
+
+const notifications = () => screen.getByRole("region", { name: "Notifications" });
 
 describe("Present", () => {
   beforeEach(() => {
@@ -91,10 +104,15 @@ describe("Present", () => {
     bridgeDisconnect.mockClear();
     bridgeStart.mockClear();
     bridgeTakeOver.mockClear();
+    bridgePause.mockClear();
+    bridgeEnd.mockClear();
+    bridgeSetTrainerMode.mockClear();
+    bridgeTrainTurn.mockClear();
     bridgeHandlers.clear();
     clearAuthSession();
     window.history.replaceState({}, "", "/");
     useAuthStore.setState({ ready: false });
+    for (const toast of useToastStore.getState().toasts) useToastStore.getState().dismiss(toast.id);
     usePresenterStore.setState({
       snapshot: { state: "idle", slideIndex: 0, slideCount: 0, muted: false },
       logs: [],
@@ -104,6 +122,13 @@ describe("Present", () => {
       endReason: null,
       usageConfirmed: null,
       estimatedSeconds: null,
+      trainerMode: false,
+      trainerAvailable: false,
+      voiceTraining: true,
+      scriptVersion: null,
+      edits: {},
+      editOrder: [],
+      currentEditId: null,
     });
     post.mockResolvedValue({ data: { ticket: "ticket" } });
     startAudio.mockResolvedValue({
@@ -211,14 +236,15 @@ describe("Present", () => {
       error: { code: "presentation.not_found", detail: "server detail", title: "Not found" },
     });
     renderPresent();
-    expect(await screen.findByText("The presentation was not found.")).toBeTruthy();
+    // Requirement change (UI polish): load errors are error toasts (role=alert) instead of an inline banner.
+    expect((await screen.findByText("The presentation was not found.")).closest('[role="alert"]')).not.toBeNull();
   });
 
   it("renders an error when the detail request rejects", async () => {
     signIn();
     get.mockRejectedValue(new Error("offline"));
     renderPresent();
-    expect(await screen.findByText("Unable to load presentation.")).toBeTruthy();
+    expect((await screen.findByText("Unable to load presentation.")).closest('[role="alert"]')).not.toBeNull();
   });
 
   it("closes audio and stops capture after start when unmounted", async () => {
@@ -380,7 +406,8 @@ describe("Present", () => {
     expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false);
   });
 
-  it("shows a countdown banner on limit_warning and clears it", async () => {
+  // Requirement change (UI polish): the limit warning is a top-center warning toast (role=status) instead of a banner.
+  it("shows a countdown toast on limit_warning and clears it", async () => {
     signIn();
     get.mockResolvedValue({
       data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
@@ -391,21 +418,51 @@ describe("Present", () => {
     vi.useFakeTimers();
     emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
     emitBridge("limit_warning", { type: "limit_warning", kind: "max_length", secondsLeft: 60 });
-    expect(screen.getByRole("alert").textContent).toContain("Time limit warning: 60s remaining");
+    expect(screen.getByRole("status").textContent).toContain("Time limit warning: 60s remaining");
 
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(screen.getByRole("alert").textContent).toContain("Time limit warning: 59s remaining");
+    expect(screen.getByRole("status").textContent).toContain("Time limit warning: 59s remaining");
+    // A warning toast stays past the info auto-dismiss delay.
+    act(() => {
+      vi.advanceTimersByTime(6000);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Time limit warning: 53s remaining");
+    expect(useToastStore.getState().toasts).toHaveLength(1);
 
     emitBridge("limit_warning", { type: "limit_warning", kind: "max_length", secondsLeft: null });
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(notifications().textContent).not.toContain("Time limit warning");
 
     emitBridge("limit_warning", { type: "limit_warning", kind: "idle", secondsLeft: 45 });
-    expect(screen.getByRole("alert").textContent).toContain("Inactivity warning: 45s remaining");
+    expect(screen.getByRole("status").textContent).toContain("Inactivity warning: 45s remaining");
 
     emitBridge("closed", { type: "closed", endReason: "idle" });
+    expect(notifications().textContent).not.toContain("Inactivity warning");
     expect(screen.queryByRole("alert")).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("a closed limit warning toast does not reopen on the next countdown tick", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+
+    vi.useFakeTimers();
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("limit_warning", { type: "limit_warning", kind: "max_length", secondsLeft: 60 });
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notification" }));
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(notifications().textContent).not.toContain("Time limit warning");
+
+    // A new warning is a new notification.
+    emitBridge("limit_warning", { type: "limit_warning", kind: "idle", secondsLeft: 30 });
+    expect(notifications().textContent).toContain("Inactivity warning: 30s remaining");
     vi.useRealTimers();
   });
 
@@ -480,6 +537,245 @@ describe("Present", () => {
       estimatedSeconds: 3600,
     });
     emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 1, muted: false });
-    expect(await screen.findByText("Talk ended: Maximum talk length reached")).toBeTruthy();
+    // Requirement change (UI polish): a top-center info toast (role=status) instead of the inline status banner.
+    const ended = await screen.findByText("Talk ended: Maximum talk length reached");
+    expect(notifications().contains(ended)).toBe(true);
+    expect(ended.closest('[role="status"]')).not.toBeNull();
+    expect(useToastStore.getState().toasts.map((toast) => toast.kind)).toEqual(["info"]);
+  });
+
+  it("shows updating then updated with version and summary", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_4",
+      status: "queued",
+      slideIndexes: [3],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    expect(screen.getByRole("status").textContent).toBe("Updating…");
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_4",
+      status: "processing",
+      slideIndexes: [3],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    expect(screen.getByRole("status").textContent).toBe("Updating…");
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_4",
+      status: "applied",
+      slideIndexes: [3],
+      version: 7,
+      summary: "Added the 2025 figures",
+      error: null,
+    });
+    expect(screen.getByRole("status").textContent).toBe("Updated — v7: Added the 2025 figures");
+  });
+
+  it("shows failure reason", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_5",
+      status: "queued",
+      slideIndexes: [1],
+      version: null,
+      summary: null,
+      error: null,
+    });
+    emitBridge("script_edit", {
+      type: "script_edit",
+      id: "edit_5",
+      status: "failed",
+      slideIndexes: [1],
+      version: null,
+      summary: null,
+      error: "timeout",
+    });
+    expect(screen.getByRole("status").textContent).toBe("Couldn't update — timed out");
+  });
+
+  it("trainer switch shows only server state: an idle toggle turns it on, End turns it off", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    // On connect, before any talk, the server reports availability and the idle value.
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    // Requirement change (UI polish): the checkbox became an accessible switch.
+    const toggle = () => screen.getByRole("switch", { name: "Trainer mode" });
+    const checked = () => toggle().getAttribute("aria-checked");
+    expect(checked()).toBe("false");
+
+    fireEvent.click(toggle());
+    expect(bridgeSetTrainerMode).toHaveBeenCalledWith(true);
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: true, trainerAvailable: true, voiceTraining: true });
+    expect(checked()).toBe("true");
+
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 1,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+    expect(checked()).toBe("true");
+
+    emitBridge("closed", { type: "closed", endReason: "user" });
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+    emitBridge("state", { state: "idle", slideIndex: 0, slideCount: 1, muted: false });
+    expect(checked()).toBe("false");
+    fireEvent.click(toggle());
+    expect(bridgeSetTrainerMode).toHaveBeenLastCalledWith(true);
+  });
+
+  it("Space on the trainer switch does not pause, and Escape closes its tooltip without ending the talk", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("state", { state: "presenting", slideIndex: 0, slideCount: 1, muted: false });
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+
+    const toggle = screen.getByRole("switch", { name: "Trainer mode" });
+    act(() => toggle.focus());
+    fireEvent.keyDown(toggle, { key: " " });
+    expect(bridgePause).not.toHaveBeenCalled();
+
+    const info = screen.getByRole("button", { name: "About Trainer mode" });
+    act(() => info.focus());
+    expect(screen.getByRole("tooltip").textContent).toContain("does not retrain the AI");
+    fireEvent.keyDown(info, { key: "Escape" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(bridgeEnd).not.toHaveBeenCalled();
+
+    // Without the tooltip open, Escape keeps its page meaning.
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(bridgeEnd).toHaveBeenCalledOnce();
+  });
+
+  it("puts the breadcrumb and the info bar in one row above the deck", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("trainer_state", { type: "trainer_state", trainerMode: false, trainerAvailable: true, voiceTraining: true });
+
+    const bar = screen.getByTestId("info-bar");
+    const row = bar.parentElement!;
+    expect(row.contains(screen.getByRole("link", { name: "← Library" }))).toBe(true);
+    expect(bar.contains(screen.getByRole("switch", { name: "Trainer mode" }))).toBe(true);
+    expect(bar.textContent).toContain("buf 0 ms");
+    expect(bar.className).toContain("ml-auto");
+    // The row sits in the deck panel, before the deck; the controls stay below it.
+    const deckPanel = document.querySelector('[data-panel][id="deck"]')!;
+    expect(deckPanel.contains(row)).toBe(true);
+    const deck = screen.getByTitle("Presentation deck");
+    expect(row.compareDocumentPosition(deck) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      deck.compareDocumentPosition(screen.getByRole("button", { name: "Pause" })) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("shows voice training unavailable on a client-mode connection", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    expect(screen.queryByText("Voice training is unavailable on this connection — use Train on this")).toBeNull();
+
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: false,
+    });
+
+    expect(
+      await screen.findByText("Voice training is unavailable on this connection — use Train on this"),
+    ).toBeTruthy();
+  });
+
+  it("train on this sends an overlong multi-turn question within the bridge's limits", async () => {
+    signIn();
+    get.mockResolvedValue({
+      data: { id: "demo", meta: { deck: "demo.html", driver: "sections" } },
+    });
+    renderPresent();
+    await screen.findByRole("button", { name: "Start" });
+    emitBridge("script_version", {
+      type: "script_version",
+      presentationId: "demo",
+      version: 6,
+      trainerMode: true,
+      trainerAvailable: true,
+      voiceTraining: true,
+    });
+    act(() => usePresenterStore.setState({ slide: 0, transcript: [] }));
+    const leadIn = Array.from({ length: 150 }, (_, i) => `background${i}`).join(" ");
+    const actualQuestion = "How much does the new coating cost?";
+    // Three user turns (gaps over 1 s) totalling well over 2,000 characters, then the answer.
+    emitBridge("transcript", { type: "transcript", role: "user", delta: leadIn, end_ms: 1000 });
+    emitBridge("transcript", { type: "transcript", role: "user", delta: leadIn, end_ms: 5000 });
+    emitBridge("transcript", { type: "transcript", role: "user", delta: actualQuestion, end_ms: 9000 });
+    emitBridge("transcript", { type: "transcript", role: "assistant", delta: "It costs 10% more.", end_ms: 12000 });
+
+    fireEvent.click(screen.getByRole("button", { name: "Train on this" }));
+
+    expect(bridgeTrainTurn).toHaveBeenCalledTimes(1);
+    const [question, answer, slideIndex] = bridgeTrainTurn.mock.calls[0] as [string, string, number];
+    expect(question.length).toBeLessThanOrEqual(2000);
+    expect(question.startsWith("…")).toBe(true);
+    expect(question.endsWith(` ${actualQuestion}`)).toBe(true);
+    expect(answer).toBe("It costs 10% more.");
+    expect(slideIndex).toBe(0);
   });
 });
