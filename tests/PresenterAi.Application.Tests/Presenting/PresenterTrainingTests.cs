@@ -581,6 +581,27 @@ public sealed class PresenterTrainingTests
     }
 
     [Fact]
+    public async Task Failed_edit_while_paused_is_spoken_by_the_replay_at_resume()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.TrainOn(0);
+        Assert.True(await h.Presenter.PauseAsync());
+        h.Service.SetOutcome(id, EditOutcome.Failed([0], ScriptEditErrors.Timeout));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+
+        // The resume replays the released slide with "stop whatever you are saying": it carries the notice, once.
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+        var replay = h.S.Sent.Last(s => s.EventId == "slide-1-part-1").Content!;
+        Assert.StartsWith("Stop whatever you are saying now. " + PromptBuilder.ScriptEditFailedLead(), replay);
+        Assert.Single(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
     public async Task Failed_edit_for_another_slide_speaks_failure_without_a_replay()
     {
         await using var h = new Harness();

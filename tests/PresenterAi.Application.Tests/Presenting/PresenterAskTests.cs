@@ -224,6 +224,31 @@ public sealed class PresenterAskTests
         Assert.Single(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
     }
 
+    [Fact]
+    public async Task Edit_of_the_current_slide_failing_during_the_exchange_is_spoken_by_the_replay_after_it()
+    {
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.TrainerOn();
+        await h.AskStart();
+        var id = await h.TrainOn(0);
+        Assert.True(h.Service.SetOutcome(id, EditOutcome.Failed([0], ScriptEditErrors.Timeout)));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+        await h.MicSpeech();
+        await h.AskDone();
+        await h.Answer();
+
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+
+        // T13 live run: a separate notice before the replay's "stop whatever you are saying" is never heard.
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+        var replay = h.S.Sent.Last(s => s.EventId == "slide-1-part-1").Content!;
+        Assert.StartsWith("Stop whatever you are saying now. " + PromptBuilder.ScriptEditFailedLead(), replay);
+        Assert.Single(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
+    }
+
     [Theory]
     [InlineData("listening")]
     [InlineData("answering")]

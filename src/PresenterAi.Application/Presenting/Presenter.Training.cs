@@ -31,6 +31,8 @@ public sealed partial class Presenter
     private int _scriptVersion;
     private bool _replayOnResume;
     private bool _replayOnResumeChanged;
+    // Said first by the next replay of the current slide (a failed edit released it), so the replay's "stop" never cuts it.
+    private string? _replayLead;
     private bool _headSlideCountWarned;
     private int _rejectedEditSequence;
     private ITimer? _editKeepAlive;
@@ -125,6 +127,7 @@ public sealed partial class Presenter
         _recentTurns.Clear();
         _replayOnResume = false;
         _replayOnResumeChanged = false;
+        _replayLead = null;
         _headSlideCountWarned = false;
         _trainerMode = false;
         StopEditKeepAlive();
@@ -212,6 +215,7 @@ public sealed partial class Presenter
         _recentTurns.Clear();
         _replayOnResume = false;
         _replayOnResumeChanged = false;
+        _replayLead = null;
         StopEditKeepAlive();
         Volatile.Write(ref _scriptVersionSnapshot, null);
     }
@@ -509,14 +513,18 @@ public sealed partial class Presenter
         }
 
         // A replay starts with "stop whatever you are saying", which would cut a separate failure notice short
-        // (T13 live run): the replay then carries the notice itself.
-        if (failed is not null && !replayNow)
+        // (T13 live run): when a replay is due, now or at resume, it carries the notice itself.
+        if (failed is not null)
         {
-            // Site 9 (plan 011): deferred while an ask exchange runs.
-            EmitOrDefer("edit failed", PromptBuilder.ScriptEditFailedInstruction(), $"edit-failed-{failed.Id}");
+            // Site 10 (plan 011): an exchange's replay at its end is a replay due too.
+            if (replayNow || _replayOnResume || _exchange?.ReplayDue == true)
+                _replayLead = PromptBuilder.ScriptEditFailedLead();
+            else
+                // Site 9 (plan 011): deferred while an ask exchange runs.
+                EmitOrDefer("edit failed", PromptBuilder.ScriptEditFailedInstruction(), $"edit-failed-{failed.Id}");
         }
 
-        if (replayNow) ReplayCurrentSlide(currentChanged, failed is null ? null : PromptBuilder.ScriptEditFailedLead());
+        if (replayNow) ReplayCurrentSlide(currentChanged);
 
         // 4. Version first, so no "applied" frame precedes the narration it describes.
         if (versionMoved && _state != PresenterState.Connecting) EmitScriptVersion();
@@ -550,9 +558,11 @@ public sealed partial class Presenter
     }
 
     /// <summary>Presents the current slide from its start with the current text (after an edit or a revert).</summary>
-    private void ReplayCurrentSlide(bool changed, string? lead = null)
+    private void ReplayCurrentSlide(bool changed)
     {
         if (_presentation is null) return;
+        var lead = _replayLead;
+        _replayLead = null;
         Flush?.Invoke();
         if (changed)
         {

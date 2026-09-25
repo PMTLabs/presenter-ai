@@ -967,6 +967,7 @@ public sealed partial class Presenter : IPresenter
         _wrappingUp = false;
         StartSlideDiagnostics();
         _replayOnResume = false;
+        _replayLead = null;
         var slide = _presentation.Slides[index];
         LogMessage("info", $"slide {index + 1}/{SlideCount}{(slide.Title.Length > 0 ? $" — {slide.Title}" : string.Empty)}");
         Slide?.Invoke(index);
