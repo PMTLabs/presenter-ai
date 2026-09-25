@@ -220,7 +220,7 @@ public static class PromptBuilder
     public const string TrainOnTurnFeedback = "Add what this answer says to the slide.";
 
     public static string ScriptEditPendingInstruction() =>
-        "Say briefly: Got it, updating that — one moment.";
+        "Say briefly, in the language of the talk, that you got it and are updating that, one moment (for example \"Got it, updating that — one moment.\").";
 
     public static string ScriptEditHoldInstruction(int index, int total, string title) =>
         $"Stop whatever you are saying now. Tell the audience in one short sentence that {SlideLabel(index, total, title)} is being updated, then stay silent until you are told to continue.";

@@ -73,6 +73,13 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Edit_pending_notice_is_spoken_in_the_language_of_the_talk()
+    {
+        // T13 live run: the quoted English phrase was spoken verbatim in a Vietnamese talk.
+        Assert.Contains("in the language of the talk", PromptBuilder.ScriptEditPendingInstruction());
+    }
+
+    [Fact]
     public void Question_resume_asks_for_a_natural_transition_not_a_canned_bridge()
     {
         var instruction = PromptBuilder.ResumeAfterQuestionInstruction();
