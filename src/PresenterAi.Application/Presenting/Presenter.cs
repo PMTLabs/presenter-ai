@@ -2128,7 +2128,7 @@ public sealed partial class Presenter : IPresenter
         if (sourceCallId is not null) _navigatingCallIds[sourceCallId] = _runGeneration;
     }
 
-    private bool PauseCore()
+    private bool PauseCore(string? instruction = null)
     {
         if (_state != PresenterState.Presenting)
         {
@@ -2139,7 +2139,7 @@ public sealed partial class Presenter : IPresenter
         CancelToolConfirmation();
         SetInteraction(Interaction.None);
         ClosePermit();
-        _session?.AppendInstructions(PromptBuilder.PauseInstruction(), $"pause-{_slideIndex + 1}");
+        _session?.AppendInstructions(instruction ?? PromptBuilder.PauseInstruction(), $"pause-{_slideIndex + 1}");
         SetState(PresenterState.Paused);
         _guard?.Pause();
         LimitWarning?.Invoke(new PresenterLimitWarning(EndReasons.Idle, null));

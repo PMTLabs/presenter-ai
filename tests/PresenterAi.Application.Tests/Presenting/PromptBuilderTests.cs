@@ -130,6 +130,21 @@ public sealed class PromptBuilderTests
         Assert.Contains("if the slide was finished, say only the transition", instruction);
         Assert.EndsWith("Then stop and wait.", instruction);
         Assert.DoesNotContain("Back to the slide", instruction);
+        // T8 regression fix: after several Asks the model left plain speech unanswered.
+        Assert.Contains("If someone speaks to you afterwards, answer them or pass on their request as usual.", instruction);
+    }
+
+    [Fact]
+    public void Ask_pause_announces_the_question_and_asks_for_the_answer()
+    {
+        var instruction = PromptBuilder.AskPauseInstruction();
+
+        Assert.StartsWith("Pause now", instruction);
+        Assert.Contains("a listener is asking a question", instruction);
+        Assert.Contains("then answer it", instruction);
+        Assert.Contains("Do not continue the narration until told.", instruction);
+        Assert.DoesNotContain("you may answer", instruction);
+        Assert.DoesNotContain("\"", instruction);
     }
 
     [Fact]

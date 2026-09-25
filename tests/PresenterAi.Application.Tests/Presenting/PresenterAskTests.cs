@@ -1043,6 +1043,9 @@ public sealed class PresenterAskTests
         var sent = h.S.Sent.Skip(before).ToList();
         Assert.Equal("mute", sent[0].Type);
         Assert.Equal("pause-1", sent[1].EventId);
+        // T8 regression fix: the Ask's own pause announces the question; the generic one made the model passive.
+        Assert.Equal(PromptBuilder.AskPauseInstruction(), sent[1].Content);
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.PauseInstruction());
         Assert.Equal(flushes + 1, h.Flushes);
         Assert.Equal("paused", h.Presenter.Snapshot().State);
         Assert.True(h.Presenter.Snapshot().Paused);

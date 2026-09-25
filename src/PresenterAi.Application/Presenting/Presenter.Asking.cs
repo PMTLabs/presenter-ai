@@ -304,7 +304,7 @@ public sealed partial class Presenter
         _navigatingCallIds.Clear();
         if (_state == PresenterState.Presenting)
         {
-            PauseCore();
+            PauseCore(PromptBuilder.AskPauseInstruction());
         }
         else
         {

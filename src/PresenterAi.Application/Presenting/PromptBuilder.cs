@@ -156,6 +156,14 @@ public static class PromptBuilder
     public static string PauseInstruction() =>
         "Pause now. Stay silent. If someone speaks to you, you may answer in a few words or acknowledge a command; do not continue the narration until told.";
 
+    /// <summary>
+    /// T8 regression fix: the Ask's pause. With <see cref="PauseInstruction"/> ("stay silent … you may answer") appended at
+    /// every Ask, the model left plain speech unanswered after three or four Asks (4 of 4 edit requests, two sessions)
+    /// while a session without an Ask delegated the same request. The question is announced and must be answered.
+    /// </summary>
+    public static string AskPauseInstruction() =>
+        "Pause now: a listener is asking a question. Stay silent until you hear it, then answer it. Do not continue the narration until told.";
+
     public static string LimitWarningInstruction(string kind) => kind == EndReasons.Idle
         ? "Briefly tell the audience the presentation will end in one minute without activity."
         : "Briefly tell the audience the presentation will end in one minute.";
@@ -179,7 +187,7 @@ public static class PromptBuilder
         (followUp
             ? "then restart the narration sentence you were in before the first question, not an earlier answer, and continue the narration from there"
             : "then restart the sentence you were in when the question came and continue the narration from there") +
-        "; if the slide was finished, say only the transition. Then stop and wait.";
+        "; if the slide was finished, say only the transition. If someone speaks to you afterwards, answer them or pass on their request as usual. Then stop and wait.";
 
     /// <summary>
     /// T8 regression fix: a question sent at the speech cap ends mid-sentence and the model waits for the rest. No quoted
