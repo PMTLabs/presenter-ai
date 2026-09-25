@@ -110,7 +110,8 @@ public static class PromptBuilder
         string chunk,
         int part = 1,
         int parts = 1,
-        bool interrupt = false)
+        bool interrupt = false,
+        string? lead = null)
     {
         ArgumentNullException.ThrowIfNull(title);
         ArgumentNullException.ThrowIfNull(chunk);
@@ -119,6 +120,11 @@ public static class PromptBuilder
         if (interrupt)
         {
             head.Add("Stop whatever you are saying now.");
+        }
+
+        if (!string.IsNullOrEmpty(lead))
+        {
+            head.Add(lead);
         }
 
         if (parts == 1)
@@ -224,6 +230,10 @@ public static class PromptBuilder
 
     public static string ScriptEditFailedInstruction() =>
         "Say briefly that you couldn't apply the change and continue with the current script.";
+
+    /// <summary>Leads the replay of a slide released by a failed edit, so the replay does not silence the notice.</summary>
+    public static string ScriptEditFailedLead() =>
+        "First say briefly that you couldn't apply the change to the script.";
 
     public static string ScriptEditDeclinedInstruction() =>
         "Don't change the script. If the speaker asked something, answer it briefly, then carry on.";

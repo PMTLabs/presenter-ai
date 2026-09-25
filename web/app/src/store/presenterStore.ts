@@ -97,6 +97,11 @@ export const usePresenterStore = create<State>((set) => ({
       ...(snapshot.state === "presenting"
         ? { endReason: null, usageConfirmed: null, estimatedSeconds: null }
         : {}),
+      // Edit ids restart at edit_1 in every talk: a new talk must not inherit the last talk's (terminal) edits,
+      // or its frames are dropped as regressions and the chip keeps the old result.
+      ...(s.snapshot.state === "idle" && snapshot.state !== "idle"
+        ? { edits: {}, editOrder: [], currentEditId: null }
+        : {}),
     })),
   log: (level, message) =>
     set((s) => ({

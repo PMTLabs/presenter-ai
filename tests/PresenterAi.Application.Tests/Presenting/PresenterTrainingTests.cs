@@ -581,6 +581,23 @@ public sealed class PresenterTrainingTests
     }
 
     [Fact]
+    public async Task Failed_edit_for_another_slide_speaks_failure_without_a_replay()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.TrainOn(2);
+        var sent = h.S.Sent.Count;
+        h.Service.SetOutcome(id, EditOutcome.Failed([2], ScriptEditErrors.Timeout));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+
+        Assert.Single(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+        Assert.DoesNotContain(h.S.Sent.Skip(sent), s => s.EventId?.Contains("part", StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
     public async Task Failed_edit_speaks_failure_once_releases_hold_and_keeps_text()
     {
         await using var h = new Harness();
@@ -592,7 +609,12 @@ public sealed class PresenterTrainingTests
         h.Service.RaiseChanged(Pid);
         await h.Settle();
 
-        Assert.Single(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+        // T13 live run: a separate notice followed by the replay's "stop whatever you are saying" was never spoken, so
+        // the replay that releases the hold carries the notice, once.
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+        var replay = h.S.Sent.Last(s => s.EventId == "slide-1-part-1").Content!;
+        Assert.StartsWith("Stop whatever you are saying now. " + PromptBuilder.ScriptEditFailedLead() + " Present slide 1", replay);
+        Assert.Single(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
         var failed = Assert.Single(h.Edits, e => ScriptEditStatus.IsTerminal(e.Status));
         Assert.Equal((ScriptEditStatus.Failed, ScriptEditErrors.Timeout), (failed.Status, failed.Error));
         Assert.Equal(2, h.S.Sent.Count(s => s.EventId == "slide-1-part-1"));
