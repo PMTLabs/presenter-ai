@@ -95,6 +95,21 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Answer_now_nudge_answers_in_the_language_of_the_talk_without_a_phrase_to_read_out()
+    {
+        // T8 regression run: a complete question left unanswered after the Ask's PauseInstruction.
+        var instruction = PromptBuilder.AskAnswerNowInstruction();
+
+        Assert.Contains("in the language of the talk", instruction, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Answer it now", instruction);
+        Assert.Contains("repeat it", instruction);
+        Assert.EndsWith("Then stop and wait.", instruction);
+        Assert.DoesNotContain("cut off", instruction);
+        Assert.DoesNotContain("\"", instruction);
+        Assert.DoesNotContain("Say:", instruction);
+    }
+
+    [Fact]
     public void Question_resume_asks_for_a_natural_transition_not_a_canned_bridge()
     {
         var instruction = PromptBuilder.ResumeAfterQuestionInstruction();

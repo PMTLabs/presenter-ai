@@ -3120,6 +3120,72 @@ public sealed class PresenterAskTests
         Assert.Equal("continued", Assert.Single(h.Offs).Reason);
     }
 
+    private static int AnswerNows(Harness h) => h.S.Sent.Count(s => s.Content == PromptBuilder.AskAnswerNowInstruction());
+
+    [Fact]
+    public async Task Complete_question_without_an_answer_gets_one_answer_now_nudge_and_keeps_its_budget()
+    {
+        // T8 regression run: after a busy-refused tool round the model left this and the next ask unanswered for 15 s
+        // each, while it still obeyed the resume instructions.
+        await using var h = new Harness(registry: Registry(new GateTool("slow", new TaskCompletionSource<ToolResult>().Task)));
+        await h.StartNarrating();
+        await h.AskStart();
+        h.S.RaiseToolCall("d1", "c1", "slow", "{}");
+        await h.Settle();
+        await h.MicSpeech();
+        await h.AskDone();
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerNudgeMs - 1));
+        Assert.Equal(0, AnswerNows(h));
+        await h.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.Equal(1, AnswerNows(h));
+        Assert.EndsWith("-answer-now", h.S.Sent.Single(s => s.Content == PromptBuilder.AskAnswerNowInstruction()).EventId);
+        Assert.Contains("ask: no answer yet; asked the model to answer the question now", h.Logs);
+        Assert.Equal(0, CutOffs(h));
+
+        // The budget still ends 15 s after the send, and the nudge is never repeated.
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerStartBudgetMs - Presenter.AnswerNudgeMs - 2));
+        Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
+        await h.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.Contains("ask: no answer within 15 s", h.Logs);
+        Assert.Equal(1, AnswerNows(h));
+    }
+
+    [Fact]
+    public async Task Question_transcript_deltas_postpone_the_answer_now_nudge()
+    {
+        // A long complete question is transcribed for seconds after the send (answered at +8 s for 19 s kept, T8).
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerNudgeMs - Presenter.ResidualStartMs - 500));
+        h.S.Hear("and which two products", 0, 100);
+        await h.Settle();
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerNudgeQuietMs - 1));
+        Assert.Equal(0, AnswerNows(h));
+        await h.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.Equal(1, AnswerNows(h));
+    }
+
+    [Theory]
+    [InlineData("answer")]
+    [InlineData("delegation")]
+    public async Task Answer_or_answer_work_before_the_answer_now_nudge_cancels_it(string started)
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        if (started == "answer") await h.Answer();
+        else
+        {
+            h.S.RaiseDelegation("responses", "d1");
+            await h.Settle();
+        }
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerNudgeMs + Presenter.AnswerNudgeQuietMs));
+
+        Assert.Equal(0, AnswerNows(h));
+    }
+
     private const int CheckInGraceMs = Presenter.CheckInTranscriptGraceMs;
 
     /// <summary>Voiced mic audio in real time: 100 ms frames with the clock advancing between them.</summary>

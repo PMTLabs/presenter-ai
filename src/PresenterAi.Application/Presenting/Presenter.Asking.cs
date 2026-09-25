@@ -45,6 +45,13 @@ public sealed partial class Presenter
     public const int CutOffNudgeMs = 3_000;
     /// <summary>A user delta of the cut-off burst's transcript keeps the nudge at least this far away.</summary>
     public const int CutOffQuietMs = 2_000;
+    /// <summary>
+    /// T8 regression fix: a complete question without an answer this long after the send gets the answer-now nudge. Live
+    /// answers started 1.3–3 s after the send (8 s for a 19 s question, whose transcript runs longer and postpones it).
+    /// </summary>
+    public const int AnswerNudgeMs = 6_000;
+    /// <summary>A user delta of a complete question's transcript keeps its answer-now nudge at least this far away.</summary>
+    public const int AnswerNudgeQuietMs = 3_000;
     public const string AskBusyMessage = "busy: the audience is asking a question";
 
     private readonly IAskTranscriber _askTranscriber;
@@ -537,7 +544,7 @@ public sealed partial class Presenter
         exchange.CheckInBegun = false;
         exchange.AwaitingAnswerSince = _timeProvider.GetTimestamp();
         ArmAnswerWait();
-        if (exchange.SendReason == "limit_sent") ArmAskCutOff(CutOffNudgeMs);
+        ArmAskCutOff(exchange.SendReason == "limit_sent" ? CutOffNudgeMs : AnswerNudgeMs);
         EmitAnswering(exchange);
     }
 
@@ -603,11 +610,13 @@ public sealed partial class Presenter
     private void MarkResidualCandidate(AskExchange exchange) =>
         exchange.ResidualCandidate = _modelVoicedAt is { } voicedAt && ElapsedMs(voicedAt) < ResidualGapMs;
 
-    // ---- Cut-off nudge at the cap (T8 regression fix, 2026-09-24) -------------------------------------------------
+    // ---- Cut-off and answer-now nudges (T8 regression fixes, 2026-09-24) ------------------------------------------
 
     /// <summary>
     /// A burst sent at the speech cap ends mid-sentence and the model waits for the rest of the utterance. After
-    /// <see cref="CutOffNudgeMs"/> without an answer the model is asked once to answer what it heard.
+    /// <see cref="CutOffNudgeMs"/> without an answer the model is asked once to answer what it heard. A complete
+    /// question gets the answer-now nudge after <see cref="AnswerNudgeMs"/>: after a busy-refused tool round the model
+    /// left this and the next ask unanswered while it still obeyed resume instructions (T8 regression run, 1 of 3).
     /// </summary>
     private void ArmAskCutOff(int milliseconds)
     {
@@ -619,21 +628,29 @@ public sealed partial class Presenter
             TimeSpan.FromMilliseconds(milliseconds), Timeout.InfiniteTimeSpan);
     }
 
-    /// <summary>A user delta of the cut-off burst's transcript: the nudge waits for <see cref="CutOffQuietMs"/> of quiet, never less.</summary>
+    /// <summary>A user delta of the burst's transcript: the nudge waits for its quiet (<see cref="CutOffQuietMs"/> or <see cref="AnswerNudgeQuietMs"/>), never less.</summary>
     private void PostponeAskCutOff(AskExchange exchange)
     {
         if (_askCutOffTimer is null || exchange.Phase != AskPhase.AwaitingAnswer || exchange.CutOffDueAt is not { } due) return;
         var left = (int)Math.Ceiling(_timeProvider.GetElapsedTime(_timeProvider.GetTimestamp(), due).TotalMilliseconds);
-        ArmAskCutOff(Math.Max(CutOffQuietMs, left));
+        ArmAskCutOff(Math.Max(exchange.SendReason == "limit_sent" ? CutOffQuietMs : AnswerNudgeQuietMs, left));
     }
 
     private void OnAskCutOffElapsed(long generation)
     {
         if (generation != _askCutOffGeneration) return;
         _askCutOffTimer = null;
-        if (_exchange is not { Phase: AskPhase.AwaitingAnswer, SendReason: "limit_sent", CutOffNudged: false } exchange ||
+        if (_exchange is not { Phase: AskPhase.AwaitingAnswer, CutOffNudged: false } exchange ||
             _answerVoiced || _pendingTool is not null || _toolRoundTracker.HasPendingBackendDelegation) return;
         exchange.CutOffNudged = true;
+        if (exchange.SendReason != "limit_sent")
+        {
+            // The complete question's budget is unchanged: the nudged answer starts well inside it.
+            _session?.AppendInstructions(PromptBuilder.AskAnswerNowInstruction(), $"{exchange.Id}-answer-now");
+            LogMessage("info", "ask: no answer yet; asked the model to answer the question now");
+            return;
+        }
+
         _session?.AppendInstructions(PromptBuilder.AskCutOffInstruction(), $"{exchange.Id}-cut-off");
         LogMessage("info", "ask: question cut off at the cap; asked the model to answer what it heard");
         // The nudge waits out the burst's transcript (about 10 s after a 25 s burst, T8 re-run): the model gets at least
@@ -1423,9 +1440,9 @@ public sealed partial class Presenter
         /// <summary>Arrival (loop time) of the last voiced post-send residual frame.</summary>
         public long? ResidualVoicedAt { get; set; }
         public long ResidualDroppedMs { get; set; }
-        /// <summary>When the cut-off nudge of a <c>limit_sent</c> burst is due (loop time).</summary>
+        /// <summary>When the cut-off or answer-now nudge of the sent burst is due (loop time).</summary>
         public long? CutOffDueAt { get; set; }
-        /// <summary>The cut-off nudge of this ask was appended; never twice.</summary>
+        /// <summary>The cut-off or answer-now nudge of this ask was appended; never twice.</summary>
         public bool CutOffNudged { get; set; }
 
         /// <summary>A follow-up ask during the answer: listen again in the same exchange (owner decision r1 #4).</summary>

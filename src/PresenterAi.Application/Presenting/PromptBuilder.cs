@@ -190,6 +190,13 @@ public static class PromptBuilder
     public static string AskCutOffInstruction() =>
         "The listener has finished speaking; their question was cut off at the time limit. Answer it now, in the language of the talk, in one to three sentences from what you heard; if you cannot tell what they asked, ask them briefly to repeat the question. Then stop and wait.";
 
+    /// <summary>
+    /// T8 regression fix: after the Ask's <see cref="PauseInstruction"/> the model sometimes left a complete question
+    /// unanswered while it still obeyed "now" instructions. Same wording rules as <see cref="AskCutOffInstruction"/>.
+    /// </summary>
+    public static string AskAnswerNowInstruction() =>
+        "The listener has finished their question. Answer it now, in the language of the talk, in one to three sentences; if you did not hear a question, ask them briefly to repeat it. Then stop and wait.";
+
     public static string EndConfirmationInstruction() =>
         "Ask the audience briefly: Shall I end the presentation now? Then wait for their answer. Do not end the talk yourself.";
 
