@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using PresenterAi.Application.Scripts;
 using PresenterAi.Application.Scripts.Revisions;
@@ -33,6 +34,11 @@ public sealed partial class Presenter
     private int _scriptVersion;
     private bool _replayOnResume;
     private bool _replayOnResumeChanged;
+    // A repeated request for an applied edit of the current slide: replay at the resume unless it was spoken in full.
+    private bool _repeatReplayDue;
+    // The model's output transcript since the current slide was last presented (bounded), for NarrationCoverage.
+    private readonly StringBuilder _slideSpoken = new();
+    private const int SlideSpokenCap = 20_000;
     // Said first by the next replay of the current slide (a failed edit released it), so the replay's "stop" never cuts it.
     private string? _replayLead;
     private bool _headSlideCountWarned;
@@ -130,6 +136,8 @@ public sealed partial class Presenter
         _recentTurns.Clear();
         _replayOnResume = false;
         _replayOnResumeChanged = false;
+        _repeatReplayDue = false;
+        _slideSpoken.Clear();
         _replayLead = null;
         _headSlideCountWarned = false;
         _trainerMode = false;
@@ -222,6 +230,8 @@ public sealed partial class Presenter
         _recentTurns.Clear();
         _replayOnResume = false;
         _replayOnResumeChanged = false;
+        _repeatReplayDue = false;
+        _slideSpoken.Clear();
         _replayLead = null;
         StopEditKeepAlive();
         Volatile.Write(ref _scriptVersionSnapshot, null);
@@ -405,7 +415,7 @@ public sealed partial class Presenter
         }
 
         LogMessage("info", $"edit: repeated request for {id} (already applied)");
-        if (TalkRunning && !_wrappingUp && edit.Targets.Contains(_slideIndex)) _replayOnResume = true;
+        if (TalkRunning && !_wrappingUp && edit.Targets.Contains(_slideIndex)) _repeatReplayDue = true;
         CompleteImmediateCall(call,
             ToolResult.Success("this change is already in the script") with { Outcome = "already_done" });
         return true;
@@ -615,6 +625,37 @@ public sealed partial class Presenter
         PresentSlide(_slideIndex, interrupt: true, lead);
     }
 
+    private void RecordSlideSpeech(string delta)
+    {
+        if (_slideSpoken.Length < SlideSpokenCap) _slideSpoken.Append(delta);
+    }
+
+    /// <summary>
+    /// Settles the replay owed to a repeated request for an applied edit (T13 live runs). When the model answered the
+    /// repeat by speaking over the replay, the rest of the slide was lost, so the slide is replayed; when it stayed quiet
+    /// and finished the slide, an unconditional replay spoke it twice. The replay is skipped only when the transcript
+    /// since the slide was presented shows it was spoken in full (<see cref="NarrationCoverage"/>); otherwise, and when
+    /// unsure, it replays. Never cancels a replay due for another reason.
+    /// </summary>
+    private void SettleRepeatReplay()
+    {
+        if (!_repeatReplayDue) return;
+        _repeatReplayDue = false;
+        if (_replayOnResume || _wrappingUp || _presentation is null) return;
+        var coverage = 0d;
+        var finished = _parts.Count > 0 && _partsSent == _parts.Count &&
+            NarrationCoverage.SpokenInFull(string.Join(" ", _parts), _slideSpoken.ToString(), out coverage);
+        var percent = Math.Round(coverage * 100);
+        if (finished)
+        {
+            LogMessage("info", $"edit: slide {_slideIndex + 1} was spoken in full (coverage {percent}%); no replay");
+            return;
+        }
+
+        LogMessage("info", $"edit: slide {_slideIndex + 1} not spoken in full (coverage {percent}%); replaying");
+        _replayOnResume = true;
+    }
+
     /// <summary>
     /// For <c>ResumeCore</c>: true when the resume must not send the stale resume instruction and nudge — either the slide
     /// is held (the reconcile that settles the edit replays it), or a paused replay is due (performed here).
@@ -627,6 +668,7 @@ public sealed partial class Presenter
             return true;
         }
 
+        SettleRepeatReplay();
         if (_replayOnResume && !_wrappingUp)
         {
             var changed = _replayOnResumeChanged;

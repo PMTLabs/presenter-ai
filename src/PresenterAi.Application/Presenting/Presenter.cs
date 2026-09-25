@@ -937,6 +937,8 @@ public sealed partial class Presenter : IPresenter
         _wrappingUp = false;
         StartSlideDiagnostics();
         _replayOnResume = false;
+        _repeatReplayDue = false;
+        _slideSpoken.Clear();
         // A replay abandoned by navigation still owes its failed-edit notice: the next slide leads with it (review r4).
         lead ??= _replayLead;
         _replayLead = null;
@@ -1108,6 +1110,7 @@ public sealed partial class Presenter : IPresenter
 
         Transcript?.Invoke(new PresenterTranscript(transcript.Role, transcript.Delta, transcript.StartMs, transcript.EndMs));
         RecordRecentTurn(transcript.Role, transcript.Delta);
+        if (transcript.Role == "assistant") RecordSlideSpeech(transcript.Delta);
         if (transcript.Role == "user" && !string.IsNullOrWhiteSpace(transcript.Delta)) RecordActivity();
         if (transcript.Role == "user" && _slideDiagnosticsActive)
         {
@@ -1951,6 +1954,7 @@ public sealed partial class Presenter : IPresenter
         CompleteSlideDiagnostics();
         ClearTimers();
         _wrappingUp = true;
+        _repeatReplayDue = false;
         _parts = Array.Empty<string>();
         _partsSent = 0;
         _heardOutput = false;
@@ -2107,6 +2111,8 @@ public sealed partial class Presenter : IPresenter
     {
         var reconnected = _suspended;
         if (reconnected && !await ReconnectAsync().ConfigureAwait(false)) return false;
+        // The new session re-presents the slide; the old session's transcript is no evidence of it.
+        if (reconnected) _repeatReplayDue = false;
         // A held slide is replayed by the reconcile that settles its edit; a due replay is performed by ResumeCore.
         var presentedByTraining = NarrationHeld || _replayOnResume;
         var resumed = ResumeCore();
@@ -2367,9 +2373,10 @@ public sealed partial class Presenter : IPresenter
         LogMessage("info", message);
         ClearQuestionHold();
         if (NarrationHeld) return;
-        // A repeated request for an applied edit cut the replay of this slide short (T13 live run): replay it rather
-        // than ask the model to find its place, which skipped the rest of the slide.
-        if (_replayOnResume && _state == PresenterState.Presenting && TrainingOverridesResume()) return;
+        // A repeated request for an applied edit may have cut the replay of this slide short (T13 live run): replay it
+        // rather than ask the model to find its place, which skipped the rest of the slide, unless the transcript shows
+        // the slide was spoken in full (SettleRepeatReplay).
+        if ((_replayOnResume || _repeatReplayDue) && _state == PresenterState.Presenting && TrainingOverridesResume()) return;
         if (_heardOutput)
         {
             _session?.AppendInstructions(
