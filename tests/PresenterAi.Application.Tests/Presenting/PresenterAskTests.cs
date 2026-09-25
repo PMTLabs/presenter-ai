@@ -249,6 +249,27 @@ public sealed class PresenterAskTests
         Assert.Single(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
     }
 
+    [Fact]
+    public async Task Edit_of_the_current_slide_failing_during_an_exchange_ended_by_navigation_leads_the_next_slide()
+    {
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.TrainerOn();
+        await h.AskStart();
+        var id = await h.TrainOn(0);
+        Assert.True(h.Service.SetOutcome(id, EditOutcome.Failed([0], ScriptEditErrors.Timeout)));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+
+        // Review r4: the exchange ends by navigation, which drops its replay; the notice leads the new slide, once.
+        Assert.True(await h.Presenter.GotoAsync(1));
+        await h.Settle();
+        var next = h.S.Sent.Last(s => s.EventId == "slide-2-part-1").Content!;
+        Assert.Contains(PromptBuilder.ScriptEditFailedLead(), next);
+        Assert.Single(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+    }
+
     [Theory]
     [InlineData("listening")]
     [InlineData("answering")]
@@ -2637,6 +2658,25 @@ public sealed class PresenterAskTests
         Assert.Contains(h.Logs, l => l.StartsWith("ask: check-in window starts after playback", StringComparison.Ordinal));
 
         await h.Advance(TimeSpan.FromMilliseconds(3000 + Presenter.DefaultFollowUpWaitMs - 701 - 2));
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(3));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Check_in_window_follows_the_chained_playback_of_every_answer_chunk()
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        // Review r4 #B2: 3 s of audio at t0, then 2 s more at t0 + 500 while the first still plays. Playback is
+        // chained: it ends at t0 + 5000 (not t0 + 3000 from the first chunk, nor t0 + 2500 from the last one).
+        await h.Answer(3000);
+        await h.Advance(TimeSpan.FromMilliseconds(500));
+        await h.Answer(2000);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+
+        await h.Advance(TimeSpan.FromMilliseconds(5000 + Presenter.DefaultFollowUpWaitMs - 500 - 701 - 2));
         Assert.Empty(h.Offs);
         await h.Advance(TimeSpan.FromMilliseconds(3));
         Assert.Equal("continued", Assert.Single(h.Offs).Reason);
