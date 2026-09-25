@@ -153,6 +153,7 @@ public sealed partial class Presenter
         {
             _trainerMode = true;
             LogMessage("info", $"trainer: on (voice: {(VoiceTraining ? "yes" : "no")})");
+            AnnounceTrainerMode();
         }
 
         // The service may already hold a newer head than the loader returned (a commit that landed meanwhile).
@@ -166,6 +167,8 @@ public sealed partial class Presenter
         if (reconnected)
         {
             LogMessage("info", $"trainer: {(_trainerMode ? "on" : "off")} (voice: {(VoiceTraining ? "yes" : "no")})");
+            // A new upstream session has only the system prompt; off is its default.
+            if (_trainerMode) AnnounceTrainerMode();
             ReconcileWithHead();
         }
 
@@ -249,10 +252,24 @@ public sealed partial class Presenter
             return false;
         }
 
+        var changed = _trainerMode != on;
         _trainerMode = on;
         LogMessage("info", $"trainer: {(on ? "on" : "off")} (voice: {(VoiceTraining ? "yes" : "no")})");
+        if (changed) AnnounceTrainerMode();
         EmitScriptVersion();
         return true;
+    }
+
+    /// <summary>
+    /// Tells the voice model the current Trainer mode (<see cref="PromptBuilder.TrainerModeOnInstruction"/>). Only a
+    /// delegating session can pass a change on, so a client-mode talk gets nothing.
+    /// </summary>
+    private void AnnounceTrainerMode()
+    {
+        if (!VoiceTraining) return;
+        _session?.AppendInstructions(
+            _trainerMode ? PromptBuilder.TrainerModeOnInstruction() : PromptBuilder.TrainerModeOffInstruction(),
+            _trainerMode ? "trainer-on" : "trainer-off");
     }
 
     private bool TrainOnTurnCore(string ownerId, string question, string answer, int slideIndex)

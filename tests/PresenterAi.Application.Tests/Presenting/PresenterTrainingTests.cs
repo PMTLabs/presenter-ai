@@ -881,6 +881,74 @@ public sealed class PresenterTrainingTests
     }
 
     [Fact]
+    public async Task Trainer_toggle_mid_talk_tells_the_voice_model_once_per_change()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        Assert.DoesNotContain(h.S.Sent, s => s.EventId is "trainer-on" or "trainer-off");
+
+        await h.TrainerOn();
+        await h.TrainerOn();
+        var on = Assert.Single(h.S.Sent, s => s.EventId == "trainer-on");
+        Assert.Equal(("instructions", PromptBuilder.TrainerModeOnInstruction()), (on.Type, on.Content));
+
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, false));
+        await h.Settle();
+        var off = Assert.Single(h.S.Sent, s => s.EventId == "trainer-off");
+        Assert.Equal(PromptBuilder.TrainerModeOffInstruction(), off.Content);
+        Assert.True(h.S.Sent.IndexOf(on) < h.S.Sent.IndexOf(off));
+    }
+
+    [Fact]
+    public async Task Idle_toggle_on_tells_the_voice_model_at_start()
+    {
+        await using var h = new Harness();
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, true));
+        await h.Start();
+        Assert.Equal(PromptBuilder.TrainerModeOnInstruction(), Assert.Single(h.S.Sent, s => s.EventId == "trainer-on").Content);
+    }
+
+    [Fact]
+    public async Task Reconnect_while_trainer_mode_is_on_tells_the_new_session_again()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        Assert.True(await h.Presenter.PauseAsync());
+        await h.Advance(TimeSpan.FromSeconds(120));
+        Assert.True(h.Presenter.Snapshot().Suspended);
+
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+        Assert.Equal(2, h.Sessions.Count);
+        Assert.Single(h.Sessions[1].Sent, s => s.EventId == "trainer-on" && s.Content == PromptBuilder.TrainerModeOnInstruction());
+    }
+
+    [Fact]
+    public async Task Reconnect_with_trainer_mode_off_sends_no_trainer_instruction()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        Assert.True(await h.Presenter.PauseAsync());
+        await h.Advance(TimeSpan.FromSeconds(120));
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+        Assert.Equal(2, h.Sessions.Count);
+        Assert.DoesNotContain(h.Sessions[1].Sent, s => s.EventId is "trainer-on" or "trainer-off");
+    }
+
+    [Fact]
+    public async Task Client_mode_talk_gets_no_trainer_instruction()
+    {
+        await using var h = new Harness(factory: _ => new FakeSession { DelegationMode = "client" });
+        await h.Start();
+        await h.TrainerOn();
+        Assert.True(await h.Presenter.SetTrainerModeAsync(Owner, false));
+        await h.Settle();
+        Assert.DoesNotContain(h.S.Sent, s => s.EventId is "trainer-on" or "trainer-off");
+    }
+
+    [Fact]
     public async Task Idle_toggle_applies_only_to_the_same_owners_next_start()
     {
         await using var h = new Harness();
