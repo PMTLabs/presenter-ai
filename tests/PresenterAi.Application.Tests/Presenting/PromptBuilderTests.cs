@@ -148,6 +148,20 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Trainer_mode_instructions_say_to_delegate_changes_not_speak_them()
+    {
+        var on = PromptBuilder.TrainerModeOnInstruction();
+        Assert.StartsWith("Trainer mode is on.", on);
+        Assert.Contains("delegate it in their words", on);
+        Assert.Contains("Never say the change aloud yourself", on);
+        Assert.Contains("never re-narrate the slide", on);
+
+        var off = PromptBuilder.TrainerModeOffInstruction();
+        Assert.StartsWith("Trainer mode is off.", off);
+        Assert.Contains("still delegate it", off);
+    }
+
+    [Fact]
     public void Slide_instruction_variants_match_node_goldens()
     {
         Assert.Equal(

@@ -259,6 +259,18 @@ public static class PromptBuilder
     public static string ScriptEditFailedLead() =>
         "First say briefly that you couldn't apply the change to the script.";
 
+    /// <summary>
+    /// Plan 010: sent mid-talk when Trainer mode turns on, and again after a reconnect while it is on. The system prompt's
+    /// rule alone did not hold: live, whole talks said requested changes aloud instead of delegating them (0 of 2 and 0 of
+    /// 3, against 6 of 6 in another talk), and the model follows a fresh instruction more reliably.
+    /// </summary>
+    public static string TrainerModeOnInstruction() =>
+        "Trainer mode is on. When the speaker asks to change what is said on a slide (add, correct or remove something), delegate it in their words and wait for the result. Never say the change aloud yourself and never re-narrate the slide with it.";
+
+    /// <summary>Plan 010: sent mid-talk when Trainer mode turns off; the delegated request then reports that editing is off.</summary>
+    public static string TrainerModeOffInstruction() =>
+        "Trainer mode is off. If the speaker asks to change the script, still delegate it; the result will say that editing is off.";
+
     public static string ScriptEditDeclinedInstruction() =>
         "Don't change the script. If the speaker asked something, answer it briefly, then carry on.";
 
