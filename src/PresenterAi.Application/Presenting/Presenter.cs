@@ -967,6 +967,8 @@ public sealed partial class Presenter : IPresenter
         _wrappingUp = false;
         StartSlideDiagnostics();
         _replayOnResume = false;
+        // A replay abandoned by navigation still owes its failed-edit notice: the next slide leads with it (review r4).
+        lead ??= _replayLead;
         _replayLead = null;
         var slide = _presentation.Slides[index];
         LogMessage("info", $"slide {index + 1}/{SlideCount}{(slide.Title.Length > 0 ? $" — {slide.Title}" : string.Empty)}");
@@ -974,6 +976,8 @@ public sealed partial class Presenter : IPresenter
         PublishSnapshot();
         if (NarrationHeld)
         {
+            // The held slide's release replay says it.
+            _replayLead = lead;
             PresentHeldSlide(index);
             return;
         }
@@ -990,6 +994,7 @@ public sealed partial class Presenter : IPresenter
         if (_parts.Count == 0)
         {
             LogMessage("info", $"slide {index + 1} has no narration; advancing after {AdvanceSilenceMs} ms");
+            if (lead is not null) _session?.AppendInstructions(PromptBuilder.ScriptEditFailedInstruction(), $"slide-{index + 1}-edit-failed");
             _heardOutput = true;
             ArmSilence();
             return;
@@ -2050,7 +2055,10 @@ public sealed partial class Presenter : IPresenter
         _partsSent = 0;
         _heardOutput = false;
         LogMessage("info", "last slide finished; sending wrap-up");
-        _session?.AppendInstructions(PromptBuilder.WrapUpInstruction(), "wrap-up");
+        var lead = _replayLead;
+        _replayLead = null;
+        _session?.AppendInstructions(
+            lead is null ? PromptBuilder.WrapUpInstruction() : $"{lead} {PromptBuilder.WrapUpInstruction()}", "wrap-up");
         ArmWrapUpFallback();
     }
 
