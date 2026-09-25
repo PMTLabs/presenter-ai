@@ -1039,6 +1039,8 @@ public sealed partial class Presenter : IPresenter
         }
 
         var voiced = AudioLevel.IsVoiced(audio.Bytes);
+        // T8 regression fix: the rest of a response begun before Ask is neither audible nor the answer.
+        if (HoldResidualAudio(voiced, audio.Bytes.Length)) return;
         // Site 1 (plan 011): nothing the upstream produces is audible while the audience is asking.
         var forwarded = ExchangeAllows(ModelAction.ForwardAudio) && (_state == PresenterState.Presenting ||
             (_state == PresenterState.Paused && _speechPermit &&

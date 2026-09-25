@@ -181,6 +181,13 @@ public static class PromptBuilder
             : "then restart the sentence you were in when the question came and continue the narration from there") +
         "; if the slide was finished, say only the transition. Then stop and wait.";
 
+    /// <summary>
+    /// T8 regression fix: a question sent at the speech cap ends mid-sentence and the model waits for the rest. No quoted
+    /// phrase: a quote is spoken verbatim whatever the talk's language (as the edit-pending notice was, T13).
+    /// </summary>
+    public static string AskCutOffInstruction() =>
+        "The listener's question was cut off at the time limit. In the language of the talk, answer what you heard in one to three sentences; if you cannot tell what they asked, ask them briefly to repeat the question.";
+
     public static string EndConfirmationInstruction() =>
         "Ask the audience briefly: Shall I end the presentation now? Then wait for their answer. Do not end the talk yourself.";
 

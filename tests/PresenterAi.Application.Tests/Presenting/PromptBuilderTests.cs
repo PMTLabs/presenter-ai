@@ -80,6 +80,18 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void Cut_off_nudge_answers_in_the_language_of_the_talk_without_a_phrase_to_read_out()
+    {
+        // T8 regression fix: a question cut off at the cap; a quoted phrase would be spoken verbatim (T13 live run).
+        var instruction = PromptBuilder.AskCutOffInstruction();
+
+        Assert.Contains("in the language of the talk", instruction, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("repeat the question", instruction);
+        Assert.DoesNotContain("\"", instruction);
+        Assert.DoesNotContain("Say:", instruction);
+    }
+
+    [Fact]
     public void Question_resume_asks_for_a_natural_transition_not_a_canned_bridge()
     {
         var instruction = PromptBuilder.ResumeAfterQuestionInstruction();
