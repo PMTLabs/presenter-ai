@@ -68,6 +68,20 @@ public sealed class PromptBuilderTests
         Assert.DoesNotContain("Back to the slide", instruction);
     }
 
+    [Theory]
+    [InlineData(false, "then restart the sentence you were in when the question came")]
+    [InlineData(true, "then restart the narration sentence you were in before the first question, not an earlier answer")]
+    public void Ask_resume_names_the_slide_ends_the_pause_and_keeps_the_transition(bool followUp, string restart)
+    {
+        var instruction = PromptBuilder.ResumeAfterAskInstruction(1, 5, "Plan", followUp);
+        Assert.StartsWith("The pause is over. Resume slide 2 of 5 (\"Plan\") now:", instruction);
+        Assert.Contains("natural transition of your own", instruction);
+        Assert.Contains(restart, instruction);
+        Assert.Contains("if the slide was finished, say only the transition", instruction);
+        Assert.EndsWith("Then stop and wait.", instruction);
+        Assert.DoesNotContain("Back to the slide", instruction);
+    }
+
     [Fact]
     public void Slide_instruction_variants_match_node_goldens()
     {
