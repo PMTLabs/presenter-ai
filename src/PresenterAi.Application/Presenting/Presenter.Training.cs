@@ -477,13 +477,10 @@ public sealed partial class Presenter
             }
         }
 
-        if (settled.Any(item => item.Outcome.Status == ScriptEditStatus.Failed))
-        {
-            _session?.AppendInstructions(PromptBuilder.ScriptEditFailedInstruction(),
-                $"edit-failed-{settled.First(item => item.Outcome.Status == ScriptEditStatus.Failed).Edit.Id}");
-        }
+        var failed = settled.FirstOrDefault(item => item.Outcome.Status == ScriptEditStatus.Failed).Edit;
 
         // 3. Replay or release the current slide.
+        var replayNow = false;
         if (TalkRunning && !_wrappingUp)
         {
             var released = wasHeld && !NarrationHeld;
@@ -491,7 +488,7 @@ public sealed partial class Presenter
             {
                 if (_state == PresenterState.Presenting)
                 {
-                    ReplayCurrentSlide(currentChanged);
+                    replayNow = true;
                 }
                 else
                 {
@@ -500,6 +497,15 @@ public sealed partial class Presenter
                 }
             }
         }
+
+        // A replay starts with "stop whatever you are saying", which would cut a separate failure notice short
+        // (T13 live run): the replay then carries the notice itself.
+        if (failed is not null && !replayNow)
+        {
+            _session?.AppendInstructions(PromptBuilder.ScriptEditFailedInstruction(), $"edit-failed-{failed.Id}");
+        }
+
+        if (replayNow) ReplayCurrentSlide(currentChanged, failed is null ? null : PromptBuilder.ScriptEditFailedLead());
 
         // 4. Version first, so no "applied" frame precedes the narration it describes.
         if (versionMoved && _state != PresenterState.Connecting) EmitScriptVersion();
@@ -533,7 +539,7 @@ public sealed partial class Presenter
     }
 
     /// <summary>Presents the current slide from its start with the current text (after an edit or a revert).</summary>
-    private void ReplayCurrentSlide(bool changed)
+    private void ReplayCurrentSlide(bool changed, string? lead = null)
     {
         if (_presentation is null) return;
         Flush?.Invoke();
@@ -545,7 +551,7 @@ public sealed partial class Presenter
             LogMessage("info", $"edit: replay slide {_slideIndex + 1} (v{_scriptVersion})");
         }
 
-        PresentSlide(_slideIndex, interrupt: true);
+        PresentSlide(_slideIndex, interrupt: true, lead);
     }
 
     /// <summary>

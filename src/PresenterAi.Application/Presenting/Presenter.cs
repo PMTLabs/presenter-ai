@@ -921,7 +921,7 @@ public sealed partial class Presenter : IPresenter
         session.Closed += (reason, seconds) => QueueFromProducer(new SessionClosed(session, reason, seconds));
     }
 
-    private void PresentSlide(int index, bool interrupt)
+    private void PresentSlide(int index, bool interrupt, string? lead = null)
     {
         if (_presentation is null || index < 0 || index >= _presentation.Slides.Count)
         {
@@ -969,11 +969,11 @@ public sealed partial class Presenter : IPresenter
             LogMessage("info", $"slide {index + 1} narration is sent in {_parts.Count} parts");
         }
 
-        SendNextPart(interrupt);
+        SendNextPart(interrupt, lead);
         ArmNudge();
     }
 
-    private bool SendNextPart(bool interrupt = false)
+    private bool SendNextPart(bool interrupt = false, string? lead = null)
     {
         if (_presentation is null || _partsSent >= _parts.Count)
         {
@@ -983,7 +983,8 @@ public sealed partial class Presenter : IPresenter
         var slide = _presentation.Slides[_slideIndex];
         var part = _partsSent;
         _session?.AppendInstructions(
-            PromptBuilder.SlideInstruction(_slideIndex, SlideCount, slide.Title, _parts[part], part + 1, _parts.Count, interrupt && part == 0),
+            PromptBuilder.SlideInstruction(_slideIndex, SlideCount, slide.Title, _parts[part], part + 1, _parts.Count, interrupt && part == 0,
+                part == 0 ? lead : null),
             $"slide-{_slideIndex + 1}-part-{part + 1}");
         _partsSent = part + 1;
         if (part > 0)
