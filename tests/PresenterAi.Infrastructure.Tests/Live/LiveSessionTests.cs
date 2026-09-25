@@ -505,7 +505,8 @@ public sealed class LiveSessionTests
         session.Unmute(out var unmuteId).Should().BeTrue();
         unmuteId.Should().StartWith("unmute-");
 
-        (await EventuallyAsync(() => Volatile.Read(ref acks) == 1)).Should().BeTrue();
+        // Both handlers run in turn on the receive loop; waiting only for the first raced the second under load.
+        (await EventuallyAsync(() => Volatile.Read(ref acks) == 1 && Volatile.Read(ref viaPort) == 1)).Should().BeTrue();
         Volatile.Read(ref ackedId).Should().Be(unmuteId, "the ack carries the unmute's echoed client_event_id (review r1 #1)");
         Volatile.Read(ref viaPort).Should().Be(1, "the ILiveSession event is the one the presenter subscribes to");
     }
