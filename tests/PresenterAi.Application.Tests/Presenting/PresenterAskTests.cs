@@ -3054,13 +3054,30 @@ public sealed class PresenterAskTests
     }
 
     [Fact]
-    public async Task A_late_cut_off_nudge_gives_the_model_a_fresh_answer_budget()
+    public async Task A_capped_question_waits_its_kept_speech_longer_for_the_answer()
     {
-        // T8 re-run: the burst's transcript streamed for about 8 s, the nudge came at +10.3 s and the 15 s budget ended
-        // the exchange 4.7 s later with no answer.
+        // T8 re-run: the upstream took a cut-off 25 s burst in at about its own length; the reply came at +24.6 s, after
+        // the 15 s budget (re-armed from the nudge at +10.4 s) had resumed the talk over it.
         await using var h = new Harness();
         await ToCapSent(h);
-        for (var i = 0; i < 6; i++)
+        var budget = Presenter.AnswerStartBudgetMs + AskRecorder.MaxRetainedMs;
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerStartBudgetMs + 1));
+        Assert.Equal(1, CutOffs(h));
+        Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
+        await h.Advance(TimeSpan.FromMilliseconds(budget - Presenter.AnswerStartBudgetMs - 2));
+        Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
+        await h.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.Contains("ask: no answer within 40 s", h.Logs);
+    }
+
+    [Fact]
+    public async Task A_late_cut_off_nudge_extends_the_answer_budget_and_never_shortens_it()
+    {
+        await using var h = new Harness();
+        await ToCapSent(h);
+        // The burst's transcript keeps streaming for 30 s: the nudge comes 2 s after its last delta (+32 s).
+        for (var i = 0; i < 20; i++)
         {
             await h.Advance(TimeSpan.FromMilliseconds(1_500));
             h.S.Hear("more of the question", 0, 100);
@@ -3070,11 +3087,11 @@ public sealed class PresenterAskTests
         await h.Advance(TimeSpan.FromMilliseconds(Presenter.CutOffQuietMs));
         Assert.Equal(1, CutOffs(h));
 
-        // 15 s after the send the old budget would have given up; the fresh one runs from the nudge (+11 s).
-        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerStartBudgetMs - 11_000 + 1));
+        // The capped budget (40 s from the send) would end at +40 s; the nudge gives at least 15 s from +32 s.
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerStartBudgetMs - 1));
         Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
-        await h.Advance(TimeSpan.FromMilliseconds(11_000));
-        Assert.Contains(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
+        await h.Advance(TimeSpan.FromMilliseconds(2));
+        Assert.Contains("ask: no answer within 47 s", h.Logs);
     }
 
     [Fact]

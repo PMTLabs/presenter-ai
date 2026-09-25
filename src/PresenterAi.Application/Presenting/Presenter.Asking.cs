@@ -55,6 +55,7 @@ public sealed partial class Presenter
     private ITimer? _askAckTimer;
     private long _askAckGeneration;
     private ITimer? _askBudgetTimer;
+    private long? _askBudgetDueAt;
     private long _askBudgetGeneration;
     private ITimer? _askPhraseTimer;
     private long _askPhraseGeneration;
@@ -635,10 +636,11 @@ public sealed partial class Presenter
         exchange.CutOffNudged = true;
         _session?.AppendInstructions(PromptBuilder.AskCutOffInstruction(), $"{exchange.Id}-cut-off");
         LogMessage("info", "ask: question cut off at the cap; asked the model to answer what it heard");
-        // The nudge waits out the burst's transcript (about 10 s after a 25 s burst, T8 re-run): the model gets a fresh
-        // answer budget from here, never past the ceiling.
+        // The nudge waits out the burst's transcript (about 10 s after a 25 s burst, T8 re-run): the model gets at least
+        // a fresh answer budget from here; the nudge never shortens the running one, and never passes the ceiling.
         var since = _timeProvider.GetElapsedTime(exchange.AwaitingAnswerSince).TotalMilliseconds;
-        ArmAskBudget(Math.Max(0, Math.Min(AnswerStartBudgetMs, AnswerStartBudgetMs + AnswerCeilingExtraMs - since)));
+        var left = _askBudgetDueAt is { } due ? _timeProvider.GetElapsedTime(_timeProvider.GetTimestamp(), due).TotalMilliseconds : 0;
+        ArmAskBudget(Math.Max(0, Math.Min(Math.Max(left, AnswerStartBudgetMs), AnswerStartBudgetMs + AnswerCeilingExtraMs - since)));
     }
 
     private void StopAskCutOff()
@@ -672,9 +674,18 @@ public sealed partial class Presenter
 
         if (exchange.Phase != AskPhase.AwaitingAnswer) return;
         var since = _timeProvider.GetElapsedTime(exchange.AwaitingAnswerSince).TotalMilliseconds;
-        var wait = Math.Min(AnswerStartBudgetMs, AnswerStartBudgetMs + AnswerCeilingExtraMs - since);
+        var wait = Math.Min(AnswerBudgetMs(exchange), AnswerStartBudgetMs + AnswerCeilingExtraMs - since);
         ArmAskBudget(Math.Max(0, wait));
     }
+
+    /// <summary>
+    /// T8 re-run: a burst cut off at the cap was taken in at about its own length (the question's last words were
+    /// transcribed 23.7 s after a 25 s burst; the reply came at +24.6 s), so its budget adds the kept speech. Complete
+    /// questions keep <see cref="AnswerStartBudgetMs"/> (T1: 9.7 s at 24 s kept; T8: 8.0 s at 19.4 s).
+    /// </summary>
+    private static double AnswerBudgetMs(AskExchange exchange) => exchange.SendReason == "limit_sent"
+        ? AnswerStartBudgetMs + exchange.Recorder.Stats.KeptMs
+        : AnswerStartBudgetMs;
 
     private void OnAskBudgetElapsed(long generation)
     {
@@ -704,6 +715,7 @@ public sealed partial class Presenter
     private void ArmAskBudget(double milliseconds)
     {
         StopAskBudget();
+        _askBudgetDueAt = _timeProvider.GetTimestamp() + MsToTimestamp((int)Math.Ceiling(milliseconds));
         var generation = _askBudgetGeneration;
         _askBudgetTimer = _timeProvider.CreateTimer(_ => QueueFromProducer(new AskBudgetElapsed(generation)), null,
             TimeSpan.FromMilliseconds(milliseconds), Timeout.InfiniteTimeSpan);
@@ -1301,6 +1313,7 @@ public sealed partial class Presenter
         _askBudgetGeneration++;
         _askBudgetTimer?.Dispose();
         _askBudgetTimer = null;
+        _askBudgetDueAt = null;
     }
 
     private long QuietMs(AskExchange exchange)
