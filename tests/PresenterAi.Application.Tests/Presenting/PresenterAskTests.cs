@@ -2596,6 +2596,147 @@ public sealed class PresenterAskTests
         Assert.Equal(2, h.Logs.Count(l => l == "ask: check-in"));
     }
 
+    // ---- Owner decision "hold for speech" (2026-09-24): check-in window vs. transcript lag ----------------------
+
+    [Fact]
+    public async Task Silent_check_in_times_out_five_seconds_after_the_check_in_audio_finishes_playing()
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        // 3 s of answer audio arrive at once (faster than real time): it plays until t0 + 3000.
+        await h.Answer(3000);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+        Assert.Contains(h.Logs, l => l.StartsWith("ask: check-in window starts after playback", StringComparison.Ordinal));
+
+        await h.Advance(TimeSpan.FromMilliseconds(3000 + Presenter.DefaultFollowUpWaitMs - 701 - 2));
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(3));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Silent_check_in_after_a_short_answer_keeps_the_existing_window()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs - 3));
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(3));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.DoesNotContain("ask: check-in held for listener speech", h.Logs);
+    }
+
+    [Theory]
+    [InlineData("before-window", 3000, 1200)]
+    [InlineData("late-in-window", 300, 3000)]
+    public async Task Check_in_reply_whose_transcript_lags_the_mic_speech_by_2_7_s_counts(
+        string when, int answerMs, int speechAfterCheckInMs)
+    {
+        _ = when;
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        await h.Answer(answerMs);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        await h.Advance(TimeSpan.FromMilliseconds(speechAfterCheckInMs));
+
+        // The listener says "No" for about a second; its transcript arrives 2.7 s after the speech ends.
+        await MicSpeechLive(h, 1000);
+        await h.Advance(TimeSpan.FromMilliseconds(2700));
+        Assert.Empty(h.Offs);
+        h.S.Hear("No.", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Equal("waiting", Assert.Single(h.Offs).Reason);
+        Assert.DoesNotContain(h.S.Sent, IsResumeAfterQuestion);
+    }
+
+    [Fact]
+    public async Task Speech_hold_never_makes_a_stale_delta_count()
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        await h.Answer();
+        h.S.Hear("and the budget", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+
+        // Within 1.5 s of the previous user delta: UI-only (P-13), and the speech hold below must not change that.
+        await h.Advance(TimeSpan.FromMilliseconds(300));
+        h.S.Hear("no", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(3700));
+        await MicSpeechLive(h, 1000);
+        await h.Advance(TimeSpan.FromMilliseconds(CheckInGraceMs + 1));
+
+        Assert.Contains("ask: check-in held for listener speech", h.Logs);
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Speech_hold_is_bounded_while_the_mic_keeps_hearing_voice()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+
+        // Continuous voice (a noisy room): the window closes at its normal end plus CheckInMaxHoldMs.
+        for (var i = 0; i < 29; i++)
+        {
+            await h.MicSpeech(100);
+            await h.Advance(TimeSpan.FromMilliseconds(500));
+        }
+
+        Assert.Empty(h.Offs);
+        for (var i = 0; i < 3; i++)
+        {
+            await h.MicSpeech(100);
+            await h.Advance(TimeSpan.FromMilliseconds(500));
+        }
+
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+    }
+
+    [Fact]
+    public async Task Late_check_in_transcript_after_the_timeout_does_not_open_a_question_hold()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+        var holds = h.Logs.Count(l => l == "question: hold opened");
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 1));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+
+        // The reply was not heard by the mic hold (e.g. too quiet); its transcript lands 2.7 s after the timeout.
+        await h.Advance(TimeSpan.FromMilliseconds(2700));
+        h.S.Hear("No.", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Contains("ask: late check-in reply after the exchange ended; ignored", h.Logs);
+        Assert.Equal(holds, h.Logs.Count(l => l == "question: hold opened"));
+        Assert.Single(h.S.Sent, IsResumeAfterQuestion);
+
+        // The guard is bounded: a new question later opens the hold as before.
+        await h.Advance(TimeSpan.FromSeconds(5));
+        h.S.Hear("What about the budget?", 0, 100);
+        await h.Settle();
+        Assert.Equal(holds + 1, h.Logs.Count(l => l == "question: hold opened"));
+    }
+
+    private const int CheckInGraceMs = Presenter.CheckInTranscriptGraceMs;
+
+    /// <summary>Voiced mic audio in real time: 100 ms frames with the clock advancing between them.</summary>
+    private static async Task MicSpeechLive(Harness h, int milliseconds)
+    {
+        for (var i = 0; i < milliseconds / 100; i++)
+        {
+            await h.MicSpeech(100);
+            await h.Advance(TimeSpan.FromMilliseconds(100));
+        }
+    }
+
     // ---- Harness --------------------------------------------------------------------------------------------------
 
     private static bool IsResumeAfterQuestion((string Type, string? Content, string? EventId, string? DelegationId) item) =>

@@ -22,6 +22,13 @@ public sealed partial class Presenter
     public const int AnswerCeilingExtraMs = 60_000;
     /// <summary>P-13: at check-in a user delta opens a new utterance only after this much transcript quiet.</summary>
     public const int CheckInQuietMs = 1_500;
+    /// <summary>
+    /// Owner decision "hold for speech" (2026-09-24): live input transcription lags speech by about 2.5 s, so after the
+    /// mic last heard the listener the check-in waits this long for the reply's transcript before timing out.
+    /// </summary>
+    public const int CheckInTranscriptGraceMs = 3_000;
+    /// <summary>The speech hold never keeps a check-in open longer than this past its normal reply window.</summary>
+    public const int CheckInMaxHoldMs = 10_000;
     /// <summary>§4.1 transcriber port: end of utterance by update time, as the existing assembler does.</summary>
     public const int AskPhraseDebounceMs = 700;
     public const string AskBusyMessage = "busy: the audience is asking a question";
@@ -40,6 +47,8 @@ public sealed partial class Presenter
     // P-13 after the exchange: the last user delta of an ended exchange; deltas chained within CheckInQuietMs of it are
     // still the old question's trail and stay UI-only.
     private long? _askTrailingDeltaAt;
+    // Hold for speech: a user delta before this (loop time) is a check-in reply that arrived after its exchange ended.
+    private long? _askLateReplyUntil;
     private long _resetGeneration;
     private long _confirmationGeneration;
     private PendingReset? _pendingReset;
@@ -257,6 +266,7 @@ public sealed partial class Presenter
         }
 
         _askTrailingDeltaAt = null;
+        _askLateReplyUntil = null;
         ResetUtterance();
         // P-9: work started before Ask is abandoned, as navigation does: no result is submitted and no continue sent.
         _runGeneration++;
@@ -610,6 +620,71 @@ public sealed partial class Presenter
         LogMessage("info", "ask: check-in");
     }
 
+    // ---- Check-in reply window: hold for speech (owner decision, 2026-09-24) ---------------------------------------
+
+    /// <summary>Model audio forwarded while the exchange waits for or plays the answer extends its playback estimate.</summary>
+    private void TrackExchangePlayback(int bytes)
+    {
+        if (_exchange is not { Phase: AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn } exchange) return;
+        var now = _timeProvider.GetTimestamp();
+        var from = exchange.PlaybackEndsAt is { } end && end > now ? end : now;
+        exchange.PlaybackEndsAt = from + MsToTimestamp(bytes / AskRecorder.BytesPerMs);
+    }
+
+    /// <summary>A mic frame after Ask done: voiced speech (the recorder's RMS threshold) holds the check-in window.</summary>
+    private void TrackExchangeMic(ReadOnlySpan<byte> pcm16)
+    {
+        if (_exchange is not { Phase: AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn } exchange ||
+            !AudioLevel.IsVoiced(pcm16)) return;
+        exchange.LastMicVoicedAt = _timeProvider.GetTimestamp();
+    }
+
+    /// <summary>
+    /// The check-in's reply window starts when its audio has finished playing, not at the 700 ms receive quiet while
+    /// the model is still audible (audio arrives faster than it plays). Returns the timer delay for the window's end.
+    /// </summary>
+    private int CheckInWindowDelayMs(int receiveQuietDelayMs)
+    {
+        if (_exchange is not { } exchange) return receiveQuietDelayMs;
+        var now = _timeProvider.GetTimestamp();
+        var playing = exchange.PlaybackEndsAt is { } end && end > now
+            ? (int)Math.Ceiling(_timeProvider.GetElapsedTime(now, end).TotalMilliseconds)
+            : 0;
+        var delay = playing > 0 ? Math.Max(receiveQuietDelayMs, playing + FollowUpWaitMs) : receiveQuietDelayMs;
+        exchange.CheckInWindowStartsAt = now + MsToTimestamp(delay - FollowUpWaitMs);
+        exchange.CheckInHeld = false;
+        if (delay > receiveQuietDelayMs) LogMessage("info", $"ask: check-in window starts after playback (+{playing} ms)");
+        return delay;
+    }
+
+    /// <summary>
+    /// The check-in window elapsed. While the mic heard the listener within <see cref="CheckInTranscriptGraceMs"/>, or
+    /// a reply is still being assembled, it stays open (bounded by <see cref="CheckInMaxHoldMs"/>). The hold never
+    /// makes a delta count: P-13 still decides what opens a reply. Returns true when the window was held.
+    /// </summary>
+    private bool HoldCheckInForSpeech()
+    {
+        if (_exchange is not { } exchange) return false;
+        var now = _timeProvider.GetTimestamp();
+        var hold = exchange.UtteranceOpen ? AskPhraseDebounceMs + 50 : 0;
+        if (exchange.LastMicVoicedAt is { } voiced)
+            hold = Math.Max(hold, CheckInTranscriptGraceMs - (int)_timeProvider.GetElapsedTime(voiced, now).TotalMilliseconds);
+        if (exchange.CheckInWindowStartsAt is { } start)
+            hold = Math.Min(hold,
+                FollowUpWaitMs + CheckInMaxHoldMs - (int)_timeProvider.GetElapsedTime(start, now).TotalMilliseconds);
+        if (hold <= 0) return false;
+        if (!exchange.CheckInHeld)
+        {
+            exchange.CheckInHeld = true;
+            LogMessage("info", "ask: check-in held for listener speech");
+        }
+
+        ArmInteraction(hold);
+        return true;
+    }
+
+    private long MsToTimestamp(int milliseconds) => _timeProvider.TimestampFrequency * milliseconds / 1000;
+
     // ---- Check-in turn-taking (P-13) ------------------------------------------------------------------------------
 
     /// <summary>
@@ -665,8 +740,19 @@ public sealed partial class Presenter
     /// <summary>True when a user delta after an exchange is still the old question's trail (P-13); it stays UI-only.</summary>
     private bool IsTrailingAskDelta()
     {
-        if (_askTrailingDeltaAt is not { } trailing) return false;
         var now = _timeProvider.GetTimestamp();
+        if (_askLateReplyUntil is { } until)
+        {
+            if (now < until)
+            {
+                LogMessage("info", "ask: late check-in reply after the exchange ended; ignored");
+                return true;
+            }
+
+            _askLateReplyUntil = null;
+        }
+
+        if (_askTrailingDeltaAt is not { } trailing) return false;
         if (_timeProvider.GetElapsedTime(trailing, now).TotalMilliseconds < CheckInQuietMs)
         {
             _askTrailingDeltaAt = now;
@@ -827,6 +913,9 @@ public sealed partial class Presenter
         exchange.Deferred.Clear();
         var wasListening = exchange.Phase is AskPhase.Listening or AskPhase.Sending;
         _askTrailingDeltaAt = outcome is AskOutcome.Resume or AskOutcome.Stay ? exchange.LastUserDeltaAt : null;
+        _askLateReplyUntil = outcome is AskOutcome.Resume or AskOutcome.Stay && exchange.CheckInBegun
+            ? _timeProvider.GetTimestamp() + MsToTimestamp(CheckInTranscriptGraceMs)
+            : null;
 
         if (outcome != AskOutcome.Ended && _session is { } session)
         {
@@ -1156,6 +1245,13 @@ public sealed partial class Presenter
         public bool FollowUpUsed { get; set; }
         /// <summary>The check-in of the current answer wait began; later model audio re-entering Answering keeps it.</summary>
         public bool CheckInBegun { get; set; }
+        /// <summary>Estimated end of playback of the model audio forwarded during the answer (loop time).</summary>
+        public long? PlaybackEndsAt { get; set; }
+        /// <summary>The last voiced mic frame after Ask done (loop time).</summary>
+        public long? LastMicVoicedAt { get; set; }
+        /// <summary>Start of the check-in's reply window (loop time), for the speech-hold bound.</summary>
+        public long? CheckInWindowStartsAt { get; set; }
+        public bool CheckInHeld { get; set; }
         public long LastRevision { get; set; }
         public string? LatestText { get; set; }
         /// <summary>The phrase-stripped question of an ask finished by phrase; logged by length only (P-7).</summary>
@@ -1184,6 +1280,10 @@ public sealed partial class Presenter
             UtteranceConfirmation = null;
             FollowUpUsed = false;
             CheckInBegun = false;
+            PlaybackEndsAt = null;
+            LastMicVoicedAt = null;
+            CheckInWindowStartsAt = null;
+            CheckInHeld = false;
             LastRevision = 0;
             LatestText = null;
             Question = null;
