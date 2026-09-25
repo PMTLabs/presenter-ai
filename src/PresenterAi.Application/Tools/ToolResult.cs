@@ -29,7 +29,7 @@ public sealed record ToolResult(bool Ok, string Message, JsonNode? Data = null)
             ["message"] = Message
         };
 
-        if (Outcome is "confirmation_required" or "confirmation_pending" or "running")
+        if (Outcome is "confirmation_required" or "confirmation_pending" or "running" or "already_done")
         {
             node["status"] = Outcome;
             if (Data is JsonObject data && data["question"] is { } question)
