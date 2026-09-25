@@ -194,6 +194,10 @@ describe("presenterStore", () => {
     expect(usePresenterStore.getState().edits).toEqual({});
     expect(usePresenterStore.getState().currentEditId).toBeNull();
     frame("queued");
+    // Snapshots inside the same talk (presenting, paused) must keep its edits: only leaving idle starts a new talk.
+    store.applySnapshot({ state: "presenting", slideIndex: 0, slideCount: 3, muted: false });
+    store.applySnapshot({ state: "paused", slideIndex: 0, slideCount: 3, muted: false });
+    expect(usePresenterStore.getState().edits.edit_1.status).toBe("queued");
     frame("failed", { error: "timeout" });
 
     const state = usePresenterStore.getState();

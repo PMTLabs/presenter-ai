@@ -602,6 +602,52 @@ public sealed class PresenterTrainingTests
     }
 
     [Fact]
+    public async Task Failed_edit_whose_replay_is_abandoned_by_navigation_leads_the_next_slide()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await h.TrainOn(0);
+        Assert.True(await h.Presenter.PauseAsync());
+        h.Service.SetOutcome(id, EditOutcome.Failed([0], ScriptEditErrors.Timeout));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+
+        // Review r4: Next before Resume drops the replay; its notice must still be spoken, once, on the next slide.
+        Assert.True(await h.Presenter.GotoAsync(1));
+        await h.Settle();
+        var next = h.S.Sent.Last(s => s.EventId == "slide-2-part-1").Content!;
+        Assert.Contains(PromptBuilder.ScriptEditFailedLead(), next);
+        Assert.Single(h.S.Sent, s => s.Content?.Contains(PromptBuilder.ScriptEditFailedLead(), StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+
+        Assert.True(await h.Presenter.GotoAsync(0));
+        await h.Settle();
+        Assert.DoesNotContain(PromptBuilder.ScriptEditFailedLead(), h.S.Sent.Last(s => s.EventId == "slide-1-part-1").Content!);
+    }
+
+    [Fact]
+    public async Task Failed_edit_whose_replay_is_abandoned_by_the_wrap_up_leads_the_wrap_up()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        Assert.True(await h.Presenter.GotoAsync(3));
+        await h.Settle();
+        var id = await h.TrainOn(3);
+        Assert.True(await h.Presenter.PauseAsync());
+        h.Service.SetOutcome(id, EditOutcome.Failed([3], ScriptEditErrors.Timeout));
+        h.Service.RaiseChanged(Pid);
+        await h.Settle();
+
+        Assert.True(await h.Presenter.NextAsync());
+        await h.Settle();
+        var wrapUp = Assert.Single(h.S.Sent, s => s.EventId == "wrap-up").Content!;
+        Assert.Equal(PromptBuilder.ScriptEditFailedLead() + " " + PromptBuilder.WrapUpInstruction(), wrapUp);
+        Assert.DoesNotContain(h.S.Sent, s => s.Content == PromptBuilder.ScriptEditFailedInstruction());
+    }
+
+    [Fact]
     public async Task Failed_edit_for_another_slide_speaks_failure_without_a_replay()
     {
         await using var h = new Harness();
