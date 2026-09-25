@@ -3173,6 +3173,7 @@ public sealed class PresenterAskTests
     [Theory]
     [InlineData("answer")]
     [InlineData("delegation")]
+    [InlineData("finished delegation")]
     public async Task Answer_or_answer_work_before_the_answer_now_nudge_cancels_it(string started)
     {
         await using var h = new Harness();
@@ -3182,6 +3183,14 @@ public sealed class PresenterAskTests
         {
             h.S.RaiseDelegation("responses", "d1");
             await h.Settle();
+        }
+
+        if (started == "finished delegation")
+        {
+            // T8 regression run: the backend answer was ready 0.2 s before the nudge and 0.8 s before its audio.
+            h.S.RaiseDelegatedResponse("d1");
+            await h.Settle();
+            Assert.Contains(h.Logs, l => l.StartsWith("question: backend answer ready", StringComparison.Ordinal));
         }
 
         await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerNudgeMs + Presenter.AnswerNudgeQuietMs));

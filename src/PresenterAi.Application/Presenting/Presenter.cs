@@ -1525,6 +1525,9 @@ public sealed partial class Presenter : IPresenter
         }
 
         TreatVoicedSpeechAsFiller();
+        // The model is working on the question: no nudge, even after the backend has finished (T8 regression run: the
+        // answer-now nudge landed 0.2 s after "backend answer ready", just before the answer).
+        StopAskCutOff();
         OpenOrExtendQuestionHold(null);
         if (target == "responses")
         {
@@ -1623,10 +1626,13 @@ public sealed partial class Presenter : IPresenter
         UpstreamError?.Invoke(new PresenterUpstreamError(message, code, clientEventId));
 
         // A delegated backend can also fail with a top-level error that names no delegation; it ends the pending one.
-        if (code == "backend_error" && _toolRoundTracker.HasPendingBackendDelegation)
+        // T8 regression run: the Responses channel also failed as invalid_request_error "Responses websocket closed
+        // before a terminal event."; left pending, it made the model's re-delegated answer filler until the ceiling.
+        if ((code == "backend_error" || message.StartsWith("Responses ", StringComparison.Ordinal)) &&
+            _toolRoundTracker.HasPendingBackendDelegation)
         {
             _toolRoundTracker.CloseAllDelegations();
-            FinishBackendDelegation(code);
+            FinishBackendDelegation(code ?? "error");
         }
     }
 

@@ -957,8 +957,10 @@ public sealed class PresenterTests
         Assert.DoesNotContain(new PresenterLog("info", "question: hold opened"), harness.Logs);
     }
 
-    [Fact]
-    public async Task Top_level_backend_error_ends_the_pending_backend_answer()
+    [Theory]
+    [InlineData("backend_error", "Responses backend execution failed")]
+    [InlineData("invalid_request_error", "Responses websocket closed before a terminal event.")]
+    public async Task Top_level_backend_error_ends_the_pending_backend_answer(string code, string message)
     {
         await using var harness = Create();
         await harness.Presenter.StartAsync("p");
@@ -974,9 +976,9 @@ public sealed class PresenterTests
         await harness.Flush();
         Assert.DoesNotContain(harness.Logs, log => log.Message.StartsWith("question: answered", StringComparison.Ordinal));
 
-        harness.Session().RaiseUpstreamError("backend_error", "Responses backend execution failed");
+        harness.Session().RaiseUpstreamError(code, message);
         await harness.Flush();
-        Assert.Contains(new PresenterLog("warn", "question: backend answer failed (backend_error)"), harness.Logs);
+        Assert.Contains(new PresenterLog("warn", $"question: backend answer failed ({code})"), harness.Logs);
         harness.Session().Speak(startMs: 201, endMs: 300);
         await harness.Flush();
         await harness.EndFollowUp();
