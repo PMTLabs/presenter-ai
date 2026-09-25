@@ -2099,6 +2099,57 @@ public sealed class PresenterAskTests
 
     // ---- Repeated revise_script for an applied edit (T13 live run; plan 010 fix, site 10) ------------------------
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Ask_during_a_repeated_request_settles_its_replay_before_the_exchange_takes_it_over(bool spokenInFull)
+    {
+        const string feedback = "{\"feedback\":\"Also mention the 2025 figures.\"}";
+        const string narration = "Slide one, new text. The program started in 2020 and grew every year since then.";
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.TrainerOn();
+        // Confirmed and applied outside an exchange; the applied edit replays the slide.
+        h.S.RaiseToolCall("d", "c1", "revise_script", feedback);
+        await Eventually(() => h.S.Sent.Any(s => s.EventId == "c1"));
+        await h.Settle();
+        await h.Advance(TimeSpan.FromSeconds(8));
+        h.S.Hear("yes", 2000, 2100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        var id = Assert.Single(h.Service.Enqueued).Id;
+        await h.Apply(id, 6, (0, narration));
+        h.S.ModelTranscript(spokenInFull ? narration : "Slide one, new text.");
+        await h.Answer(200);
+        for (var i = 0; i < 3; i++)
+        {
+            h.S.RaiseDelegatedResponse("d");
+            await h.Settle();
+        }
+
+        // The backend repeats the request; before its question ends, a listener presses Ask.
+        h.S.RaiseDelegation("responses", "del-c2");
+        await h.Settle();
+        h.S.RaiseToolCall("del-c2", "c2", "revise_script", feedback);
+        await h.Settle();
+        Assert.Contains($"edit: repeated request for {id} (already applied)", h.Logs);
+        var sent = h.S.Sent.Count;
+        await h.ToAwaitingAnswer(start: false);
+        Assert.Contains(h.Logs, l => l.StartsWith(
+            spokenInFull ? "edit: slide 1 was spoken in full" : "edit: slide 1 not spoken in full", StringComparison.Ordinal));
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 701));
+
+        // The exchange ends with its own decision: one replay of the unfinished slide, or the Ask resume.
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.Equal($"ask: exchange ended (resume), 0 deferred notices, replay {(spokenInFull ? "no" : "yes")}",
+            h.Logs.Last(l => l.StartsWith("ask: exchange ended", StringComparison.Ordinal)));
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.Equal(spokenInFull ? 0 : 1, after.Count(s => s.EventId == "slide-1-part-1"));
+        Assert.Equal(spokenInFull ? 1 : 0, after.Count(IsResumeAfterQuestion));
+    }
+
     [Fact]
     public async Task Repeated_request_for_an_edit_applied_during_the_exchange_replays_the_slide_once_after_it()
     {

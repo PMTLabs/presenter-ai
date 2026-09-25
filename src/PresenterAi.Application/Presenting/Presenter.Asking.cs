@@ -282,6 +282,8 @@ public sealed partial class Presenter
         }
         else
         {
+            // Site 10: a repeat's replay is decided now, before the exchange takes over the replay due.
+            SettleRepeatReplay();
             exchange = new AskExchange(askId, new AskRecorder(), transcription, _timeProvider.GetTimestamp(), _heardOutput)
             {
                 ReplayDue = _replayOnResume,
