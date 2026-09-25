@@ -2515,6 +2515,87 @@ public sealed class PresenterAskTests
         Assert.DoesNotContain(h.S.Sent, s => s.EventId?.StartsWith("pause-", StringComparison.Ordinal) == true);
     }
 
+    // ---- T8 live-run anomaly: a check-in "Yes" around a voiced model blip ---------------------------------------
+
+    [Theory]
+    [InlineData("blip-then-yes")]
+    [InlineData("yes-then-blip")]
+    public async Task Check_in_yes_counts_when_model_audio_re_enters_answering_around_it(string order)
+    {
+        await using var h = new Harness();
+        await h.ToAwaitingAnswer();
+        // Answer audio begins while the question's own transcript is still arriving (live frames 643.5-644.8 s).
+        h.S.Hear("delivery", 66000, 66200);
+        await h.Settle();
+        await h.Answer();
+        h.S.Hear("And which two products are in active development", 69200, 69400);
+        await h.Settle();
+        await h.Answer();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+        await h.Advance(TimeSpan.FromMilliseconds(2700));
+
+        // The upstream hears the user's audio first, so the model may voice something (no transcript) around the
+        // "Yes" delta: before it (Answering re-entered) or after it (the reply is already open).
+        if (order == "blip-then-yes")
+        {
+            await h.Answer(200);
+            h.S.Hear(" Yes", 75800, 76000);
+            await h.Settle();
+        }
+        else
+        {
+            h.S.Hear(" Yes", 75800, 76000);
+            await h.Settle();
+            await h.Answer(200);
+        }
+
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.Contains("question: confirmed; resuming", h.Logs);
+        Assert.Single(h.S.Sent, IsResumeAfterQuestion);
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 701));
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+        Assert.Single(h.Offs);
+    }
+
+    [Fact]
+    public async Task A_voiced_blip_during_check_in_keeps_the_same_check_in_and_its_timeout()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+        await h.Advance(TimeSpan.FromMilliseconds(2000));
+
+        await h.Answer(200);
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+        Assert.Empty(h.Offs);
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs + 1));
+        Assert.Equal("continued", Assert.Single(h.Offs).Reason);
+        Assert.Single(h.Logs, l => l == "ask: check-in");
+    }
+
+    [Fact]
+    public async Task A_follow_up_answer_wait_starts_before_its_check_in_again()
+    {
+        await using var h = new Harness();
+        await h.ToCheckIn();
+        await h.Reply("next slide");
+        Assert.Contains("ask: unclear check-in reply; follow-up", h.Logs);
+        await h.Advance(TimeSpan.FromMilliseconds(1600));
+
+        // The follow-up's answer is not yet at its check-in: a user delta over it stays UI-only.
+        await h.Answer();
+        h.S.Hear("yes", 0, 100);
+        await h.Settle();
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+
+        Assert.Empty(h.Offs);
+        Assert.Equal(2, h.Logs.Count(l => l == "ask: check-in"));
+    }
+
     // ---- Harness --------------------------------------------------------------------------------------------------
 
     private static bool IsResumeAfterQuestion((string Type, string? Content, string? EventId, string? DelegationId) item) =>

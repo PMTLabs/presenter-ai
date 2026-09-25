@@ -502,6 +502,7 @@ public sealed partial class Presenter
         _latestQuestionEndMs = null;
         _questionOpenedAt = _timeProvider.GetTimestamp();
         exchange.Phase = AskPhase.AwaitingAnswer;
+        exchange.CheckInBegun = false;
         exchange.AwaitingAnswerSince = _timeProvider.GetTimestamp();
         ArmAnswerWait();
         EmitAnswering(exchange);
@@ -586,6 +587,7 @@ public sealed partial class Presenter
     {
         if (_exchange is not { Phase: AskPhase.Answering or AskPhase.CheckIn } exchange) return;
         exchange.Phase = AskPhase.AwaitingAnswer;
+        exchange.CheckInBegun = false;
         if (exchange.UtteranceOpen)
         {
             ResetUtterance();
@@ -594,19 +596,27 @@ public sealed partial class Presenter
         }
     }
 
-    /// <summary>The existing 700 ms quiet after the answer moved to AwaitingCarryOn: the check-in begins (loop time).</summary>
+    /// <summary>
+    /// The existing 700 ms quiet after the answer moved to AwaitingCarryOn: the check-in begins (loop time). Voiced model
+    /// audio after it (a blip, or a reaction to the user's reply before its transcript arrives) re-enters Answering and
+    /// comes back here; that is the same check-in, so it is logged once.
+    /// </summary>
     private void MarkExchangeCheckIn()
     {
         if (_exchange is not { } exchange || exchange.Phase is AskPhase.Listening or AskPhase.Sending) return;
         exchange.Phase = AskPhase.CheckIn;
+        if (exchange.CheckInBegun) return;
+        exchange.CheckInBegun = true;
         LogMessage("info", "ask: check-in");
     }
 
     // ---- Check-in turn-taking (P-13) ------------------------------------------------------------------------------
 
     /// <summary>
-    /// A user delta while an exchange runs. Before CheckIn it is UI-only. In CheckIn it opens a new utterance only after
-    /// <see cref="CheckInQuietMs"/> without any user delta; every other delta stays UI-only and restarts that window.
+    /// A user delta while an exchange runs. Before CheckIn it is UI-only. Once the check-in has begun it opens a new
+    /// utterance only after <see cref="CheckInQuietMs"/> without any user delta; every other delta stays UI-only and
+    /// restarts that window. Model audio that re-enters Answering after the check-in began does not revoke it: the
+    /// upstream hears the user's reply before its transcript arrives and may voice something first (T8 live run).
     /// No upstream timestamp is trusted.
     /// </summary>
     private void OnExchangeUserDelta(AskExchange exchange, TranscriptReceived transcript)
@@ -625,7 +635,9 @@ public sealed partial class Presenter
         var confirming = _pendingTool is not null &&
             _interaction is Interaction.AwaitingConfirmQuestion or Interaction.AwaitingConfirmAnswer &&
             exchange.Phase is AskPhase.AwaitingAnswer or AskPhase.Answering or AskPhase.CheckIn;
-        if ((exchange.Phase == AskPhase.CheckIn || confirming) && quiet)
+        var checkIn = exchange.Phase == AskPhase.CheckIn ||
+            (exchange.CheckInBegun && exchange.Phase == AskPhase.Answering);
+        if ((checkIn || confirming) && quiet)
         {
             ResetUtterance();
             exchange.UtteranceOpen = true;
@@ -741,6 +753,7 @@ public sealed partial class Presenter
         LogMessage("info", "ask: unclear check-in reply; follow-up");
         SetInteraction(Interaction.None);
         exchange.Phase = AskPhase.AwaitingAnswer;
+        exchange.CheckInBegun = false;
         exchange.AwaitingAnswerSince = _timeProvider.GetTimestamp();
         OpenOrExtendQuestionHold(null);
     }
@@ -1141,6 +1154,8 @@ public sealed partial class Presenter
         /// <summary>The confirmation generation an open utterance answers, fixed at its first delta; null for a check-in reply.</summary>
         public long? UtteranceConfirmation { get; set; }
         public bool FollowUpUsed { get; set; }
+        /// <summary>The check-in of the current answer wait began; later model audio re-entering Answering keeps it.</summary>
+        public bool CheckInBegun { get; set; }
         public long LastRevision { get; set; }
         public string? LatestText { get; set; }
         /// <summary>The phrase-stripped question of an ask finished by phrase; logged by length only (P-7).</summary>
@@ -1168,6 +1183,7 @@ public sealed partial class Presenter
             UtteranceOpen = false;
             UtteranceConfirmation = null;
             FollowUpUsed = false;
+            CheckInBegun = false;
             LastRevision = 0;
             LatestText = null;
             Question = null;
