@@ -32,10 +32,15 @@ public sealed partial class Presenter
     /// <summary>§4.1 transcriber port: end of utterance by update time, as the existing assembler does.</summary>
     public const int AskPhraseDebounceMs = 700;
     /// <summary>
-    /// T8 regression fix (2026-09-24): voiced model audio within this long before the burst means the response running
-    /// at Ask start is still streaming; its audio is held until a gap this long (the answer's 700 ms quiet).
+    /// T8 regression fix (2026-09-24): model audio voiced within this long before Ask start (or at all while listening)
+    /// makes the ask a residual candidate; an open residual is held until a voiced gap this long (the answer's 700 ms quiet).
     /// </summary>
     public const int ResidualGapMs = 700;
+    /// <summary>
+    /// A candidate's first voiced frame earlier than this after the send is the rest of the pre-Ask response: residual
+    /// first frames came 64–205 ms after the send, genuine answers never before 1,273 ms (the burst is ingested first).
+    /// </summary>
+    public const int ResidualStartMs = 1_000;
     /// <summary>T8 regression fix: after a <c>limit_sent</c> burst without an answer, the cut-off nudge waits this long.</summary>
     public const int CutOffNudgeMs = 3_000;
     /// <summary>A user delta of the cut-off burst's transcript keeps the nudge at least this far away.</summary>
@@ -55,6 +60,8 @@ public sealed partial class Presenter
     private long _askPhraseGeneration;
     private ITimer? _askCutOffTimer;
     private long _askCutOffGeneration;
+    // Arrival (loop time) of the last voiced model frame of the current session, forwarded or not.
+    private long? _modelVoicedAt;
     // P-13 after the exchange: the last user delta of an ended exchange; deltas chained within CheckInQuietMs of it are
     // still the old question's trail and stay UI-only.
     private long? _askTrailingDeltaAt;
@@ -276,6 +283,8 @@ public sealed partial class Presenter
             _replayOnResumeChanged = false;
             _exchange = exchange;
         }
+
+        MarkResidualCandidate(exchange);
 
         _askTrailingDeltaAt = null;
         _askLateReplyUntil = null;
@@ -526,12 +535,6 @@ public sealed partial class Presenter
         exchange.Phase = AskPhase.AwaitingAnswer;
         exchange.CheckInBegun = false;
         exchange.AwaitingAnswerSince = _timeProvider.GetTimestamp();
-        if (exchange.ModelVoicedAt is { } voicedAt && ElapsedMs(voicedAt) < ResidualGapMs)
-        {
-            exchange.ResidualOpen = true;
-            LogMessage("info", "ask: residual model audio at send; held until a gap");
-        }
-
         ArmAnswerWait();
         if (exchange.SendReason == "limit_sent") ArmAskCutOff(CutOffNudgeMs);
         EmitAnswering(exchange);
@@ -541,37 +544,63 @@ public sealed partial class Presenter
 
     /// <summary>
     /// Work begun before Ask cannot be cancelled upstream (§9.7): the response running at Ask start keeps generating
-    /// while muted, and after the burst the rest of it arrives first. Arrival times only (§9.5). While listening every
-    /// voiced frame's arrival is noted; from a burst sent within <see cref="ResidualGapMs"/> of one, voiced audio is
-    /// residual until the first voiced frame after a gap of at least that long, which is the answer. Returns true when
-    /// the frame is dropped: residual audio is neither forwarded nor taken as the answer. Unvoiced frames of an open
-    /// residual are dropped too, as every frame is while listening: forwarding the stream's silence would queue playback
-    /// and stretch the answer's playback estimate; at worst the answer loses some leading silence.
+    /// while muted, or is held and released after the unmute (T8 row 4); either way the rest of it arrives first after
+    /// the burst. Arrival times only (§9.5). An ask is a candidate when the model was voiced within
+    /// <see cref="ResidualGapMs"/> before Ask start or at all while listening. A candidate's first voiced frame after the
+    /// send decides: earlier than <see cref="ResidualStartMs"/> it opens the residual, later it is the answer. An open
+    /// residual closes at the first voiced frame at least <see cref="ResidualGapMs"/> after the previous post-send voiced
+    /// frame, which is the answer. Returns true when the frame is dropped: residual audio is neither forwarded nor taken
+    /// as the answer. Unvoiced frames of an open residual, and a candidate's unvoiced frames before its first voiced one
+    /// within <see cref="ResidualStartMs"/>, are dropped too, as every frame is while listening: forwarding the stream's
+    /// silence would queue playback and stretch the answer's playback estimate, and no answer arrives that early.
     /// </summary>
     private bool HoldResidualAudio(bool voiced, int bytes)
     {
-        if (_exchange is not { } exchange) return false;
         var now = _timeProvider.GetTimestamp();
+        if (voiced) _modelVoicedAt = now;
+        if (_exchange is not { } exchange) return false;
         if (exchange.Phase is AskPhase.Listening or AskPhase.Sending)
         {
-            // The forwarding gate drops the frame; only its arrival is noted here.
-            if (voiced) exchange.ModelVoicedAt = now;
+            // The forwarding gate drops the frame; a voiced one makes the ask a candidate.
+            if (voiced) exchange.ResidualCandidate = true;
             return false;
         }
 
-        if (exchange.Phase != AskPhase.AwaitingAnswer || !exchange.ResidualOpen) return false;
-        if (voiced && (exchange.ModelVoicedAt is not { } last ||
-            _timeProvider.GetElapsedTime(last, now).TotalMilliseconds >= ResidualGapMs))
+        if (exchange.Phase != AskPhase.AwaitingAnswer || !exchange.ResidualCandidate) return false;
+        if (!exchange.ResidualDecided)
+        {
+            if (_timeProvider.GetElapsedTime(exchange.AwaitingAnswerSince, now).TotalMilliseconds >= ResidualStartMs)
+            {
+                exchange.ResidualDecided = true;
+                return false;
+            }
+
+            if (!voiced) return true;
+            exchange.ResidualDecided = true;
+            exchange.ResidualOpen = true;
+            exchange.ResidualVoicedAt = now;
+            exchange.ResidualDroppedMs += bytes / AskRecorder.BytesPerMs;
+            LogMessage("info", "ask: residual model audio at send; held until a gap");
+            return true;
+        }
+
+        if (!exchange.ResidualOpen) return false;
+        if (voiced && exchange.ResidualVoicedAt is { } last &&
+            _timeProvider.GetElapsedTime(last, now).TotalMilliseconds >= ResidualGapMs)
         {
             exchange.ResidualOpen = false;
             LogMessage("info", $"ask: residual model audio ended; dropped {exchange.ResidualDroppedMs} ms");
             return false;
         }
 
-        if (voiced) exchange.ModelVoicedAt = now;
+        if (voiced) exchange.ResidualVoicedAt = now;
         exchange.ResidualDroppedMs += bytes / AskRecorder.BytesPerMs;
         return true;
     }
+
+    /// <summary>At every Ask start (first or follow-up): model audio voiced just before it makes the ask a candidate.</summary>
+    private void MarkResidualCandidate(AskExchange exchange) =>
+        exchange.ResidualCandidate = _modelVoicedAt is { } voicedAt && ElapsedMs(voicedAt) < ResidualGapMs;
 
     // ---- Cut-off nudge at the cap (T8 regression fix, 2026-09-24) -------------------------------------------------
 
@@ -656,7 +685,7 @@ public sealed partial class Presenter
         }
 
         // T8 regression fix: the response begun before Ask is still streaming; the answer can only follow it.
-        if (exchange.ResidualOpen && exchange.ModelVoicedAt is { } voicedAt && ElapsedMs(voicedAt) < ResidualGapMs &&
+        if (exchange.ResidualOpen && exchange.ResidualVoicedAt is { } voicedAt && ElapsedMs(voicedAt) < ResidualGapMs &&
             since < ceiling)
         {
             LogMessage("info", "ask: residual model audio still arriving; waiting longer for the answer");
@@ -1368,10 +1397,14 @@ public sealed partial class Presenter
         public string? LatestText { get; set; }
         /// <summary>The phrase-stripped question of an ask finished by phrase; logged by length only (P-7).</summary>
         public string? Question { get; set; }
-        /// <summary>Arrival (loop time) of the last voiced model frame of this ask, from listening through an open residual.</summary>
-        public long? ModelVoicedAt { get; set; }
-        /// <summary>The burst went out while the pre-Ask response was still streaming; its audio is held until a gap.</summary>
+        /// <summary>The model was voiced just before this ask's start or while it listened: its early audio may be residual.</summary>
+        public bool ResidualCandidate { get; set; }
+        /// <summary>The first voiced frame after the send decided whether a residual is open (at most once per send).</summary>
+        public bool ResidualDecided { get; set; }
+        /// <summary>The rest of the pre-Ask response is arriving after the send; its audio is held until a gap.</summary>
         public bool ResidualOpen { get; set; }
+        /// <summary>Arrival (loop time) of the last voiced post-send residual frame.</summary>
+        public long? ResidualVoicedAt { get; set; }
         public long ResidualDroppedMs { get; set; }
         /// <summary>When the cut-off nudge of a <c>limit_sent</c> burst is due (loop time).</summary>
         public long? CutOffDueAt { get; set; }
@@ -1408,8 +1441,10 @@ public sealed partial class Presenter
             LastRevision = 0;
             LatestText = null;
             Question = null;
-            ModelVoicedAt = null;
+            ResidualCandidate = false;
+            ResidualDecided = false;
             ResidualOpen = false;
+            ResidualVoicedAt = null;
             ResidualDroppedMs = 0;
             CutOffDueAt = null;
             CutOffNudged = false;

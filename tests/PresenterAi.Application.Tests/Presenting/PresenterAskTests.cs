@@ -514,7 +514,8 @@ public sealed class PresenterAskTests
         await h.ToAwaitingAnswer();
         h.S.RaiseDelegation("responses", "d1");
         await h.Settle();
-        await h.Advance(TimeSpan.FromSeconds(10));
+        // ToAwaitingAnswer already advanced ResidualStartMs past the send; the error still comes 10 s after it.
+        await h.Advance(TimeSpan.FromSeconds(10) - TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
         h.S.RaiseUpstreamError("backend_error", "backend failed");
         await h.Settle();
 
@@ -533,7 +534,8 @@ public sealed class PresenterAskTests
         var gate = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var h = new Harness(registry: Registry(new GateTool("slow", gate.Task)));
         await h.ToAwaitingAnswer();
-        await h.Advance(TimeSpan.FromSeconds(1));
+        // ToAwaitingAnswer already advanced ResidualStartMs past the send; the tool call still comes 1 s after it.
+        await h.Advance(TimeSpan.FromSeconds(1) - TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
         h.S.RaiseToolCall("d1", "c1", "slow", "{}");
         await h.Settle();
 
@@ -1575,6 +1577,8 @@ public sealed class PresenterAskTests
         await h.MicSpeech();
         await h.AskDone();
         Assert.Equal("presenting", h.Presenter.Snapshot().State);
+        // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
 
         await h.Answer();
         var forwarded = h.Forwarded;
@@ -1763,6 +1767,8 @@ public sealed class PresenterAskTests
         await h.MicSpeech();
         await h.AskDone();
         Assert.Contains(h.S.Sent.Skip(before), s => s.Type == "audio");
+        // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
         await h.Answer();
         await h.Advance(TimeSpan.FromMilliseconds(701));
         await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs));
@@ -1788,6 +1794,8 @@ public sealed class PresenterAskTests
         await h.AskStart();
         await h.MicSpeech();
         await h.AskDone();
+        // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
         await h.Answer();
         await h.Advance(TimeSpan.FromMilliseconds(701));
         await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs));
@@ -2345,6 +2353,8 @@ public sealed class PresenterAskTests
         await h.AskStart();
         await h.MicSpeech();
         await h.AskDone();
+        // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
         await h.Answer();
         await h.AskStart();
         await h.MicSpeech();
@@ -2364,6 +2374,8 @@ public sealed class PresenterAskTests
                 break;
             default:
                 await h.AskDone();
+                // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+                await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
                 await h.Answer();
                 await h.Advance(TimeSpan.FromMilliseconds(701));
                 Assert.DoesNotContain(h.S.Sent.Skip(before), s => s.EventId == "slide-1-updated-v6");
@@ -2533,6 +2545,8 @@ public sealed class PresenterAskTests
             await h.AskStart();
             await h.MicSpeech();
             await h.AskDone();
+            // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+            await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
             await h.Answer();
             await h.Advance(TimeSpan.FromMilliseconds(701));
             await h.Advance(TimeSpan.FromMilliseconds(Presenter.DefaultFollowUpWaitMs));
@@ -2805,7 +2819,42 @@ public sealed class PresenterAskTests
         await h.Settle();
         await h.Advance(TimeSpan.FromMilliseconds(300));
         await h.AskDone();
-        Assert.Contains("ask: residual model audio at send; held until a gap", h.Logs);
+    }
+
+    private const string ResidualOpened = "ask: residual model audio at send; held until a gap";
+
+    private static bool Answered(Harness h) =>
+        h.Logs.Any(l => l.StartsWith("question: answered after", StringComparison.Ordinal));
+
+    [Fact]
+    public async Task Rest_of_the_narration_held_while_muted_and_released_after_the_send_is_not_the_answer()
+    {
+        // T8 row 4: narration cut by Ask, nothing voiced while listening, the interrupted word arrived 205 ms after the
+        // send and was taken as the answer; the real answer began at +1.35 s.
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.AskStart();
+        await h.MicSpeech();
+        await h.Advance(TimeSpan.FromMilliseconds(4_400));
+        await h.AskDone();
+        var forwarded = h.Forwarded;
+
+        await h.Advance(TimeSpan.FromMilliseconds(205));
+        h.S.Speak(200);
+        await h.Settle();
+        Assert.Contains(ResidualOpened, h.Logs);
+        Assert.Equal(forwarded, h.Forwarded);
+        Assert.False(Answered(h));
+        await h.Advance(TimeSpan.FromMilliseconds(1_350 - 205));
+        Assert.DoesNotContain("ask: check-in", h.Logs);
+
+        await h.Answer();
+        Assert.Contains("ask: residual model audio ended; dropped 200 ms", h.Logs);
+        Assert.True(h.Forwarded > forwarded);
+        Assert.True(Answered(h));
+        await h.Advance(TimeSpan.FromMilliseconds(701));
+        Assert.Contains("ask: check-in", h.Logs);
+        Assert.Empty(h.Offs);
     }
 
     [Fact]
@@ -2825,39 +2874,60 @@ public sealed class PresenterAskTests
         }
 
         await h.Advance(TimeSpan.FromSeconds(2));
+        Assert.Contains(ResidualOpened, h.Logs);
         Assert.Equal(forwarded, h.Forwarded);
-        Assert.DoesNotContain(h.Logs, l => l.StartsWith("question: answered after", StringComparison.Ordinal));
+        Assert.False(Answered(h));
         Assert.DoesNotContain("ask: check-in", h.Logs);
 
         await h.Answer();
         Assert.Contains("ask: residual model audio ended; dropped 900 ms", h.Logs);
         Assert.True(h.Forwarded > forwarded);
-        Assert.Contains(h.Logs, l => l.StartsWith("question: answered after", StringComparison.Ordinal));
+        Assert.True(Answered(h));
         await h.Advance(TimeSpan.FromMilliseconds(701));
         Assert.Contains("ask: check-in", h.Logs);
         Assert.Empty(h.Offs);
     }
 
     [Theory]
-    [InlineData(Presenter.ResidualGapMs - 1, true)]
-    [InlineData(Presenter.ResidualGapMs + 1, false)]
-    public async Task Model_audio_before_the_send_is_residual_only_within_the_gap(int beforeSendMs, bool residual)
+    [InlineData(Presenter.ResidualStartMs - 1, true)]
+    [InlineData(Presenter.ResidualStartMs, false)]
+    [InlineData(Presenter.ResidualStartMs + 500, false)]
+    public async Task Candidate_first_voiced_frame_before_the_start_window_is_residual_and_from_it_the_answer(int afterSendMs,
+        bool residual)
     {
         await using var h = new Harness();
         await h.StartNarrating();
         await h.AskStart();
         await h.MicSpeech();
-        h.S.Speak(200);
-        await h.Settle();
-        await h.Advance(TimeSpan.FromMilliseconds(beforeSendMs));
         await h.AskDone();
         var forwarded = h.Forwarded;
 
+        await h.Advance(TimeSpan.FromMilliseconds(afterSendMs));
         await h.Answer();
 
-        Assert.Equal(residual, h.Logs.Contains("ask: residual model audio at send; held until a gap"));
+        Assert.Equal(residual, h.Logs.Contains(ResidualOpened));
         Assert.Equal(residual, h.Forwarded == forwarded);
-        Assert.Equal(!residual, h.Logs.Any(l => l.StartsWith("question: answered after", StringComparison.Ordinal)));
+        Assert.Equal(!residual, Answered(h));
+    }
+
+    [Fact]
+    public async Task Model_silent_before_ask_start_and_while_listening_makes_early_audio_the_answer()
+    {
+        await using var h = new Harness();
+        await h.StartNarrating();
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.ResidualGapMs + 1));
+        await h.AskStart();
+        await h.MicSpeech();
+        await h.Advance(TimeSpan.FromSeconds(2));
+        await h.AskDone();
+        var forwarded = h.Forwarded;
+
+        await h.Advance(TimeSpan.FromMilliseconds(100));
+        await h.Answer();
+
+        Assert.DoesNotContain(ResidualOpened, h.Logs);
+        Assert.True(h.Forwarded > forwarded);
+        Assert.True(Answered(h));
     }
 
     [Fact]
@@ -2881,7 +2951,7 @@ public sealed class PresenterAskTests
 
         Assert.Equal("continued", Assert.Single(h.Offs).Reason);
         Assert.Contains("ask: no answer within 75 s", h.Logs);
-        Assert.DoesNotContain(h.Logs, l => l.StartsWith("question: answered after", StringComparison.Ordinal));
+        Assert.False(Answered(h));
     }
 
     [Theory]
@@ -2895,6 +2965,7 @@ public sealed class PresenterAskTests
         h.S.Speak(200);
         await h.Settle();
         Assert.Equal(forwarded, h.Forwarded);
+        Assert.Contains(ResidualOpened, h.Logs);
 
         if (how == "navigate")
         {
@@ -2904,20 +2975,37 @@ public sealed class PresenterAskTests
             h.S.Speak(100);
             await h.Settle();
             await h.Advance(TimeSpan.FromSeconds(1));
+            await h.AskStart();
+            await h.MicSpeech();
+            await h.Advance(TimeSpan.FromSeconds(1));
+            await h.AskDone();
+            forwarded = h.Forwarded;
+            await h.Answer();
+
+            // Not a candidate: the next answer is heard at once and closes no stale residual.
+            Assert.Single(h.Logs, l => l == ResidualOpened);
+            Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: residual model audio ended", StringComparison.Ordinal));
+        }
+        else
+        {
+            // The follow-up is a candidate of its own: its residual is decided and counted afresh.
+            await h.AskStart();
+            await h.MicSpeech();
+            await h.Advance(TimeSpan.FromSeconds(1));
+            await h.AskDone();
+            h.S.Speak(200);
+            await h.Settle();
+            Assert.Equal(2, h.Logs.Count(l => l == ResidualOpened));
+            await h.Advance(TimeSpan.FromSeconds(1));
+            forwarded = h.Forwarded;
+            await h.Answer();
+
+            Assert.Single(h.Logs, l => l.StartsWith("ask: residual model audio ended", StringComparison.Ordinal));
+            Assert.Contains("ask: residual model audio ended; dropped 200 ms", h.Logs);
         }
 
-        await h.AskStart();
-        await h.MicSpeech();
-        await h.Advance(TimeSpan.FromSeconds(1));
-        await h.AskDone();
-        forwarded = h.Forwarded;
-        await h.Answer();
-
-        Assert.Single(h.Logs, l => l == "ask: residual model audio at send; held until a gap");
-        // The first ask's residual went with it: the next answer does not close it.
-        Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: residual model audio ended", StringComparison.Ordinal));
         Assert.True(h.Forwarded > forwarded);
-        Assert.Contains(h.Logs, l => l.StartsWith("question: answered after", StringComparison.Ordinal));
+        Assert.True(Answered(h));
     }
 
     /// <summary>Talk → Ask → speech past the 25 s cap: the burst goes out with <c>limit_sent</c>.</summary>
@@ -3250,6 +3338,8 @@ public sealed class PresenterAskTests
             await AskStart();
             await MicSpeech();
             await AskDone();
+            // A real answer cannot arrive before the burst is ingested (T8: at least 1.27 s).
+            await Advance(TimeSpan.FromMilliseconds(Presenter.ResidualStartMs));
             Assert.Equal("answering", AskStates[^1].State);
         }
 
