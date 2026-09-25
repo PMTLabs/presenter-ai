@@ -3054,6 +3054,30 @@ public sealed class PresenterAskTests
     }
 
     [Fact]
+    public async Task A_late_cut_off_nudge_gives_the_model_a_fresh_answer_budget()
+    {
+        // T8 re-run: the burst's transcript streamed for about 8 s, the nudge came at +10.3 s and the 15 s budget ended
+        // the exchange 4.7 s later with no answer.
+        await using var h = new Harness();
+        await ToCapSent(h);
+        for (var i = 0; i < 6; i++)
+        {
+            await h.Advance(TimeSpan.FromMilliseconds(1_500));
+            h.S.Hear("more of the question", 0, 100);
+            await h.Settle();
+        }
+
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.CutOffQuietMs));
+        Assert.Equal(1, CutOffs(h));
+
+        // 15 s after the send the old budget would have given up; the fresh one runs from the nudge (+11 s).
+        await h.Advance(TimeSpan.FromMilliseconds(Presenter.AnswerStartBudgetMs - 11_000 + 1));
+        Assert.DoesNotContain(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
+        await h.Advance(TimeSpan.FromMilliseconds(11_000));
+        Assert.Contains(h.Logs, l => l.StartsWith("ask: no answer within", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Answer_before_the_cut_off_nudge_cancels_it()
     {
         await using var h = new Harness();

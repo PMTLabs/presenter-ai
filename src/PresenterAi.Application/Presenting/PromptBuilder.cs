@@ -183,10 +183,12 @@ public static class PromptBuilder
 
     /// <summary>
     /// T8 regression fix: a question sent at the speech cap ends mid-sentence and the model waits for the rest. No quoted
-    /// phrase: a quote is spoken verbatim whatever the talk's language (as the edit-pending notice was, T13).
+    /// phrase: a quote is spoken verbatim whatever the talk's language (as the edit-pending notice was, T13). After the
+    /// Ask's <see cref="PauseInstruction"/> only an explicit "now" moved the model (see <see cref="ResumeAfterAskInstruction"/>);
+    /// the T8 re-run showed a descriptive nudge left it silent too.
     /// </summary>
     public static string AskCutOffInstruction() =>
-        "The listener's question was cut off at the time limit. In the language of the talk, answer what you heard in one to three sentences; if you cannot tell what they asked, ask them briefly to repeat the question.";
+        "The listener has finished speaking; their question was cut off at the time limit. Answer it now, in the language of the talk, in one to three sentences from what you heard; if you cannot tell what they asked, ask them briefly to repeat the question. Then stop and wait.";
 
     public static string EndConfirmationInstruction() =>
         "Ask the audience briefly: Shall I end the presentation now? Then wait for their answer. Do not end the talk yourself.";

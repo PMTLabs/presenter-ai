@@ -635,6 +635,10 @@ public sealed partial class Presenter
         exchange.CutOffNudged = true;
         _session?.AppendInstructions(PromptBuilder.AskCutOffInstruction(), $"{exchange.Id}-cut-off");
         LogMessage("info", "ask: question cut off at the cap; asked the model to answer what it heard");
+        // The nudge waits out the burst's transcript (about 10 s after a 25 s burst, T8 re-run): the model gets a fresh
+        // answer budget from here, never past the ceiling.
+        var since = _timeProvider.GetElapsedTime(exchange.AwaitingAnswerSince).TotalMilliseconds;
+        ArmAskBudget(Math.Max(0, Math.Min(AnswerStartBudgetMs, AnswerStartBudgetMs + AnswerCeilingExtraMs - since)));
     }
 
     private void StopAskCutOff()

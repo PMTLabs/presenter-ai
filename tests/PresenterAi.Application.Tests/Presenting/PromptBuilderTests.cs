@@ -87,6 +87,9 @@ public sealed class PromptBuilderTests
 
         Assert.Contains("in the language of the talk", instruction, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("repeat the question", instruction);
+        // T8 re-run: after the Ask's PauseInstruction only an explicit "now" made the model speak.
+        Assert.Contains("Answer it now", instruction);
+        Assert.EndsWith("Then stop and wait.", instruction);
         Assert.DoesNotContain("\"", instruction);
         Assert.DoesNotContain("Say:", instruction);
     }
