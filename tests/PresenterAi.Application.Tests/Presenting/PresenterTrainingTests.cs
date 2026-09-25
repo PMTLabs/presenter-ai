@@ -686,6 +686,113 @@ public sealed class PresenterTrainingTests
         Assert.Equal(replays, h.S.Sent.Count(s => s.EventId == "slide-1-part-1"));
     }
 
+    // ---- Repeat replay gated on narration coverage (T13 live run on 889e61f: the slide was spoken twice) ------------
+
+    private const string NewNarration = "Slide one, new text. The program started in 2020 and grew every year since then.";
+
+    /// <summary>Confirms and applies an edit of slide 1, with the model's transcript before and after the replay, in small deltas.</summary>
+    private static async Task<string> ApplyAndNarrate(Harness h, string? spokenBefore, string? spokenAfter)
+    {
+        var id = await h.ConfirmEdit();
+        if (spokenBefore is not null) ModelSays(h, spokenBefore);
+        await h.Apply(id, 6, "Added figures", (0, NewNarration));
+        if (spokenAfter is not null) ModelSays(h, spokenAfter);
+        h.S.Speak(200);
+        await h.Settle();
+        return id;
+    }
+
+    private static void ModelSays(Harness h, string text)
+    {
+        for (var i = 0; i < text.Length; i += 7) h.S.ModelTranscript(text.Substring(i, Math.Min(7, text.Length - i)));
+    }
+
+    [Fact]
+    public async Task Repeated_request_after_the_replay_was_spoken_in_full_resumes_without_a_second_replay()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        var id = await ApplyAndNarrate(h, null, NewNarration);
+
+        await RepeatRequest(h, "c2");
+        Assert.Equal("already_done", JsonNode.Parse(h.S.Sent.Single(s => s.EventId == "c2").Content!)!["status"]?.ToString());
+        Assert.Contains($"edit: repeated request for {id} (already applied)", h.Logs);
+        var sent = h.S.Sent.Count;
+        await AnswerAndGoQuiet(h, "c2");
+
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.DoesNotContain(after, s => s.EventId == "slide-1-part-1");
+        Assert.Single(after, s => s.Content == PromptBuilder.ResumeAfterQuestionInstruction());
+        Assert.Contains("edit: slide 1 was spoken in full (coverage 100%); no replay", h.Logs);
+    }
+
+    [Theory]
+    [InlineData(null, "Slide one, new text. The program started in")]
+    [InlineData(null, "I added that the program started in 2020 and grew every year since then.")]
+    [InlineData(NewNarration, null)]
+    public async Task Repeated_request_before_the_slide_was_spoken_in_full_replays_it_once(string? spokenBefore, string? spokenAfter)
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        await ApplyAndNarrate(h, spokenBefore, spokenAfter);
+
+        await RepeatRequest(h, "c2");
+        var sent = h.S.Sent.Count;
+        await AnswerAndGoQuiet(h, "c2");
+
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.Contains(NewNarration, Assert.Single(after, s => s.EventId == "slide-1-part-1").Content);
+        Assert.DoesNotContain(after, s => s.Content == PromptBuilder.ResumeAfterQuestionInstruction());
+        Assert.Contains(h.Logs, l => l.StartsWith("edit: slide 1 not spoken in full", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Repeated_request_then_pause_and_resume_settles_the_replay_on_resume(bool spokenInFull)
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        await ApplyAndNarrate(h, null, spokenInFull ? NewNarration : "Slide one, new text.");
+        await RepeatRequest(h, "c2");
+        var sent = h.S.Sent.Count;
+
+        Assert.True(await h.Presenter.PauseAsync());
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+
+        Assert.Equal(spokenInFull ? 0 : 1, h.S.Sent.Skip(sent).Count(s => s.EventId == "slide-1-part-1"));
+        Assert.Contains(h.Logs, l => l.StartsWith(
+            spokenInFull ? "edit: slide 1 was spoken in full" : "edit: slide 1 not spoken in full", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Repeated_request_then_navigation_leaves_no_replay_for_the_next_slide()
+    {
+        await using var h = new Harness();
+        await h.Start();
+        await h.TrainerOn();
+        await ApplyAndNarrate(h, null, "Slide one, new text.");
+        await RepeatRequest(h, "c2");
+        var sent = h.S.Sent.Count;
+
+        Assert.True(await h.Presenter.NextAsync());
+        await h.Settle();
+        h.S.Speak(200);
+        await h.Settle();
+        Assert.True(await h.Presenter.PauseAsync());
+        Assert.True(await h.Presenter.ResumeAsync());
+        await h.Settle();
+
+        var after = h.S.Sent.Skip(sent).ToArray();
+        Assert.DoesNotContain(after, s => s.EventId == "slide-1-part-1");
+        Assert.Single(after, s => s.EventId == "slide-2-part-1");
+        Assert.DoesNotContain(h.Logs, l => l.Contains("spoken in full", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Applied_while_paused_replays_on_resume()
     {
